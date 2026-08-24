@@ -23,12 +23,12 @@ Updated: 2026-08-24. This section is the live execution record; tasks are not tr
 | 3. Private SQLite store | Accepted | `c23f51f`, `293753b`; specification and quality reviews passed. |
 | 4. Retrieval and retention | Accepted | `59a55fc` through `bba542d`; specification and quality reviews passed. |
 | 5. Repository knowledge format | Accepted and merged into this branch | `10b5f9a` through `1605a49`; specification and quality reviews passed. |
-| 6. CLI and integration fixtures | Quality review requires correction | `fa01006`, `ffa9da4`; fresh `pnpm check` passed with 49 tests. Required fixes: executable `ael` entrypoint and human-readable successful output without `--json`. |
+| 6. CLI and integration fixtures | Corrected; awaiting repeated quality review | `fa01006`, `ffa9da4`, `5b31ac5`; fresh `pnpm check` passed with 51 tests. The package now exposes `ael` and uses human-readable output unless `--json` is requested. |
 | 7. Verification evidence | Pending | Starts after Task 6 is accepted. |
 
-Current full verification: `pnpm check` passed on 2026-08-24 with 49 tests, 0 failures.
+Current full verification: `pnpm check` passed on 2026-08-24 with 51 tests, 0 failures.
 
-Task 6 review state: specification review accepted `ffa9da4`; quality review requires an `ael` bin entrypoint and command-specific human rendering when `--json` is absent. The next action is TDD correction and repeated quality review.
+Task 6 review state: the `ael` entrypoint and human rendering were added in `5b31ac5`. The next action is repeated quality review.
 
 Milestone 1 work outside this local-core plan remains pending: the three source adapters, sanitizer, manual review runtime, reviewer orchestration, candidate-lesson and proposal generation, and the expanded benchmark fixtures.
 
