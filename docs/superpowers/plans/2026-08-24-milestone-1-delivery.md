@@ -11,7 +11,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 | 3. Privacy scrubber and artifact boundary | completed | `96c959a`; independent `pnpm check` 71 passed and diff check passed. |
 | 4. Manual review CLI and profile runtime | completed | `7f837e8`, `9bee20b`; independent `pnpm check` 78 passed. |
 | 5. Parallel orchestration, candidates and proposals | completed | `66cfe7a`, `e0deb53`; independent `pnpm check` 84 passed and diff check passed. |
-| 6. Milestone acceptance, review and merge | in progress | Follow-up fixes `ffeaeef`, `a65a4ea`; independent offline suite 100 passed; final approval pending. |
+| 6. Milestone acceptance, review and merge | in progress | Second gate requires canonical private-key/file-URI coverage, safe Cursor discovery, evidence-based built-in review, and CLI discovery/latest behavior. |
 
 ### Task 1: Delivery design and executable contracts
 
