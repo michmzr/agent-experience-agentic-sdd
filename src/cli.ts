@@ -12,12 +12,15 @@ interface ParsedArguments { readonly positionals: string[]; readonly options: Ma
 
 const scopes = new Set(['global', 'repo'] as const);
 const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired']);
+const reviewSources = new Set(['codex', 'claude-code', 'cursor'] as const);
 
 export function runCli(args: string[]): CliResult {
   if (args.length === 1 && args[0] === '--help') return { exitCode: 0, stdout: `${usage()}\n`, stderr: '' };
   try {
     const parsed = parseArguments(args);
     const json = parsed.options.has('json');
+    const review = executeReviewCommand(parsed);
+    if (review !== undefined) return success(review, json, parsed.positionals);
     const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
     return success(execute(service, parsed), json, parsed.positionals);
   } catch (error) {
@@ -61,6 +64,24 @@ function execute(service: ExperienceService, parsed: ParsedArguments): unknown {
   throw new SyntaxError(`Unknown command: ${[command, subcommand, ...rest].filter(Boolean).join(' ')}`);
 }
 
+function executeReviewCommand(parsed: ParsedArguments): unknown | undefined {
+  const [command, subcommand, ...rest] = parsed.positionals;
+  if (command !== 'review') return undefined;
+  if (subcommand !== 'session' || rest.length !== 0) {
+    throw new SyntaxError(`Unknown command: ${[command, subcommand, ...rest].filter(Boolean).join(' ')}`);
+  }
+  assertNoUnknownOptions(parsed.options, ['json', 'source', 'session', 'allow-expensive-checks']);
+  const source = requiredReviewSource(parsed.options);
+  const session = requiredString(parsed.options, 'session');
+  if (session === 'latest') throw new SyntaxError('Review requires an explicit --session value, not latest.');
+  return {
+    review: 'validated',
+    source,
+    session,
+    allowExpensiveChecks: parsed.options.has('allow-expensive-checks')
+  };
+}
+
 function parseArguments(args: readonly string[]): ParsedArguments {
   const positionals: string[] = []; const options = new Map<string, string | true>();
   for (let index = 0; index < args.length; index += 1) {
@@ -69,7 +90,7 @@ function parseArguments(args: readonly string[]): ParsedArguments {
     if (!value.startsWith('--')) { positionals.push(value); continue; }
     const name = value.slice(2); if (!name) throw new SyntaxError('Option name is required.');
     if (options.has(name)) throw new SyntaxError(`Option may be supplied once: --${name}.`);
-    if (name === 'json') { options.set(name, true); continue; }
+    if (name === 'json' || name === 'allow-expensive-checks') { options.set(name, true); continue; }
     const optionValue = args[index + 1]; if (!optionValue || optionValue.startsWith('--')) throw new SyntaxError(`Option requires a value: --${name}.`);
     options.set(name, optionValue); index += 1;
   }
@@ -84,6 +105,13 @@ function optionalString(options: Map<string, string | true>, name: string): stri
 }
 function requiredString(options: Map<string, string | true>, name: string): string {
   const value = optionalString(options, name); if (value === undefined) throw new SyntaxError(`Option is required: --${name}.`); return value;
+}
+function requiredReviewSource(options: Map<string, string | true>): typeof reviewSources extends Set<infer Value> ? Value : never {
+  const source = requiredString(options, 'source');
+  if (!reviewSources.has(source as typeof reviewSources extends Set<infer Value> ? Value : never)) {
+    throw new SyntaxError('Source must be codex, claude-code, or cursor.');
+  }
+  return source as typeof reviewSources extends Set<infer Value> ? Value : never;
 }
 function optionalScope(options: Map<string, string | true>): KnowledgeScope | undefined {
   const scope = optionalString(options, 'scope'); if (scope === undefined) return undefined; if (!scopes.has(scope as typeof scopes extends Set<infer Value> ? Value : never)) throw new SyntaxError('Scope must be global or repo.'); return scope === 'repo' ? 'repository' : 'global';
@@ -106,6 +134,7 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
     const knowledge = (value as { knowledge: KnowledgeRecord[] }).knowledge;
     return `Exported ${countLabel(knowledge.length, 'knowledge entry')}.${knowledge.length ? `\n${formatKnowledgeList(knowledge)}` : ''}`;
   }
+  if (command === 'review' && subcommand === 'session') return 'Review request validated. Session data was not read.';
   return JSON.stringify(value);
 }
 interface KnowledgeRecord { readonly id: string; readonly state: string; readonly statement: string; readonly evidenceIds: readonly string[]; readonly authoritative?: boolean; }
