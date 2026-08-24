@@ -28,7 +28,7 @@ Updated: 2026-08-24. This section is the live execution record; tasks are not tr
 
 Current full verification: `pnpm check` passed on 2026-08-24 with 52 tests, 0 failures.
 
-Task 6 review state: specification and repeated quality reviews accepted the implementation. Task 7 verification evidence is active.
+Task 6 review state: specification and repeated quality reviews accepted the implementation. Task 7 verification evidence is accepted in `7950fb1`; all tasks in this local-core plan are complete.
 
 Milestone 1 work outside this local-core plan remains pending: the three source adapters, sanitizer, manual review runtime, reviewer orchestration, candidate-lesson and proposal generation, and the expanded benchmark fixtures.
 
