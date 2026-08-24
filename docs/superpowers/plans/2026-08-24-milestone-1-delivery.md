@@ -6,8 +6,8 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 
 | Task | State | Verification / commit |
 | --- | --- | --- |
-| 1. Delivery design and executable contracts | in progress | Design and source boundaries verified; `9ce0d20` adds contracts, `pnpm check` 56 passed. |
-| 2. Source adapters and deterministic fixtures | pending | Not started. |
+| 1. Delivery design and executable contracts | completed | Design and source boundaries verified; `9ce0d20` adds contracts, `pnpm check` 56 passed. |
+| 2. Source adapters and deterministic fixtures | in progress | Codex, Claude Code and Cursor adapters dispatched. |
 | 3. Privacy scrubber and artifact boundary | pending | Not started. |
 | 4. Manual review CLI and profile runtime | pending | Not started. |
 | 5. Parallel orchestration, candidates and proposals | pending | Not started. |
