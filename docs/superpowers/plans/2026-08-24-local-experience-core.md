@@ -20,15 +20,15 @@ Updated: 2026-08-24. This section is the live execution record; tasks are not tr
 | --- | --- | --- |
 | 1. Bootstrap | Accepted | `3d82da0`, `b95222a`; specification and quality reviews passed. |
 | 2. Domain model | Accepted | `1bdb31b` through `4691fb3`; specification and quality reviews passed. |
-| 3. Private SQLite store | Accepted | `c23f51f`, `293753b`; specification and quality reviews passed. |
+| 3. Private SQLite store | Regression requires correction | Final review found that persisted contradictory evidence does not apply the lifecycle transition or record history. |
 | 4. Retrieval and retention | Accepted | `59a55fc` through `bba542d`; specification and quality reviews passed. |
 | 5. Repository knowledge format | Accepted and merged into this branch | `10b5f9a` through `1605a49`; specification and quality reviews passed. |
 | 6. CLI and integration fixtures | Accepted | `fa01006`, `ffa9da4`, `5b31ac5`, `c11538c`; specification and quality reviews passed. Fresh `pnpm check` passed with 52 tests. |
-| 7. Verification evidence | Accepted | Completed 2026-08-24 16:17:22 CEST: fresh offline-oriented `pnpm check` reported 52 passing tests and a no-match network/LLM static scan; staged review found only the verification record and execution-plan update, with no whitespace errors or credentials. Evidence commit: `7950fb1`. |
+| 7. Verification evidence | Requires refresh after lifecycle correction | Completed 2026-08-24 16:17:22 CEST: fresh offline-oriented `pnpm check` reported 52 passing tests and a no-match network/LLM static scan; final review found missing persisted-lifecycle coverage. Evidence commit: `7950fb1`. |
 
 Current full verification: `pnpm check` passed on 2026-08-24 with 52 tests, 0 failures.
 
-Task 6 review state: specification and repeated quality reviews accepted the implementation. Task 7 verification evidence is accepted in `7950fb1`; all tasks in this local-core plan are complete.
+Task 6 review state: specification and repeated quality reviews accepted the implementation. Final review found a persisted-lifecycle regression in Task 3: contradictory evidence must move active knowledge to `disputed` and append lifecycle history. The next action is a TDD correction, repeated Task 3 reviews, and refreshed Task 7 evidence.
 
 Milestone 1 work outside this local-core plan remains pending: the three source adapters, sanitizer, manual review runtime, reviewer orchestration, candidate-lesson and proposal generation, and the expanded benchmark fixtures.
 
