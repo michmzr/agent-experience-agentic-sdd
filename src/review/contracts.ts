@@ -3,6 +3,7 @@ import type { AgentSource } from '../domain/types.js';
 export type SessionArtifactFormat = 'observed-jsonl' | 'jsonl' | 'markdown-export';
 
 export interface SessionArtifact {
+  readonly source: AgentSource;
   readonly id: string;
   readonly location: string;
   readonly format: SessionArtifactFormat;

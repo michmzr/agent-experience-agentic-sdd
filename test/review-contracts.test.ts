@@ -6,7 +6,7 @@ import { normalizeSession, selectSessionArtifact } from '../src/review/contracts
 test('normalizes a selected local artifact without retaining its raw payload', () => {
   const session = normalizeSession({
     source: 'codex',
-    artifact: { id: 'session-1', location: '/fixture/session.jsonl', format: 'observed-jsonl', repositoryHint: '/repo' },
+    artifact: { source: 'codex', id: 'session-1', location: '/fixture/session.jsonl', format: 'observed-jsonl', repositoryHint: '/repo' },
     records: [
       { kind: 'tool', occurredAt: '2026-08-24T10:00:00.000Z', tool: 'pnpm', exitStatus: 0, payload: 'token=top-secret' },
       { kind: 'message', occurredAt: '2026-08-24T10:01:00.000Z', payload: 'private prompt' }
@@ -30,7 +30,7 @@ test('requires an explicit artifact in non-interactive mode', () => {
 
 test('rejects unsupported records without leaking their raw values', () => {
   assert.throws(
-    () => normalizeSession({ source: 'cursor', artifact: { id: 'session-1', location: '/fixture/session.md', format: 'markdown-export' }, records: [{ kind: 'unknown', occurredAt: '2026-08-24T10:00:00.000Z', payload: 'sensitive-value' }] }),
+    () => normalizeSession({ source: 'cursor', artifact: { source: 'cursor', id: 'session-1', location: '/fixture/session.md', format: 'markdown-export' }, records: [{ kind: 'unknown', occurredAt: '2026-08-24T10:00:00.000Z', payload: 'sensitive-value' }] }),
     (error: unknown) => error instanceof Error && error.message.includes('Unsupported session record') && !error.message.includes('sensitive-value')
   );
 });
