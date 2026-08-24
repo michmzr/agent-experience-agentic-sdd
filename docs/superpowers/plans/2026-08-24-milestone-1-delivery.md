@@ -11,7 +11,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 | 3. Privacy scrubber and artifact boundary | completed | `96c959a`; independent `pnpm check` 71 passed and diff check passed. |
 | 4. Manual review CLI and profile runtime | completed | `7f837e8`, `9bee20b`; independent `pnpm check` 78 passed. |
 | 5. Parallel orchestration, candidates and proposals | completed | `66cfe7a`, `e0deb53`; independent `pnpm check` 84 passed and diff check passed. |
-| 6. Milestone acceptance, review and merge | in progress | Second-gate fixes `00569d7`, `5d90a6e`, `17e2449`; independent suite 105 passed; repeat final approval pending. |
+| 6. Milestone acceptance, review and merge | in progress | Review-output privacy fixed in `c332adc` and command-specific CLI options fixed in `7f610d6`; full `pnpm check` 108 passed, 0 failed. Final approval pending. |
 
 ### Task 1: Delivery design and executable contracts
 
@@ -54,6 +54,8 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 
 - [x] Add or update quality fixtures for all Milestone 1 acceptance paths: `6d0045b`, independently verified at 85 passed, 0 failed.
 - [x] Run offline verification and security/privacy scans: 92 passed, 0 failed; diff check clean; no production network/process client matches.
+- [x] Close third-gate review-output privacy finding: `c332adc`; focused privacy tests 2 passed, full `pnpm check` 108 passed, 0 failed; raw selected session identifiers and public discovery locations are absent from output.
+- [x] Close third-gate command-specific CLI allowlist finding: `7f610d6`; RED proved that `review sessions` accepted `--session` and `--allow-expensive-checks`, and GREEN focused coverage plus full `pnpm check` passed 108 tests, 0 failed. The distinct allowlist now returns exit code 2 with `INVALID_SYNTAX: Unsupported option` for both flags.
 - [ ] Obtain fresh implementation review and resolve all required findings.
 - [ ] Mark `docs/product/roadmap.md` Milestone 1 complete only after all gates pass.
 - [ ] Merge the reviewed feature branch into local `main` and record the merge SHA.
