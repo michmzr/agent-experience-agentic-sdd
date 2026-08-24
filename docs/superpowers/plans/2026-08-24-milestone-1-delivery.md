@@ -11,7 +11,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 | 3. Privacy scrubber and artifact boundary | completed | `96c959a`; independent `pnpm check` 71 passed and diff check passed. |
 | 4. Manual review CLI and profile runtime | completed | `7f837e8`, `9bee20b`; independent `pnpm check` 78 passed. |
 | 5. Parallel orchestration, candidates and proposals | completed | `66cfe7a`, `e0deb53`; independent `pnpm check` 84 passed and diff check passed. |
-| 6. Milestone acceptance, review and merge | in progress | Acceptance fixtures and independent final review started. |
+| 6. Milestone acceptance, review and merge | in progress | Acceptance fixtures and privacy review active; current offline suite 84 passed; status-reporting rule fixed in `c3c9cf5`. |
 
 ### Task 1: Delivery design and executable contracts
 
