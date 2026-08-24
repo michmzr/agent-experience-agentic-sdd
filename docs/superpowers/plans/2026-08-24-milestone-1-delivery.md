@@ -11,7 +11,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 | 3. Privacy scrubber and artifact boundary | completed | `96c959a`; independent `pnpm check` 71 passed and diff check passed. |
 | 4. Manual review CLI and profile runtime | completed | `7f837e8`, `9bee20b`; independent `pnpm check` 78 passed. |
 | 5. Parallel orchestration, candidates and proposals | completed | `66cfe7a`, `e0deb53`; independent `pnpm check` 84 passed and diff check passed. |
-| 6. Milestone acceptance, review and merge | in progress | Acceptance fixtures and privacy review active; current offline suite 84 passed; status-reporting rule fixed in `c3c9cf5`. |
+| 6. Milestone acceptance, review and merge | in progress | Fixture `6d0045b` passes 85 tests; review found required CLI vertical-slice and configured-pattern fixes. |
 
 ### Task 1: Delivery design and executable contracts
 
@@ -52,7 +52,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 
 ### Task 6: Milestone acceptance, review and merge
 
-- [ ] Add or update quality fixtures for all Milestone 1 acceptance paths.
+- [x] Add or update quality fixtures for all Milestone 1 acceptance paths: `6d0045b`, independently verified at 85 passed, 0 failed.
 - [ ] Run offline verification and security/privacy scans.
 - [ ] Obtain fresh implementation review and resolve all required findings.
 - [ ] Mark `docs/product/roadmap.md` Milestone 1 complete only after all gates pass.
