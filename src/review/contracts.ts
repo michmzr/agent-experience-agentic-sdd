@@ -2,6 +2,8 @@ import type { AgentSource } from '../domain/types.js';
 
 export type SessionArtifactFormat = 'observed-jsonl' | 'jsonl' | 'markdown-export';
 
+export const MAX_SESSION_EVENT_TEXT_LENGTH = 4096;
+
 export interface SessionArtifact {
   readonly source: AgentSource;
   readonly id: string;
@@ -15,6 +17,7 @@ export interface LocalSessionRecord {
   readonly occurredAt: string;
   readonly tool?: string;
   readonly exitStatus?: number;
+  readonly text?: string;
   readonly payload?: unknown;
 }
 
@@ -24,6 +27,7 @@ export interface NormalizedSessionEvent {
   readonly occurredAt: string;
   readonly tool?: string;
   readonly exitStatus?: number;
+  readonly text?: string;
   readonly outcome: 'passed' | 'failed' | 'unknown';
 }
 
@@ -58,13 +62,16 @@ export function normalizeSession(input: NormalizeSessionInput): NormalizedSessio
 function normalizeRecord(sessionId: string, record: LocalSessionRecord, index: number): NormalizedSessionEvent {
   if (!['tool', 'message', 'metadata'].includes(record.kind)) throw new Error('Unsupported session record.');
   if (!Number.isFinite(Date.parse(record.occurredAt))) throw new Error('Session record timestamp is invalid.');
+  if (record.text !== undefined && typeof record.text !== 'string') throw new Error('Session record text is invalid.');
   const outcome = record.exitStatus === undefined ? 'unknown' : record.exitStatus === 0 ? 'passed' : 'failed';
+  const text = record.text?.trim().slice(0, MAX_SESSION_EVENT_TEXT_LENGTH);
   return {
     id: `${sessionId}:${index}`,
     kind: record.kind as NormalizedSessionEvent['kind'],
     occurredAt: record.occurredAt,
     ...(record.tool ? { tool: record.tool } : {}),
     ...(record.exitStatus === undefined ? {} : { exitStatus: record.exitStatus }),
+    ...(text ? { text } : {}),
     outcome
   };
 }

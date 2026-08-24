@@ -61,7 +61,13 @@ export function readCursorMarkdownExport(artifact: SessionArtifact, root: string
   let contents: string;
   try { contents = readFileSync(location, 'utf8'); }
   catch { throw new Error('Cursor export could not be read.'); }
-  const headings = contents.match(/^##\s+(?:User|Assistant)\s*$/gim) ?? [];
+  const headings = [...contents.matchAll(/^##\s+(?:User|Assistant)\s*$/gim)];
   if (headings.length === 0) throw new Error('Cursor export contains no supported message headings.');
-  return normalizeSession({ source: 'cursor', artifact, records: headings.map(() => ({ kind: 'message', occurredAt })) });
+  const records = headings.map((heading, index) => {
+    const start = (heading.index ?? 0) + heading[0].length;
+    const end = headings[index + 1]?.index ?? contents.length;
+    const text = contents.slice(start, end).trim();
+    return { kind: 'message', occurredAt, ...(text ? { text } : {}) };
+  });
+  return normalizeSession({ source: 'cursor', artifact, records });
 }

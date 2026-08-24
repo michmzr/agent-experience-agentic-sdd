@@ -31,7 +31,7 @@ test('discovers only direct Claude Code transcript JSONL files and rejects symli
   assert.equal(artifacts[0]?.location.includes(configDir), true);
 });
 
-test('normalizes supported Claude Code message, tool and metadata records without raw payloads', async () => {
+test('normalizes allowlisted Claude Code evidence text without retaining unrelated metadata', async () => {
   const { configDir, project, projectRoot } = await fixtureProject();
   const artifactPath = join(projectRoot, 'session-a.jsonl');
   await writeFile(artifactPath, [
@@ -46,13 +46,13 @@ test('normalizes supported Claude Code message, tool and metadata records withou
   assert.deepEqual(session, {
     source: 'claude-code', sessionId: 'session-a', startedAt: '2026-08-24T10:00:00.000Z', endedAt: '2026-08-24T10:02:00.000Z',
     events: [
-      { id: 'session-a:0', kind: 'message', occurredAt: '2026-08-24T10:00:00.000Z', outcome: 'unknown' },
-      { id: 'session-a:1', kind: 'tool', occurredAt: '2026-08-24T10:01:00.000Z', tool: 'Bash', exitStatus: 0, outcome: 'passed' },
+      { id: 'session-a:0', kind: 'message', occurredAt: '2026-08-24T10:00:00.000Z', text: 'token=secret', outcome: 'unknown' },
+      { id: 'session-a:1', kind: 'tool', occurredAt: '2026-08-24T10:01:00.000Z', tool: 'Bash', exitStatus: 0, text: 'private-command', outcome: 'passed' },
       { id: 'session-a:2', kind: 'metadata', occurredAt: '2026-08-24T10:02:00.000Z', outcome: 'unknown' }
     ]
   });
-  assert.equal(JSON.stringify(session).includes('secret'), false);
-  assert.equal(JSON.stringify(session).includes('private-command'), false);
+  assert.equal(JSON.stringify(session).includes('token=secret'), true);
+  assert.equal(JSON.stringify(session).includes('private-command'), true);
   assert.equal(JSON.stringify(session).includes('/private/repository'), false);
 });
 

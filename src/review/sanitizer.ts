@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { NormalizedSession, NormalizedSessionEvent } from './contracts.js';
+import { MAX_SESSION_EVENT_TEXT_LENGTH, type NormalizedSession, type NormalizedSessionEvent } from './contracts.js';
 
 export type RedactionCategory =
   | 'absolute-path'
@@ -94,12 +94,14 @@ export function assertSanitizedReviewArtifact(value: unknown): asserts value is 
 }
 
 function sanitizeEvent(event: NormalizedSessionEvent, sanitize: (value: string, redactOpaqueId?: boolean) => string): NormalizedSessionEvent {
+  const text = event.text ? sanitize(event.text).slice(0, MAX_SESSION_EVENT_TEXT_LENGTH) : undefined;
   return {
     id: sanitize(event.id, true),
     kind: event.kind,
     occurredAt: event.occurredAt,
     ...(event.tool ? { tool: sanitize(event.tool) } : {}),
     ...(event.exitStatus === undefined ? {} : { exitStatus: event.exitStatus }),
+    ...(text ? { text } : {}),
     outcome: event.outcome
   };
 }
@@ -142,7 +144,7 @@ function assertNoSensitiveContent(session: NormalizedSession, configuredPatterns
     session.sessionId,
     session.startedAt,
     session.endedAt,
-    ...session.events.flatMap((event) => [event.id, event.kind, event.occurredAt, event.tool, event.outcome])
+    ...session.events.flatMap((event) => [event.id, event.kind, event.occurredAt, event.tool, event.text, event.outcome])
   ].filter((value): value is string => value !== undefined);
   const residualPatterns = [...baseRules.map(([, pattern]) => pattern), ...configuredPatterns];
 
@@ -178,8 +180,9 @@ function validateNormalizedSession(value: unknown): asserts value is NormalizedS
 
 function validateEvent(value: unknown): asserts value is NormalizedSessionEvent {
   if (!isRecord(value) || !isNonEmptyString(value.id) || !isEventKind(value.kind) || !isTimestamp(value.occurredAt) || !isOutcome(value.outcome)) throw new SanitizationError();
-  if (!hasOnlyKeys(value, ['id', 'kind', 'occurredAt', 'tool', 'exitStatus', 'outcome'])) throw new SanitizationError();
+  if (!hasOnlyKeys(value, ['id', 'kind', 'occurredAt', 'tool', 'exitStatus', 'text', 'outcome'])) throw new SanitizationError();
   if (value.tool !== undefined && typeof value.tool !== 'string') throw new SanitizationError();
+  if (value.text !== undefined && (!isNonEmptyString(value.text) || value.text.length > MAX_SESSION_EVENT_TEXT_LENGTH)) throw new SanitizationError();
   if (value.exitStatus !== undefined && (!Number.isInteger(value.exitStatus) || !Number.isFinite(value.exitStatus))) throw new SanitizationError();
 }
 

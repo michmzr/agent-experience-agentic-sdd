@@ -29,14 +29,16 @@ test('rejects a symlinked discovery root without enumerating or exposing the ext
   assert.equal(message.includes('private-session.md'), false);
 });
 
-test('normalizes Markdown export headings without retaining message content', () => {
+test('normalizes bounded Markdown message evidence for later sanitization', () => {
   const root = exportRoot(); const artifact = join(root, 'review.md');
   writeFileSync(artifact, '# Cursor chat\n\n## User\npassword=never-copy\n\n## Assistant\nFinished review.\n');
 
   const session = readCursorMarkdownExport({ source: 'cursor', id: 'review', location: artifact, format: 'markdown-export' }, root, '2026-08-24T12:00:00.000Z');
 
-  assert.deepEqual(session.events.map((event) => ({ kind: event.kind, outcome: event.outcome })), [{ kind: 'message', outcome: 'unknown' }, { kind: 'message', outcome: 'unknown' }]);
-  assert.equal(JSON.stringify(session).includes('never-copy'), false);
+  assert.deepEqual(session.events.map((event) => ({ kind: event.kind, text: event.text, outcome: event.outcome })), [
+    { kind: 'message', text: 'password=never-copy', outcome: 'unknown' },
+    { kind: 'message', text: 'Finished review.', outcome: 'unknown' }
+  ]);
 });
 
 test('rejects a symlinked or out-of-root export before reading it', () => {

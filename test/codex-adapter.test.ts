@@ -44,7 +44,7 @@ test('normalizes known records while excluding raw payloads', async () => {
   assert.equal(JSON.stringify(session).includes('secret'), false);
 });
 
-test('normalizes observed Codex envelopes while excluding transcript and tool output', async () => {
+test('normalizes allowlisted observed Codex transcript and tool evidence while excluding unrelated payload fields', async () => {
   const root = await fixtureRoot();
   const observedFixture = await readFile(
     join(process.cwd(), 'test/fixtures/session-review/observed-codex-session.jsonl'),
@@ -57,15 +57,15 @@ test('normalizes observed Codex envelopes while excluding transcript and tool ou
   assert.deepEqual(session.events, [
     { id: 'session.jsonl:0', kind: 'metadata', occurredAt: '2026-08-24T10:00:00.000Z', outcome: 'unknown' },
     { id: 'session.jsonl:1', kind: 'metadata', occurredAt: '2026-08-24T10:00:01.000Z', outcome: 'unknown' },
-    { id: 'session.jsonl:2', kind: 'message', occurredAt: '2026-08-24T10:00:02.000Z', outcome: 'unknown' },
-    { id: 'session.jsonl:3', kind: 'tool', occurredAt: '2026-08-24T10:00:03.000Z', tool: 'shell', outcome: 'unknown' },
-    { id: 'session.jsonl:4', kind: 'tool', occurredAt: '2026-08-24T10:00:04.000Z', outcome: 'unknown' },
+    { id: 'session.jsonl:2', kind: 'message', occurredAt: '2026-08-24T10:00:02.000Z', text: 'private transcript', outcome: 'unknown' },
+    { id: 'session.jsonl:3', kind: 'tool', occurredAt: '2026-08-24T10:00:03.000Z', tool: 'shell', text: 'private arguments', outcome: 'unknown' },
+    { id: 'session.jsonl:4', kind: 'tool', occurredAt: '2026-08-24T10:00:04.000Z', text: 'private tool output', outcome: 'unknown' },
     { id: 'session.jsonl:5', kind: 'metadata', occurredAt: '2026-08-24T10:00:05.000Z', outcome: 'unknown' },
     { id: 'session.jsonl:6', kind: 'metadata', occurredAt: '2026-08-24T10:00:06.000Z', outcome: 'unknown' },
     { id: 'session.jsonl:7', kind: 'metadata', occurredAt: '2026-08-24T10:00:07.000Z', outcome: 'unknown' }
   ]);
   const serialized = JSON.stringify(session);
-  for (const rawValue of ['private transcript', 'private arguments', 'private tool output', 'private instructions', 'private compacted history', 'private agent', 'private world state']) {
+  for (const rawValue of ['private instructions', 'private compacted history', 'private agent', 'private world state']) {
     assert.equal(serialized.includes(rawValue), false);
   }
 });

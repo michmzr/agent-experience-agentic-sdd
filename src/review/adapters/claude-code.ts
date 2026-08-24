@@ -22,6 +22,9 @@ type ClaudeCodeJsonRecord = {
   readonly timestamp?: unknown;
   readonly tool_name?: unknown;
   readonly exit_code?: unknown;
+  readonly message?: unknown;
+  readonly input?: unknown;
+  readonly output?: unknown;
 };
 
 export async function discoverClaudeCodeArtifacts(options: ClaudeCodeAdapterOptions): Promise<readonly ClaudeCodeArtifact[]> {
@@ -100,7 +103,10 @@ function normalizeRecord(record: ClaudeCodeJsonRecord): LocalSessionRecord {
   if (typeof record.timestamp !== 'string' || !Number.isFinite(Date.parse(record.timestamp))) {
     throw new Error('Claude Code session record timestamp is invalid.');
   }
-  if (record.type === 'message') return { kind: 'message', occurredAt: record.timestamp };
+  if (record.type === 'message') {
+    const text = messageText(record.message);
+    return { kind: 'message', occurredAt: record.timestamp, ...(text ? { text } : {}) };
+  }
   if (record.type === 'metadata') return { kind: 'metadata', occurredAt: record.timestamp };
   if (record.type === 'tool') {
     if (typeof record.tool_name !== 'string' || !record.tool_name) throw new Error('Claude Code tool record is invalid.');
@@ -108,12 +114,43 @@ function normalizeRecord(record: ClaudeCodeJsonRecord): LocalSessionRecord {
     if (exitStatus !== undefined && (typeof exitStatus !== 'number' || !Number.isInteger(exitStatus) || exitStatus < 0)) {
       throw new Error('Claude Code tool exit status is invalid.');
     }
+    const text = toolText(record.input, record.output);
     return {
       kind: 'tool',
       occurredAt: record.timestamp,
       tool: record.tool_name,
-      ...(exitStatus === undefined ? {} : { exitStatus })
+      ...(exitStatus === undefined ? {} : { exitStatus }),
+      ...(text ? { text } : {})
     };
   }
   throw new Error('Unsupported Claude Code session record.');
+}
+
+function messageText(value: unknown): string | undefined {
+  if (typeof value === 'string') return value.trim() ? value : undefined;
+  if (!isRecord(value)) return undefined;
+  if (typeof value.content === 'string') return value.content.trim() ? value.content : undefined;
+  if (!Array.isArray(value.content)) return undefined;
+  const text = value.content.flatMap((block) => {
+    if (!isRecord(block) || !['text', 'input_text', 'output_text'].includes(String(block.type))) return [];
+    return typeof block.text === 'string' && block.text.trim() ? [block.text] : [];
+  }).join('\n');
+  return text || undefined;
+}
+
+function toolText(input: unknown, output: unknown): string | undefined {
+  const values: string[] = [];
+  if (typeof input === 'string' && input.trim()) values.push(input);
+  if (isRecord(input)) {
+    for (const key of ['command', 'arguments'] as const) {
+      const value = input[key];
+      if (typeof value === 'string' && value.trim()) values.push(value);
+    }
+  }
+  if (typeof output === 'string' && output.trim()) values.push(output);
+  return values.join('\n') || undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

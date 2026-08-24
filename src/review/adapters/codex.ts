@@ -98,6 +98,7 @@ export class CodexSessionAdapter {
   private parseSyntheticRecord(value: Record<string, unknown>): LocalSessionRecord {
     if (!isKnownKind(value.kind) || typeof value.occurredAt !== 'string') throw new Error('Unsupported session record.');
     if (value.tool !== undefined && typeof value.tool !== 'string') throw new Error('Unsupported session record.');
+    if (value.text !== undefined && typeof value.text !== 'string') throw new Error('Unsupported session record.');
     if (value.exitStatus !== undefined && (typeof value.exitStatus !== 'number' || !Number.isFinite(value.exitStatus))) {
       throw new Error('Unsupported session record.');
     }
@@ -105,7 +106,8 @@ export class CodexSessionAdapter {
       kind: value.kind,
       occurredAt: value.occurredAt,
       ...(typeof value.tool === 'string' ? { tool: value.tool } : {}),
-      ...(typeof value.exitStatus === 'number' ? { exitStatus: value.exitStatus } : {})
+      ...(typeof value.exitStatus === 'number' ? { exitStatus: value.exitStatus } : {}),
+      ...(typeof value.text === 'string' ? { text: value.text } : {})
     };
   }
 
@@ -117,7 +119,14 @@ export class CodexSessionAdapter {
       return { kind: 'metadata', occurredAt: value.timestamp };
     }
     if (value.type === 'event_msg') {
-      return { kind: 'message', occurredAt: value.timestamp };
+      const text = ['user_message', 'agent_message'].includes(String(value.payload.type))
+        ? stringValue(value.payload.message)
+        : undefined;
+      return {
+        kind: 'message',
+        occurredAt: value.timestamp,
+        ...(text ? { text } : {})
+      };
     }
     return this.parseObservedResponseItem(value.timestamp, value.payload);
   }
@@ -126,13 +135,32 @@ export class CodexSessionAdapter {
     if (!isObservedResponseItemType(payload.type)) throw new Error('Unsupported session record.');
     if (payload.type === 'function_call' || payload.type === 'custom_tool_call') {
       if (!isSafeToolName(payload.name)) throw new Error('Unsupported session record.');
-      return { kind: 'tool', occurredAt: timestamp, tool: payload.name };
+      const text = payload.type === 'function_call'
+        ? stringValue(payload.arguments)
+        : stringValue(payload.input);
+      return { kind: 'tool', occurredAt: timestamp, tool: payload.name, ...(text ? { text } : {}) };
     }
     if (payload.type === 'function_call_output' || payload.type === 'custom_tool_call_output') {
-      return { kind: 'tool', occurredAt: timestamp };
+      const text = stringValue(payload.output);
+      return { kind: 'tool', occurredAt: timestamp, ...(text ? { text } : {}) };
     }
-    return { kind: 'message', occurredAt: timestamp };
+    const text = payload.type === 'message' ? messageText(payload.content) : undefined;
+    return { kind: 'message', occurredAt: timestamp, ...(text ? { text } : {}) };
   }
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function messageText(value: unknown): string | undefined {
+  if (typeof value === 'string') return stringValue(value);
+  if (!Array.isArray(value)) return undefined;
+  const text = value.flatMap((block) => {
+    if (!isRecord(block) || !['input_text', 'output_text', 'text'].includes(String(block.type))) return [];
+    return typeof block.text === 'string' && block.text.trim() ? [block.text] : [];
+  }).join('\n');
+  return text || undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
