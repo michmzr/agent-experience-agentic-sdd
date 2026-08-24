@@ -8,7 +8,7 @@ export interface CliResult { exitCode: number; stdout: string; stderr: string; }
 
 interface ParsedArguments { readonly positionals: string[]; readonly options: Map<string, string | true>; }
 
-const scopes = new Set<KnowledgeScope>(['global', 'repository']);
+const scopes = new Set(['global', 'repo'] as const);
 const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired']);
 
 export function runCli(args: string[]): CliResult {
@@ -82,7 +82,7 @@ function requiredString(options: Map<string, string | true>, name: string): stri
   const value = optionalString(options, name); if (value === undefined) throw new SyntaxError(`Option is required: --${name}.`); return value;
 }
 function optionalScope(options: Map<string, string | true>): KnowledgeScope | undefined {
-  const scope = optionalString(options, 'scope'); if (scope === undefined) return undefined; if (!scopes.has(scope as KnowledgeScope)) throw new SyntaxError('Scope must be global or repository.'); return scope as KnowledgeScope;
+  const scope = optionalString(options, 'scope'); if (scope === undefined) return undefined; if (!scopes.has(scope as typeof scopes extends Set<infer Value> ? Value : never)) throw new SyntaxError('Scope must be global or repo.'); return scope === 'repo' ? 'repository' : 'global';
 }
 function optionalState(options: Map<string, string | true>): KnowledgeState | undefined {
   const state = optionalString(options, 'state'); if (state === undefined) return undefined; if (!states.has(state as KnowledgeState)) throw new SyntaxError('Knowledge state is unsupported.'); return state as KnowledgeState;

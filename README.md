@@ -20,13 +20,13 @@ node dist/src/cli.js init
 ## Commands
 
 ```text
-ael init [--scope global|repository]
+ael init [--scope global|repo]
 ael experience add --input record.json
-ael validate [--scope global|repository] [--json]
+ael validate [--scope global|repo] [--json]
 ael inspect <id>
-ael lessons list [--scope global|repository] [--state <state>] [--tag <tag>]
-ael retrieve [--scope global|repository] [--repository-id <id>] [--path <path>] [--tool <tool>] [--tag <tag>]
-ael export [--scope global|repository] [--repository-id <id>] [--format json]
+ael lessons list [--scope global|repo] [--state <state>] [--tag <tag>]
+ael retrieve [--scope global|repo] [--repository-id <id>] [--path <path>] [--tool <tool>] [--tag <tag>]
+ael export [--scope global|repo] [--repository-id <id>] [--format json]
 ```
 
 Pass `--data-dir <directory>` to every command to select a private local data directory. The default is `~/Library/Application Support/AgentExperience` on macOS and `$XDG_DATA_HOME/agent-experience` or `~/.local/share/agent-experience` on Linux. Use `--json` for structured results and diagnostics. Successful commands return exit code 0, domain or storage failures return 1, and invalid command syntax returns 2.
