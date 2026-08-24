@@ -8,7 +8,8 @@ import type {
   ExperienceImport,
   KnowledgeEntry,
   ObservationId,
-  SessionId
+  SessionId,
+  TransitionHistoryEntry
 } from '../src/domain/types.js';
 import { applyTransition } from '../src/domain/transitions.js';
 import { validateImport } from '../src/domain/validation.js';
@@ -54,6 +55,10 @@ function pemFixture() {
   return record;
 }
 
+function disputedKnowledge(): KnowledgeEntry {
+  return applyTransition(verifiedKnowledge(), contradictionEvidence()).entry;
+}
+
 test('rejects an observation whose source event is missing', () => {
   const result = validateImport(fixtureWithMissingEventReference());
 
@@ -72,4 +77,58 @@ test('moves active knowledge to disputed when contradiction evidence is imported
 test('rejects raw transcript and credential-like text', () => {
   assert.equal(validateImport(rawTranscriptFixture()).ok, false);
   assert.equal(validateImport(pemFixture()).ok, false);
+});
+
+test('rejects unsupported lesson kinds and evidence polarities', () => {
+  const invalidKind = validImport();
+  invalidKind.candidates[0].kind = 'unsupported-kind' as never;
+  const invalidPolarity = validImport();
+  (invalidPolarity.evidence[0] as { polarity: string }).polarity = 'unsupported-polarity';
+
+  assert.equal(validateImport(invalidKind).ok, false);
+  assert.equal(validateImport(invalidPolarity).ok, false);
+});
+
+test('rejects all unexpected durable-knowledge fields, including direct event references', () => {
+  for (const field of ['eventId', 'eventIds', 'event', 'sourceEvent', 'unexpected']) {
+    const record = validImport() as unknown as { knowledge: Array<Record<string, unknown>> };
+    record.knowledge[0][field] = 'event-1';
+
+    assert.equal(validateImport(record as unknown as ExperienceImport).ok, false, field);
+  }
+});
+
+test('does not revalidate disputed knowledge with evidence already attached', () => {
+  const evidence = { ...contradictionEvidence(), polarity: 'confirms' as const, revalidatesTo: 'verified' as const };
+  const result = applyTransition(disputedKnowledge(), evidence);
+
+  assert.equal(result.entry.state, 'disputed');
+  assert.equal(result.entry.evidenceIds.filter((id) => id === evidence.id).length, 1);
+  assert.equal(result.history.length, 0);
+});
+
+test('returns immutable transition records without caller-owned mutation paths', () => {
+  const entry = verifiedKnowledge();
+  const evidence = contradictionEvidence();
+  const history: TransitionHistoryEntry[] = [{ from: 'confirmed', to: 'verified', evidenceId: 'evidence-1' as Evidence['id'] }];
+  const result = applyTransition(entry, evidence, history);
+
+  (entry.evidenceIds as Evidence['id'][]).push('later-evidence' as Evidence['id']);
+  (history[0] as { to: TransitionHistoryEntry['to'] }).to = 'disputed';
+
+  assert.equal(Object.isFrozen(result.entry), true);
+  assert.equal(Object.isFrozen(result.entry.evidenceIds), true);
+  assert.equal(Object.isFrozen(result.history), true);
+  assert.equal(Object.isFrozen(result.history[0]), true);
+  assert.deepEqual(result.entry.evidenceIds, ['evidence-1', 'evidence-contradiction']);
+  assert.equal(result.history[0].to, 'verified');
+});
+
+test('rejects encrypted and PGP PEM private-key headers', () => {
+  for (const header of ['-----BEGIN ENCRYPTED PRIVATE KEY-----', '-----BEGIN PGP PRIVATE KEY BLOCK-----']) {
+    const record = validImport();
+    record.observations[0].statement = header;
+
+    assert.equal(validateImport(record).ok, false, header);
+  }
 });

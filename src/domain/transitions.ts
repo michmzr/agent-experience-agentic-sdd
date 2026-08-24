@@ -23,8 +23,10 @@ export function canTransition(from: KnowledgeState, to: KnowledgeState): boolean
 export function applyTransition(
   entry: KnowledgeEntry,
   evidence: Evidence,
-  history: TransitionHistoryEntry[] = []
+  history: readonly TransitionHistoryEntry[] = []
 ): TransitionResult {
+  if (entry.evidenceIds.includes(evidence.id)) return freezeResult(entry, history);
+
   const nextState = evidence.polarity === 'contradicts'
     ? 'disputed'
     : entry.state === 'disputed' && evidence.revalidatesTo
@@ -34,16 +36,23 @@ export function applyTransition(
       : undefined;
 
   if (!nextState || terminalStates.includes(entry.state)) {
-    return { entry: { ...entry, evidenceIds: [...entry.evidenceIds, evidence.id] }, history: [...history] };
+    return freezeResult({ ...entry, evidenceIds: [...entry.evidenceIds, evidence.id] }, history);
   }
 
   const revalidation = entry.state === 'disputed' && Boolean(evidence.revalidatesTo);
   if ((!revalidation && !canTransition(entry.state, nextState)) || (revalidation && evidence.polarity === 'contradicts')) {
-    return { entry: { ...entry, evidenceIds: [...entry.evidenceIds, evidence.id] }, history: [...history] };
+    return freezeResult({ ...entry, evidenceIds: [...entry.evidenceIds, evidence.id] }, history);
   }
 
-  return {
-    entry: { ...entry, state: nextState, evidenceIds: [...entry.evidenceIds, evidence.id] },
-    history: [...history, { from: entry.state, to: nextState, evidenceId: evidence.id }]
-  };
+  return freezeResult(
+    { ...entry, state: nextState, evidenceIds: [...entry.evidenceIds, evidence.id] },
+    [...history, { from: entry.state, to: nextState, evidenceId: evidence.id }]
+  );
+}
+
+function freezeResult(entry: KnowledgeEntry, history: readonly TransitionHistoryEntry[]): TransitionResult {
+  const frozenEntry = Object.freeze({ ...entry, evidenceIds: Object.freeze([...entry.evidenceIds]) });
+  const frozenHistory = Object.freeze(history.map((item) => Object.freeze({ ...item })));
+
+  return Object.freeze({ entry: frozenEntry, history: frozenHistory });
 }

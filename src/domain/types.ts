@@ -73,17 +73,17 @@ export interface CandidateLesson {
 }
 
 export interface Evidence {
-  id: EvidenceId;
-  candidateId: CandidateLessonId;
-  polarity: EvidencePolarity;
-  summary: string;
-  revalidatesTo?: 'candidate' | 'observed' | 'confirmed' | 'verified';
+  readonly id: EvidenceId;
+  readonly candidateId: CandidateLessonId;
+  readonly polarity: EvidencePolarity;
+  readonly summary: string;
+  readonly revalidatesTo?: 'candidate' | 'observed' | 'confirmed' | 'verified';
 }
 
 export interface KnowledgeEntry {
   id: KnowledgeId;
   candidateId: CandidateLessonId;
-  evidenceIds: EvidenceId[];
+  readonly evidenceIds: readonly EvidenceId[];
   state: KnowledgeState;
   statement: string;
 }
@@ -94,17 +94,17 @@ export interface ExperienceImport {
   observations: Observation[];
   clusters: ObservationCluster[];
   candidates: CandidateLesson[];
-  evidence: Evidence[];
+  evidence: readonly Evidence[];
   knowledge: KnowledgeEntry[];
 }
 
 export interface TransitionHistoryEntry {
-  from: KnowledgeState;
-  to: KnowledgeState;
-  evidenceId: EvidenceId;
+  readonly from: KnowledgeState;
+  readonly to: KnowledgeState;
+  readonly evidenceId: EvidenceId;
 }
 
 export interface TransitionResult {
-  entry: KnowledgeEntry;
-  history: TransitionHistoryEntry[];
+  readonly entry: Readonly<KnowledgeEntry>;
+  readonly history: readonly Readonly<TransitionHistoryEntry>[];
 }

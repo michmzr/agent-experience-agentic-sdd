@@ -1,4 +1,4 @@
-import type { ExperienceImport, KnowledgeState } from './types.js';
+import type { EvidencePolarity, ExperienceImport, KnowledgeState, LessonKind } from './types.js';
 
 export type ValidationCode =
   | 'INVALID_SHAPE'
@@ -12,7 +12,7 @@ export type ValidationResult =
   | { ok: false; code: ValidationCode; message: string };
 
 const forbiddenText = [
-  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i,
+  /-----BEGIN (?:[A-Z0-9 ]* )?PRIVATE KEY(?: BLOCK)?-----/i,
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/,
   /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/,
   /\bsk-[A-Za-z0-9_-]{20,}\b/,
@@ -20,6 +20,18 @@ const forbiddenText = [
 ];
 
 const states: readonly KnowledgeState[] = ['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired'];
+const lessonKinds: readonly LessonKind[] = ['failure', 'successful-workflow', 'project-fact', 'convention', 'tool-capability', 'environment-quirk', 'heuristic', 'preference'];
+const evidencePolarities: readonly EvidencePolarity[] = ['confirms', 'contradicts', 'contextualizes'];
+const collectionKeys = ['sessions', 'events', 'observations', 'clusters', 'candidates', 'evidence', 'knowledge'] as const;
+const allowedEntityKeys: Record<typeof collectionKeys[number], readonly string[]> = {
+  sessions: ['id', 'source', 'startedAt', 'repositoryId', 'workspaceId', 'userId'],
+  events: ['id', 'sessionId', 'kind', 'occurredAt', 'tool', 'path', 'outcome', 'exitStatus'],
+  observations: ['id', 'eventIds', 'statement'],
+  clusters: ['id', 'observationIds'],
+  candidates: ['id', 'clusterId', 'kind', 'statement'],
+  evidence: ['id', 'candidateId', 'polarity', 'summary', 'revalidatesTo'],
+  knowledge: ['id', 'candidateId', 'evidenceIds', 'state', 'statement']
+};
 
 function invalid(code: ValidationCode, message: string): ValidationResult {
   return { ok: false, code, message };
@@ -49,15 +61,24 @@ function identifiers(items: readonly { id: string }[]): Set<string> {
   return new Set(items.map(({ id }) => id));
 }
 
+function hasOnlyAllowedKeys(value: unknown, allowedKeys: readonly string[]): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+
+  return Object.keys(value).every((key) => allowedKeys.includes(key));
+}
+
 export function validateImport(record: ExperienceImport): ValidationResult {
   if (!record || typeof record !== 'object') return invalid('INVALID_SHAPE', 'Import must be an object.');
 
   const sensitive = hasForbiddenContent(record);
   if (sensitive) return sensitive;
 
-  const collections = ['sessions', 'events', 'observations', 'clusters', 'candidates', 'evidence', 'knowledge'] as const;
-  if (collections.some((name) => !Array.isArray(record[name]))) return invalid('INVALID_SHAPE', 'Import collections must be arrays.');
+  if (Object.keys(record).some((key) => !collectionKeys.includes(key as typeof collectionKeys[number]))) return invalid('FORBIDDEN_FIELD', 'Import contains an unsupported field.');
+  if (collectionKeys.some((name) => !Array.isArray(record[name]))) return invalid('INVALID_SHAPE', 'Import collections must be arrays.');
+  if (collectionKeys.some((name) => record[name].some((item) => !hasOnlyAllowedKeys(item, allowedEntityKeys[name])))) return invalid('FORBIDDEN_FIELD', 'Import entity contains an unsupported field.');
   if (record.sessions.some((session) => !['codex', 'claude-code', 'cursor'].includes(session.source))) return invalid('INVALID_SHAPE', 'Session source is unsupported.');
+  if (record.candidates.some((candidate) => !lessonKinds.includes(candidate.kind))) return invalid('INVALID_SHAPE', 'Lesson kind is unsupported.');
+  if (record.evidence.some((item) => !evidencePolarities.includes(item.polarity))) return invalid('INVALID_SHAPE', 'Evidence polarity is unsupported.');
   if (record.knowledge.some((entry) => !states.includes(entry.state))) return invalid('INVALID_SHAPE', 'Knowledge state is unsupported.');
 
   const sessionIds = identifiers(record.sessions);
@@ -74,7 +95,6 @@ export function validateImport(record: ExperienceImport): ValidationResult {
   if (record.clusters.some((cluster) => cluster.observationIds.some((id) => !observationIds.has(id)))) return invalid('MISSING_REFERENCE', 'Cluster references a missing observation.');
   if (record.candidates.some((candidate) => !clusterIds.has(candidate.clusterId))) return invalid('MISSING_REFERENCE', 'Candidate references a missing cluster.');
   if (record.evidence.some((item) => !candidateIds.has(item.candidateId))) return invalid('MISSING_REFERENCE', 'Evidence references a missing candidate.');
-  if (record.knowledge.some((entry) => 'eventId' in entry)) return invalid('INVALID_RELATIONSHIP', 'Knowledge cannot reference an event directly.');
   if (record.knowledge.some((entry) => !candidateIds.has(entry.candidateId))) return invalid('MISSING_REFERENCE', 'Knowledge references a missing candidate.');
   if (record.knowledge.some((entry) => entry.evidenceIds.length === 0)) return invalid('INVALID_RELATIONSHIP', 'Knowledge requires at least one evidence item.');
   if (record.knowledge.some((entry) => entry.evidenceIds.some((id) => !evidenceIds.has(id)))) return invalid('MISSING_REFERENCE', 'Knowledge references missing evidence.');
