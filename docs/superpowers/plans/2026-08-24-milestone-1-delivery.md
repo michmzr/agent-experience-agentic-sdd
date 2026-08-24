@@ -8,9 +8,8 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 | --- | --- | --- |
 | 1. Delivery design and executable contracts | completed | Design and source boundaries verified; `9ce0d20` adds contracts, `pnpm check` 56 passed. |
 | 2. Source adapters and deterministic fixtures | completed | `4a6c90a`, `8181a54`, `a8eebf2`, `522175a`; full `pnpm check` 67 passed. |
-| 3. Privacy scrubber and artifact boundary | in progress | Implementation started after adapter verification. |
-| 3. Privacy scrubber and artifact boundary | pending | Not started. |
-| 4. Manual review CLI and profile runtime | pending | Not started. |
+| 3. Privacy scrubber and artifact boundary | completed | `96c959a`; independent `pnpm check` 71 passed and diff check passed. |
+| 4. Manual review CLI and profile runtime | in progress | Implementation started after privacy boundary verification. |
 | 5. Parallel orchestration, candidates and proposals | pending | Not started. |
 | 6. Milestone acceptance, review and merge | pending | Not started. |
 
@@ -32,10 +31,10 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 
 ### Task 3: Privacy scrubber and artifact boundary
 
-- [ ] Add RED tests for each redaction category and fail-closed behavior.
-- [ ] Implement deterministic sanitization, policy hash and redaction report.
-- [ ] Prove raw values cannot reach reviewer input, SQLite or repository artifacts.
-- [ ] Run `pnpm check` and record the commit SHA.
+- [x] Add RED tests for each redaction category and fail-closed behavior.
+- [x] Implement deterministic sanitization, policy hash and redaction report: `96c959a`.
+- [x] Prove raw values cannot reach reviewer input, SQLite or repository artifacts: normalized input and review artifact are allowlisted; no review API persists raw sessions.
+- [x] Run `pnpm check` and record the commit SHA: `96c959a`, 71 passed, 0 failed.
 
 ### Task 4: Manual review CLI and profile runtime
 
