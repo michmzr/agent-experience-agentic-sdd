@@ -5,5 +5,5 @@
   "clusters": [{ "id": "cluster-contradiction", "observationIds": ["observation-contradiction"] }],
   "candidates": [{ "id": "candidate-contradiction", "clusterId": "cluster-contradiction", "kind": "heuristic", "statement": "Treat the heuristic as disputed." }],
   "evidence": [{ "id": "evidence-contradiction", "candidateId": "candidate-contradiction", "polarity": "contradicts", "summary": "The result contradicts prior evidence." }],
-  "knowledge": [{ "id": "knowledge-contradiction", "candidateId": "candidate-contradiction", "evidenceIds": ["evidence-contradiction"], "state": "disputed", "statement": "Treat the heuristic as disputed." }]
+  "knowledge": [{ "id": "knowledge-contradiction", "candidateId": "candidate-contradiction", "evidenceIds": ["evidence-contradiction"], "state": "verified", "statement": "Treat the heuristic as disputed." }]
 }

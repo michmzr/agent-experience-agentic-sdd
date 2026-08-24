@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { runCli } from '../src/cli.js';
@@ -42,6 +43,23 @@ test('returns JSON diagnostics and leaves data unchanged for corrupt input', () 
     assert.equal(result.exitCode, 1);
     assert.deepEqual(JSON.parse(result.stdout), { error: { code: 'MISSING_REFERENCE', message: 'Observation references a missing event.' } });
     assert.equal(runCli(['lessons', 'list', '--json', '--data-dir', dataDir]).stdout, before);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('persists contradictory fixture evidence as a disputed lifecycle transition instead of accepting its claimed verified state', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-cli-'));
+  try {
+    assert.equal(runCli(['experience', 'add', '--input', fixture('contradiction.json'), '--data-dir', dataDir]).exitCode, 0);
+
+    const persisted = JSON.parse(runCli(['inspect', 'knowledge-contradiction', '--json', '--data-dir', dataDir]).stdout);
+    assert.equal(persisted.state, 'disputed');
+
+    const database = new DatabaseSync(join(dataDir, 'experience.sqlite'));
+    const history = database.prepare('SELECT from_state, to_state, evidence_id FROM knowledge_transition_history WHERE knowledge_id = ? ORDER BY id').all('knowledge-contradiction').map((row) => ({ ...row }));
+    database.close();
+    assert.deepEqual(history, [{ from_state: 'verified', to_state: 'disputed', evidence_id: 'evidence-contradiction' }]);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

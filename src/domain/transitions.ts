@@ -14,6 +14,25 @@ const normalNext: Partial<Record<KnowledgeState, KnowledgeState>> = {
   confirmed: 'verified'
 };
 
+/**
+ * Applies the lifecycle policy to evidence that is already attached by an
+ * import. Validation accepts the submitted evidence graph; persistence uses
+ * this canonical result so an import cannot assert an active state that its
+ * contradictory evidence invalidates.
+ */
+export function reconcileImportedKnowledgeLifecycle(
+  entry: KnowledgeEntry,
+  evidence: readonly Evidence[]
+): TransitionResult {
+  const contradiction = evidence.find((item) => item.polarity === 'contradicts');
+  if (!contradiction || !activeStates.includes(entry.state)) return freezeResult(entry, []);
+
+  return freezeResult(
+    { ...entry, state: 'disputed' },
+    [{ from: entry.state, to: 'disputed', evidenceId: contradiction.id }]
+  );
+}
+
 export function canTransition(from: KnowledgeState, to: KnowledgeState): boolean {
   if (terminalStates.includes(from) || from === to) return false;
   if (from === 'disputed') return ['observed', 'confirmed', 'verified'].includes(to);

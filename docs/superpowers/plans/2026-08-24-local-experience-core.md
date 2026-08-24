@@ -20,15 +20,15 @@ Updated: 2026-08-24. This section is the live execution record; tasks are not tr
 | --- | --- | --- |
 | 1. Bootstrap | Accepted | `3d82da0`, `b95222a`; specification and quality reviews passed. |
 | 2. Domain model | Accepted | `1bdb31b` through `4691fb3`; specification and quality reviews passed. |
-| 3. Private SQLite store | Regression requires correction | Final review found that persisted contradictory evidence does not apply the lifecycle transition or record history. |
+| 3. Private SQLite store | Corrected and verified | The CLI fixture now claims `verified` while carrying contradictory evidence; persistence canonicalizes it to `disputed`, appends the `verified` to `disputed` history row, and `pnpm check` passed with 53 tests. |
 | 4. Retrieval and retention | Accepted | `59a55fc` through `bba542d`; specification and quality reviews passed. |
 | 5. Repository knowledge format | Accepted and merged into this branch | `10b5f9a` through `1605a49`; specification and quality reviews passed. |
 | 6. CLI and integration fixtures | Accepted | `fa01006`, `ffa9da4`, `5b31ac5`, `c11538c`; specification and quality reviews passed. Fresh `pnpm check` passed with 52 tests. |
-| 7. Verification evidence | Requires refresh after lifecycle correction | Completed 2026-08-24 16:17:22 CEST: fresh offline-oriented `pnpm check` reported 52 passing tests and a no-match network/LLM static scan; final review found missing persisted-lifecycle coverage. Evidence commit: `7950fb1`. |
+| 7. Verification evidence | Refreshed | 2026-08-24: TDD RED reproduced the persisted-state regression; GREEN and the full `pnpm check` passed with 53 tests, 0 failures. Evidence commit: pending `fix: persist contradictory evidence lifecycle`. |
 
-Current full verification: `pnpm check` passed on 2026-08-24 with 52 tests, 0 failures.
+Current full verification: `pnpm check` passed on 2026-08-24 with 53 tests, 0 failures.
 
-Task 6 review state: specification and repeated quality reviews accepted the implementation. Final review found a persisted-lifecycle regression in Task 3: contradictory evidence must move active knowledge to `disputed` and append lifecycle history. The next action is a TDD correction, repeated Task 3 reviews, and refreshed Task 7 evidence.
+Task 6 review state: specification and repeated quality reviews accepted the implementation. The Task 3 persisted-lifecycle regression is corrected: a valid contradictory import cannot retain a caller-supplied active state, and its lifecycle history is written in the same transaction.
 
 Milestone 1 work outside this local-core plan remains pending: the three source adapters, sanitizer, manual review runtime, reviewer orchestration, candidate-lesson and proposal generation, and the expanded benchmark fixtures.
 

@@ -3,6 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { posix } from 'node:path';
 
 import type { ExperienceImport, KnowledgeEntry, KnowledgeId, KnowledgeMetadata, KnowledgeState } from '../domain/types.js';
+import { reconcileImportedKnowledgeLifecycle } from '../domain/transitions.js';
 import { validateImport } from '../domain/validation.js';
 import { openExperienceDatabase } from './database.js';
 
@@ -153,9 +154,17 @@ export class ExperienceStore {
       for (const item of record.evidence) evidence.run(item.id, item.candidateId, item.polarity, item.summary, item.revalidatesTo ?? null);
       const knowledge = this.database.prepare('INSERT INTO knowledge (id, candidate_id, state, statement) VALUES (?, ?, ?, ?)');
       const knowledgeEvidence = this.database.prepare('INSERT INTO knowledge_evidence (knowledge_id, evidence_id, position) VALUES (?, ?, ?)');
+      const lifecycleHistory = this.database.prepare('INSERT INTO knowledge_transition_history (knowledge_id, from_state, to_state, evidence_id, occurred_at) VALUES (?, ?, ?, ?, ?)');
       for (const item of record.knowledge) {
-        knowledge.run(item.id, item.candidateId, item.state, item.statement);
+        const lifecycle = reconcileImportedKnowledgeLifecycle(
+          item,
+          item.evidenceIds.map((evidenceId) => record.evidence.find((evidence) => evidence.id === evidenceId)!)
+        );
+        knowledge.run(item.id, item.candidateId, lifecycle.entry.state, item.statement);
         item.evidenceIds.forEach((evidenceId, position) => knowledgeEvidence.run(item.id, evidenceId, position));
+        for (const transition of lifecycle.history) {
+          lifecycleHistory.run(item.id, transition.from, transition.to, transition.evidenceId, new Date().toISOString());
+        }
       }
       const metadata = this.database.prepare('INSERT INTO knowledge_metadata (knowledge_id, scope, repository_id, path, tool, tags_json, created_at, approval_kind, approved_at, activation, merged_provenance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
       for (const item of record.knowledge) {
