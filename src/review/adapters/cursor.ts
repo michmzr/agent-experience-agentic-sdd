@@ -1,17 +1,32 @@
-import { lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, realpathSync, type Dirent } from 'node:fs';
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { normalizeSession, type NormalizedSession, type SessionArtifact } from '../contracts.js';
 
+class CursorPathBoundaryError extends Error {}
+
+function resolveCursorDiscoveryRoot(root: string): string {
+  try {
+    const suppliedRoot = resolve(root);
+    if (lstatSync(suppliedRoot).isSymbolicLink()) throw new CursorPathBoundaryError('Cursor export root may not be a symlink.');
+    realpathSync(suppliedRoot);
+    return suppliedRoot;
+  } catch (error) {
+    if (error instanceof CursorPathBoundaryError) throw error;
+    throw new CursorPathBoundaryError('Cursor export root could not be validated.');
+  }
+}
+
 export function discoverCursorExports(root: string): readonly SessionArtifact[] {
-  const resolvedRoot = resolve(root);
-  return readdirSync(resolvedRoot, { withFileTypes: true })
+  const resolvedRoot = resolveCursorDiscoveryRoot(root);
+  let entries: Dirent<string>[];
+  try { entries = readdirSync(resolvedRoot, { withFileTypes: true }); }
+  catch { throw new CursorPathBoundaryError('Cursor export root could not be read.'); }
+  return entries
     .filter((entry) => entry.isFile() && extname(entry.name).toLowerCase() === '.md')
     .sort((left, right) => left.name.localeCompare(right.name, 'en'))
     .map((entry) => ({ source: 'cursor' as const, id: basename(entry.name, extname(entry.name)), location: resolve(resolvedRoot, entry.name), format: 'markdown-export' as const }));
 }
-
-class CursorPathBoundaryError extends Error {}
 
 function isOutsideRoot(root: string, location: string): boolean {
   const pathFromRoot = relative(root, location);

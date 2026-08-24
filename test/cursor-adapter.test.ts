@@ -16,6 +16,19 @@ test('discovers only explicit regular Markdown exports in the supplied root', ()
   assert.deepEqual(discoverCursorExports(root), [{ source: 'cursor', id: 'review', location: join(root, 'review.md'), format: 'markdown-export' }]);
 });
 
+test('rejects a symlinked discovery root without enumerating or exposing the external path', () => {
+  const containingRoot = exportRoot(); const externalRoot = exportRoot(); const linkedRoot = join(containingRoot, 'linked-root');
+  writeFileSync(join(externalRoot, 'private-session.md'), '## User\nprivate'); symlinkSync(externalRoot, linkedRoot);
+
+  let message = '';
+  try { discoverCursorExports(linkedRoot); }
+  catch (error) { message = error instanceof Error ? error.message : String(error); }
+
+  assert.match(message, /symlink/i);
+  assert.equal(message.includes(externalRoot), false);
+  assert.equal(message.includes('private-session.md'), false);
+});
+
 test('normalizes Markdown export headings without retaining message content', () => {
   const root = exportRoot(); const artifact = join(root, 'review.md');
   writeFileSync(artifact, '# Cursor chat\n\n## User\npassword=never-copy\n\n## Assistant\nFinished review.\n');
