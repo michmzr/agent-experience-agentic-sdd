@@ -2,6 +2,8 @@
 
 ## Milestone 1: session intelligence vertical slice
 
+Status: Complete on 2026-08-24. Final verification: 131 tests passed, 0 failed; two independent implementation reviews approved.
+
 Goal: derive useful lessons and proposals from existing Codex, Claude Code and Cursor sessions before building full runtime enforcement.
 
 Deliverables:
