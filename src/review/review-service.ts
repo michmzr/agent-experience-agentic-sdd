@@ -67,16 +67,17 @@ async function resolveSelectedSession(input: ManualReviewInput, dependencies: Ma
   if (input.session && input.session !== 'latest') return input.session;
   const discover = dependencies.discover ?? discoverReviewSessions;
   const sessions = await discover(input);
-  return selectRepositorySession(sessions, { session: input.session, interactive: input.interactive ?? false, repository: input.repository }, dependencies.prompt);
+  const selectable = sessions.map(({ id, repositoryHint, repositoryHintVerified, updatedAt }) => ({ id, repositoryHint, repositoryHintVerified, updatedAt }));
+  return selectRepositorySession(selectable, { session: input.session, interactive: input.interactive ?? false, repository: input.repository }, dependencies.prompt);
 }
 
 export async function discoverReviewSessions(input: Pick<ManualReviewInput, 'source' | 'root' | 'project'>): Promise<readonly ReviewSessionDescriptor[]> {
-  if (input.source === 'codex') return (await new CodexSessionAdapter(input.root).discover()).map(({ id, location }) => ({ source: input.source, id, location }));
+  if (input.source === 'codex') return (await new CodexSessionAdapter(input.root).discover()).map(({ id, location, repositoryHint, repositoryHintVerified, updatedAt }) => ({ source: input.source, id, location, repositoryHint, repositoryHintVerified, updatedAt }));
   if (input.source === 'claude-code') {
     if (!input.project) throw new SyntaxError('Option is required: --project.');
-    return (await discoverClaudeCodeArtifacts({ configDir: input.root, project: input.project })).map(({ id, location }) => ({ source: input.source, id, location }));
+    return (await discoverClaudeCodeArtifacts({ configDir: input.root, project: input.project })).map(({ id, location, repositoryHint, repositoryHintVerified, updatedAt }) => ({ source: input.source, id, location, repositoryHint, repositoryHintVerified, updatedAt }));
   }
-  return discoverCursorExports(input.root).map(({ id, location }) => ({ source: input.source, id: `${id}.md`, location }));
+  return discoverCursorExports(input.root).map(({ id, location, repositoryHint, repositoryHintVerified, updatedAt }) => ({ source: input.source, id: `${id}.md`, location, repositoryHint, repositoryHintVerified, updatedAt }));
 }
 
 async function loadSession(input: ManualReviewInput): Promise<NormalizedSession> {

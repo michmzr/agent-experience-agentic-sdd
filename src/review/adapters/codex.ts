@@ -1,5 +1,5 @@
 import { lstat, readdir, readFile, realpath } from 'node:fs/promises';
-import { isAbsolute, join, relative, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, sep } from 'node:path';
 
 import {
   assertSessionArtifactSize,
@@ -21,11 +21,18 @@ export class CodexSessionAdapter {
   public async discover(): Promise<readonly SessionArtifact[]> {
     const root = await this.resolveRoot();
     const paths = await this.findJsonlFiles(root, root);
-    return paths.map((path) => ({
-      source: 'codex',
-      id: relative(root, path).split(sep).join('/'),
-      location: path,
-      format: 'observed-jsonl' as const
+    const repositoryHint = basename(root) || 'root';
+    return Promise.all(paths.map(async (path) => {
+      const status = await lstat(path);
+      return {
+        source: 'codex' as const,
+        id: relative(root, path).split(sep).join('/'),
+        location: path,
+        format: 'observed-jsonl' as const,
+        repositoryHint,
+        repositoryHintVerified: true,
+        updatedAt: status.mtime.toISOString()
+      };
     }));
   }
 

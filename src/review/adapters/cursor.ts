@@ -25,13 +25,25 @@ function resolveCursorDiscoveryRoot(root: string): string {
 
 export function discoverCursorExports(root: string): readonly SessionArtifact[] {
   const resolvedRoot = resolveCursorDiscoveryRoot(root);
+  const repositoryHint = basename(resolvedRoot) || 'root';
   let entries: Dirent<string>[];
   try { entries = readdirSync(resolvedRoot, { withFileTypes: true }); }
   catch { throw new CursorPathBoundaryError('Cursor export root could not be read.'); }
   return entries
     .filter((entry) => entry.isFile() && extname(entry.name).toLowerCase() === '.md')
     .sort((left, right) => left.name.localeCompare(right.name, 'en'))
-    .map((entry) => ({ source: 'cursor' as const, id: basename(entry.name, extname(entry.name)), location: resolve(resolvedRoot, entry.name), format: 'markdown-export' as const }));
+    .map((entry) => {
+      const location = resolve(resolvedRoot, entry.name);
+      return {
+        source: 'cursor' as const,
+        id: basename(entry.name, extname(entry.name)),
+        location,
+        format: 'markdown-export' as const,
+        repositoryHint,
+        repositoryHintVerified: true,
+        updatedAt: lstatSync(location).mtime.toISOString()
+      };
+    });
 }
 
 function isOutsideRoot(root: string, location: string): boolean {

@@ -13,6 +13,8 @@ export interface SessionArtifact {
   readonly location: string;
   readonly format: SessionArtifactFormat;
   readonly repositoryHint?: string;
+  readonly repositoryHintVerified?: boolean;
+  readonly updatedAt?: string;
 }
 
 export interface LocalSessionRecord {

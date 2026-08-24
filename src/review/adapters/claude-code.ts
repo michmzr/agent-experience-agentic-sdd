@@ -47,7 +47,10 @@ export async function discoverClaudeCodeArtifacts(options: ClaudeCodeAdapterOpti
       id: basename(entry.name, '.jsonl'),
       location,
       format: 'jsonl',
-      root: projectsRoot
+      root: projectsRoot,
+      repositoryHint: project,
+      repositoryHintVerified: true,
+      updatedAt: fileStatus.mtime.toISOString()
     });
   }
   return artifacts.sort((left, right) => left.id.localeCompare(right.id));

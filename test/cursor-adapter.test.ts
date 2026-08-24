@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import test from 'node:test';
 
 import { discoverCursorExports, readCursorMarkdownExport } from '../src/review/adapters/cursor.js';
@@ -13,7 +13,12 @@ test('discovers only explicit regular Markdown exports in the supplied root', ()
   writeFileSync(join(root, 'review.md'), '# Cursor chat\n\n## User\nImplement the change.\n\n## Assistant\nDone.\n');
   writeFileSync(join(root, 'ignored.json'), '{}');
 
-  assert.deepEqual(discoverCursorExports(root), [{ source: 'cursor', id: 'review', location: join(root, 'review.md'), format: 'markdown-export' }]);
+  const [artifact] = discoverCursorExports(root);
+  assert.deepEqual(
+    { source: artifact?.source, id: artifact?.id, location: artifact?.location, format: artifact?.format, repositoryHint: artifact?.repositoryHint, repositoryHintVerified: artifact?.repositoryHintVerified },
+    { source: 'cursor', id: 'review', location: join(root, 'review.md'), format: 'markdown-export', repositoryHint: basename(root), repositoryHintVerified: true }
+  );
+  assert.equal(Number.isFinite(Date.parse(artifact?.updatedAt ?? '')), true);
 });
 
 test('rejects a symlinked discovery root without enumerating or exposing the external path', () => {
