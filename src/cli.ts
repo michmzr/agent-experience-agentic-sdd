@@ -82,7 +82,12 @@ function execute(service: ExperienceService, parsed: ParsedArguments): unknown {
 function parseReviewRequest(parsed: ParsedArguments) {
   const [command, subcommand, ...rest] = parsed.positionals;
   if (command !== 'review' || !['session', 'sessions'].includes(subcommand ?? '') || rest.length !== 0) throw new SyntaxError(`Unknown command: ${parsed.positionals.join(' ')}`);
-  assertNoUnknownOptions(parsed.options, ['json', 'source', 'session', 'root', 'project', 'allow-expensive-checks']);
+  assertNoUnknownOptions(
+    parsed.options,
+    subcommand === 'sessions'
+      ? ['json', 'source', 'root', 'project']
+      : ['json', 'source', 'session', 'root', 'project', 'allow-expensive-checks']
+  );
   const source = requiredReviewSource(parsed.options); const root = requiredString(parsed.options, 'root'); const project = optionalString(parsed.options, 'project');
   if (subcommand === 'sessions') return { kind: 'discover' as const, source, root, project };
   return { kind: 'review' as const, source, session: requiredString(parsed.options, 'session'), root, project, allowExpensiveChecks: parsed.options.has('allow-expensive-checks') };
