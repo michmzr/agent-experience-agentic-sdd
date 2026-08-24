@@ -36,6 +36,8 @@ ael inspect <id>
 ael lessons list [--scope global|repo] [--state <state>] [--tag <tag>]
 ael retrieve [--scope global|repo] [--repository-id <id>] [--path <path>] [--tool <tool>] [--tag <tag>]
 ael export [--scope global|repo] [--repository-id <id>] [--format json]
+ael review sessions --source codex|claude-code|cursor --root <directory> [--project <claude-project>] [--json]
+ael review session --source codex|claude-code|cursor --root <directory> --session <id|latest> [--project <claude-project>] [--allow-expensive-checks] [--json]
 ```
 
 Pass `--data-dir <directory>` to every command to select a private local data directory. The default is `~/Library/Application Support/AgentExperience` on macOS and `$XDG_DATA_HOME/agent-experience` or `~/.local/share/agent-experience` on Linux. Use `--json` for structured results and diagnostics. Successful commands return exit code 0, domain or storage failures return 1, and invalid command syntax returns 2.

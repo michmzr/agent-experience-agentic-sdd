@@ -1,9 +1,10 @@
+import { stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 
 import type { AgentSource, LessonKind } from '../domain/types.js';
 import { CodexSessionAdapter } from './adapters/codex.js';
 import { discoverClaudeCodeArtifacts, normalizeClaudeCodeArtifact } from './adapters/claude-code.js';
-import { readCursorMarkdownExport } from './adapters/cursor.js';
+import { discoverCursorExports, readCursorMarkdownExport } from './adapters/cursor.js';
 import type { NormalizedSession } from './contracts.js';
 import { groupReviewFindings, type ReviewFinding as OrchestratorFinding } from './orchestrator.js';
 import { createReviewProposals } from './proposals.js';
@@ -18,8 +19,11 @@ export interface ManualReviewInput {
   readonly allowExpensiveChecks: boolean;
 }
 
+export interface ReviewSessionDescriptor { readonly source: AgentSource; readonly id: string; readonly location: string; }
+
 export async function runManualReview(input: ManualReviewInput) {
-  const normalized = await loadSession(input);
+  const selectedSession = input.session === 'latest' ? await selectLatestSession(input) : input.session;
+  const normalized = await loadSession({ ...input, session: selectedSession });
   const artifact = sanitizeForReview(normalized);
   const reviewers: Reviewer[] = [reviewer('workflow', false), reviewer('privacy', false), reviewer('diagnostics', true)];
   const runtime = new ReviewRuntime({ profiles: [{ id: 'default', version: '1', reviewerIds: reviewers.map(({ id }) => id) }], reviewers });
@@ -40,7 +44,24 @@ export async function runManualReview(input: ManualReviewInput) {
       proposal: { category: 'workflow' as const, title: recommendation(group.recommendation) }
     }))
   });
-  return { source: input.source, profile: run.profile, skippedReviewerIds: run.skippedReviewerIds, findings: groups, ...intelligence };
+  return { source: input.source, selectedSession, profile: run.profile, skippedReviewerIds: run.skippedReviewerIds, findings: groups, ...intelligence };
+}
+
+export async function discoverReviewSessions(input: Pick<ManualReviewInput, 'source' | 'root' | 'project'>): Promise<readonly ReviewSessionDescriptor[]> {
+  if (input.source === 'codex') return (await new CodexSessionAdapter(input.root).discover()).map(({ id, location }) => ({ source: input.source, id, location }));
+  if (input.source === 'claude-code') {
+    if (!input.project) throw new SyntaxError('Option is required: --project.');
+    return (await discoverClaudeCodeArtifacts({ configDir: input.root, project: input.project })).map(({ id, location }) => ({ source: input.source, id, location }));
+  }
+  return discoverCursorExports(input.root).map(({ id, location }) => ({ source: input.source, id: `${id}.md`, location }));
+}
+
+async function selectLatestSession(input: ManualReviewInput): Promise<string> {
+  const sessions = await discoverReviewSessions(input);
+  if (sessions.length === 0) throw new Error('No repository-scoped sessions were found.');
+  const withTimes = await Promise.all(sessions.map(async (session) => ({ session, mtimeMs: (await stat(session.location)).mtimeMs })));
+  withTimes.sort((left, right) => right.mtimeMs - left.mtimeMs || left.session.id.localeCompare(right.session.id));
+  return withTimes[0].session.id;
 }
 
 async function loadSession(input: ManualReviewInput): Promise<NormalizedSession> {
@@ -58,7 +79,10 @@ async function loadSession(input: ManualReviewInput): Promise<NormalizedSession>
 
 function reviewer(id: string, expensive: boolean): Reviewer {
   return { id, expensive, async review(artifact) {
-    return [{ code: `${id}-finding`, findingId: `${id}-finding`, rootCauseId: 'review-workflow', recommendation: `Apply ${id} review for ${artifact.session.events.length} events` }];
+    const toolEvents = artifact.session.events.filter((event) => event.kind === 'tool');
+    if (id === 'workflow') return toolEvents.map((event) => ({ code: `workflow-${event.outcome}`, findingId: `${id}:${event.id}`, rootCauseId: `${event.outcome}-tool:${event.tool ?? 'unknown'}`, recommendation: event.outcome === 'failed' ? `Investigate failed ${event.tool ?? 'unknown'} workflow` : `Reuse ${event.tool ?? 'unknown'} workflow with outcome ${event.outcome}` }));
+    if (id === 'privacy') return artifact.session.events.filter((event) => event.kind === 'message' || event.kind === 'metadata').map((event) => ({ code: `review-${event.kind}`, findingId: `${id}:${event.id}`, rootCauseId: `review-evidence:${event.kind}`, recommendation: `Preserve sanitized ${event.kind} evidence for review` }));
+    return artifact.session.events.filter((event) => event.outcome === 'failed').map((event) => ({ code: 'diagnostic-failure', findingId: `${id}:${event.id}`, rootCauseId: `diagnostic:${event.tool ?? event.kind}`, recommendation: `Run explicit diagnostics for ${event.tool ?? event.kind}` }));
   } };
 }
 

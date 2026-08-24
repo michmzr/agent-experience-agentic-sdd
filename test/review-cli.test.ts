@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -14,7 +14,7 @@ test('runs the complete local review pipeline for an explicit session', async ()
   const output = JSON.parse(result.stdout);
   assert.equal(output.candidates[0].state, 'candidate');
   assert.equal(output.proposals[0].requiresSpecification, true);
-  assert.equal(output.findings[0].recommendation.state, 'unresolved-disagreement');
+  assert.equal(output.findings[0].recommendation.state, 'agreed');
   assert.equal(result.stdout.includes('must-not-leak'), false);
 });
 
@@ -53,4 +53,28 @@ test('does not leak filesystem paths in review diagnostics', async () => {
     assert.equal(`${result.stdout}${result.stderr}`.includes('SENSITIVE-review-root'), false);
     assert.match(`${result.stdout}${result.stderr}`, /Review failed/);
   }
+});
+
+test('discovers repository-scoped sessions and reviews the deterministic latest artifact', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-review-discovery-'));
+  writeFileSync(join(root, 'older.jsonl'), `${JSON.stringify({ kind: 'message', occurredAt: '2026-08-24T10:00:00.000Z' })}\n`);
+  writeFileSync(join(root, 'newer.jsonl'), `${JSON.stringify({ kind: 'tool', occurredAt: '2026-08-24T11:00:00.000Z', tool: 'git', exitStatus: 1 })}\n`);
+  utimesSync(join(root, 'older.jsonl'), new Date(1_000), new Date(1_000)); utimesSync(join(root, 'newer.jsonl'), new Date(2_000), new Date(2_000));
+  const discovered = await runCliAsync(['review', 'sessions', '--source', 'codex', '--root', root, '--json']);
+  assert.deepEqual(JSON.parse(discovered.stdout).map(({ id }: { id: string }) => id), ['newer.jsonl', 'older.jsonl'].sort());
+  const latest = await runCliAsync(['review', 'session', '--source', 'codex', '--root', root, '--session', 'latest', '--json']);
+  const output = JSON.parse(latest.stdout);
+  assert.equal(output.selectedSession, 'newer.jsonl');
+  assert.match(output.candidates[0].statement, /failed-tool:git/);
+});
+
+test('derives materially different traceable findings from different session evidence', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-review-evidence-'));
+  writeFileSync(join(root, 'message.jsonl'), `${JSON.stringify({ kind: 'message', occurredAt: '2026-08-24T10:00:00.000Z' })}\n`);
+  writeFileSync(join(root, 'failure.jsonl'), `${JSON.stringify({ kind: 'tool', occurredAt: '2026-08-24T10:00:00.000Z', tool: 'git', exitStatus: 1 })}\n`);
+  const message = JSON.parse((await runCliAsync(['review', 'session', '--source', 'codex', '--root', root, '--session', 'message.jsonl', '--json'])).stdout);
+  const failure = JSON.parse((await runCliAsync(['review', 'session', '--source', 'codex', '--root', root, '--session', 'failure.jsonl', '--json'])).stdout);
+  assert.notDeepEqual(message.findings, failure.findings);
+  assert.notDeepEqual(message.candidates, failure.candidates);
+  assert.equal(failure.proposals[0].findingId, failure.candidates[0].findingId);
 });

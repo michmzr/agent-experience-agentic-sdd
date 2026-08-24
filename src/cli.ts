@@ -5,7 +5,7 @@ import { basename } from 'node:path';
 import { DomainError, errorMessage, ExperienceService } from './application/experience-service.js';
 import type { KnowledgeState } from './domain/types.js';
 import type { KnowledgeScope } from './storage/experience-store.js';
-import { runManualReview } from './review/review-service.js';
+import { discoverReviewSessions, runManualReview } from './review/review-service.js';
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string; }
 
@@ -36,7 +36,8 @@ export async function runCliAsync(args: string[]): Promise<CliResult> {
   try {
     const parsed = parseArguments(args); const json = parsed.options.has('json');
     const request = parseReviewRequest(parsed);
-    return success(await runManualReview(request), json, parsed.positionals);
+    const value = request.kind === 'discover' ? await discoverReviewSessions(request) : await runManualReview(request);
+    return success(value, json, parsed.positionals);
   } catch (error) {
     const syntax = error instanceof SyntaxError;
     const diagnostic = syntax ? toDiagnostic(error, 'INVALID_SYNTAX') : { code: 'REVIEW_ERROR', message: 'Review failed.' };
@@ -78,11 +79,11 @@ function execute(service: ExperienceService, parsed: ParsedArguments): unknown {
 
 function parseReviewRequest(parsed: ParsedArguments) {
   const [command, subcommand, ...rest] = parsed.positionals;
-  if (command !== 'review' || subcommand !== 'session' || rest.length !== 0) throw new SyntaxError(`Unknown command: ${parsed.positionals.join(' ')}`);
+  if (command !== 'review' || !['session', 'sessions'].includes(subcommand ?? '') || rest.length !== 0) throw new SyntaxError(`Unknown command: ${parsed.positionals.join(' ')}`);
   assertNoUnknownOptions(parsed.options, ['json', 'source', 'session', 'root', 'project', 'allow-expensive-checks']);
-  const source = requiredReviewSource(parsed.options); const session = requiredString(parsed.options, 'session');
-  if (session === 'latest') throw new SyntaxError('Review requires an explicit --session value, not latest.');
-  return { source, session, root: requiredString(parsed.options, 'root'), project: optionalString(parsed.options, 'project'), allowExpensiveChecks: parsed.options.has('allow-expensive-checks') };
+  const source = requiredReviewSource(parsed.options); const root = requiredString(parsed.options, 'root'); const project = optionalString(parsed.options, 'project');
+  if (subcommand === 'sessions') return { kind: 'discover' as const, source, root, project };
+  return { kind: 'review' as const, source, session: requiredString(parsed.options, 'session'), root, project, allowExpensiveChecks: parsed.options.has('allow-expensive-checks') };
 }
 
 function parseArguments(args: readonly string[]): ParsedArguments {
@@ -141,6 +142,7 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
     const review = value as { findings: readonly unknown[]; candidates: readonly unknown[]; proposals: readonly unknown[]; skippedReviewerIds: readonly string[] };
     return `Review completed: ${review.findings.length} finding groups, ${review.candidates.length} candidates, ${review.proposals.length} proposals.${review.skippedReviewerIds.length ? ` Skipped reviewers: ${review.skippedReviewerIds.join(', ')}.` : ''}`;
   }
+  if (command === 'review' && subcommand === 'sessions') return (value as readonly { id: string }[]).map(({ id }) => id).join('\n') || 'No sessions found.';
   return JSON.stringify(value);
 }
 interface KnowledgeRecord { readonly id: string; readonly state: string; readonly statement: string; readonly evidenceIds: readonly string[]; readonly authoritative?: boolean; }
