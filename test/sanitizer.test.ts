@@ -140,6 +140,40 @@ test('redacts arbitrary absolute POSIX roots without corrupting URL syntax', () 
   assert.equal(artifact.redactions['absolute-path'], 3);
 });
 
+test('redacts file URI authority forms without altering ordinary HTTP URLs', () => {
+  const artifact = sanitizeForReview({
+    ...sensitiveSession,
+    events: [{
+      ...sensitiveSession.events[0],
+      tool: 'file://localhost/workspace/service file://build-server/share/private.txt http://localhost/workspace https://build-server/share'
+    }]
+  });
+
+  assert.equal(
+    artifact.session.events[0]?.tool,
+    'file://[REDACTED:absolute-path] file://[REDACTED:absolute-path] http://localhost/workspace https://build-server/share'
+  );
+  assert.equal(artifact.redactions['absolute-path'], 3);
+});
+
+test('redacts canonical encrypted, OpenSSH, and PGP private key blocks', () => {
+  const privateKeys = [
+    '-----BEGIN ENCRYPTED PRIVATE KEY-----\nencrypted-content\n-----END ENCRYPTED PRIVATE KEY-----',
+    '-----BEGIN OPENSSH PRIVATE KEY-----\nopenssh-content\n-----END OPENSSH PRIVATE KEY-----',
+    '-----BEGIN PGP PRIVATE KEY BLOCK-----\npgp-content\n-----END PGP PRIVATE KEY BLOCK-----'
+  ];
+  const artifact = sanitizeForReview({
+    ...sensitiveSession,
+    events: [{ ...sensitiveSession.events[0], tool: privateKeys.join('\n') }]
+  });
+  const serialized = JSON.stringify(artifact);
+
+  for (const rawValue of ['encrypted-content', 'openssh-content', 'pgp-content']) {
+    assert.equal(serialized.includes(rawValue), false, 'review artifact leaked private key material');
+  }
+  assert.equal(artifact.redactions['private-key'], privateKeys.length);
+});
+
 test('uses deterministic distinct pseudonyms for different opaque identities', () => {
   const first = sanitizeForReview(sensitiveSession);
   const second = sanitizeForReview(sensitiveSession);

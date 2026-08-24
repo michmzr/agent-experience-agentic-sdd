@@ -43,8 +43,9 @@ const categories: readonly RedactionCategory[] = [
 const sanitizedArtifacts = new WeakSet<object>();
 
 const baseRules: readonly [RedactionCategory, RegExp][] = [
-  ['private-key', /-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z]+)? PRIVATE KEY-----/gi],
+  ['private-key', /-----BEGIN ((?:[A-Z0-9 ]* )?PRIVATE KEY(?: BLOCK)?)-----[\s\S]*?-----END \1-----/gi],
   ['credential-url', /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@[^\s/]+(?:\/[^\s]*)?/gi],
+  ['absolute-path', /(?<=\bfile:\/\/)(?!\/|\[REDACTED:)[^\s"'`;,)](?:[^\s"'`;,)]*)/gi],
   ['absolute-path', /(?<=\bfile:\/\/\/)(?!\[REDACTED:)[^\s"'`;,)](?:[^\s"'`;,)]*)/gi],
   ['absolute-path', /(?<![A-Za-z0-9+.:/\\\]-])\/(?!\/)[^\s"'`;,)](?:[^\s"'`;,)]*)?|(?<![A-Za-z0-9])(?:[A-Za-z]:\\(?:[^\\\s"'`;,)]*\\?)+|\\\\[^\\\s"'`;,)]*\\[^\\\s"'`;,)]*(?:\\[^\\\s"'`;,)]*)*)/g],
   ['token', /\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi],
