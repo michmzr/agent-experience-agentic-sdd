@@ -1,0 +1,12 @@
+{
+  "sessions": [{ "id": "session-1", "source": "codex", "startedAt": "2026-08-24T10:00:00.000Z", "repositoryId": "repo-a" }],
+  "events": [{ "id": "event-1", "sessionId": "session-1", "kind": "command", "occurredAt": "2026-08-24T10:00:00.000Z", "path": "src/a.ts", "tool": "git", "tags": ["safety"], "outcome": "passed", "exitStatus": 0 }],
+  "observations": [{ "id": "observation-1", "eventIds": ["event-1"], "statement": "A reviewed workflow completed successfully." }],
+  "clusters": [{ "id": "cluster-1", "observationIds": ["observation-1"] }],
+  "candidates": [{ "id": "candidate-1", "clusterId": "cluster-1", "kind": "successful-workflow", "statement": "Use the reviewed workflow for safety-sensitive changes." }],
+  "evidence": [{ "id": "evidence-1", "candidateId": "candidate-1", "polarity": "confirms", "summary": "The workflow completed with a passing command." }],
+  "knowledge": [{ "id": "knowledge-1", "candidateId": "candidate-1", "evidenceIds": ["evidence-1"], "state": "verified", "statement": "Use the reviewed workflow for safety-sensitive changes." }],
+  "knowledgeMetadata": {
+    "knowledge-1": { "scope": "repository", "repositoryId": "repo-a", "path": "src/a.ts", "tool": "git", "tags": ["safety"], "createdAt": "2026-08-24T10:00:00.000Z", "activation": "merged-team-active", "mergedProvenance": "repo-a:merge-1" }
+  }
+}

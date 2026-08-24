@@ -1,0 +1,9 @@
+{
+  "sessions": [{ "id": "session-contradiction", "source": "codex", "startedAt": "2026-08-24T10:00:00.000Z" }],
+  "events": [{ "id": "event-contradiction", "sessionId": "session-contradiction", "kind": "test", "occurredAt": "2026-08-24T10:00:00.000Z" }],
+  "observations": [{ "id": "observation-contradiction", "eventIds": ["event-contradiction"], "statement": "A contradictory result was observed." }],
+  "clusters": [{ "id": "cluster-contradiction", "observationIds": ["observation-contradiction"] }],
+  "candidates": [{ "id": "candidate-contradiction", "clusterId": "cluster-contradiction", "kind": "heuristic", "statement": "Treat the heuristic as disputed." }],
+  "evidence": [{ "id": "evidence-contradiction", "candidateId": "candidate-contradiction", "polarity": "contradicts", "summary": "The result contradicts prior evidence." }],
+  "knowledge": [{ "id": "knowledge-contradiction", "candidateId": "candidate-contradiction", "evidenceIds": ["evidence-contradiction"], "state": "disputed", "statement": "Treat the heuristic as disputed." }]
+}

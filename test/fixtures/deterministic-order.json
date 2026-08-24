@@ -1,0 +1,9 @@
+{
+  "sessions": [{ "id": "session-order", "source": "codex", "startedAt": "2026-08-24T10:00:00.000Z", "repositoryId": "repo-order" }],
+  "events": [{ "id": "event-order", "sessionId": "session-order", "kind": "command", "occurredAt": "2026-08-24T10:00:00.000Z", "path": "src/order.ts", "tool": "git", "tags": ["order"] }],
+  "observations": [{ "id": "observation-order", "eventIds": ["event-order"], "statement": "Ordering source observation." }],
+  "clusters": [{ "id": "cluster-order", "observationIds": ["observation-order"] }],
+  "candidates": [{ "id": "candidate-order", "clusterId": "cluster-order", "kind": "convention", "statement": "Ordering convention." }],
+  "evidence": [{ "id": "evidence-order", "candidateId": "candidate-order", "polarity": "confirms", "summary": "Ordering evidence." }],
+  "knowledge": [{ "id": "knowledge-order", "candidateId": "candidate-order", "evidenceIds": ["evidence-order"], "state": "verified", "statement": "Ordering convention." }]
+}

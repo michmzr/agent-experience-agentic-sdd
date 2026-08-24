@@ -1,0 +1,9 @@
+{
+  "sessions": [{ "id": "session-corrupt", "source": "codex", "startedAt": "2026-08-24T10:00:00.000Z" }],
+  "events": [],
+  "observations": [{ "id": "observation-corrupt", "eventIds": ["missing-event"], "statement": "This record has an invalid reference." }],
+  "clusters": [],
+  "candidates": [],
+  "evidence": [],
+  "knowledge": []
+}

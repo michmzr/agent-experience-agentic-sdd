@@ -1,0 +1,9 @@
+{
+  "sessions": [{ "id": "session-repo-b", "source": "codex", "startedAt": "2026-08-24T10:00:00.000Z", "repositoryId": "repo-b" }],
+  "events": [{ "id": "event-repo-b", "sessionId": "session-repo-b", "kind": "command", "occurredAt": "2026-08-24T10:00:00.000Z", "path": "src/a.ts", "tool": "git", "tags": ["safety"] }],
+  "observations": [{ "id": "observation-repo-b", "eventIds": ["event-repo-b"], "statement": "Repository B source observation." }],
+  "clusters": [{ "id": "cluster-repo-b", "observationIds": ["observation-repo-b"] }],
+  "candidates": [{ "id": "candidate-repo-b", "clusterId": "cluster-repo-b", "kind": "convention", "statement": "Repository B convention." }],
+  "evidence": [{ "id": "evidence-repo-b", "candidateId": "candidate-repo-b", "polarity": "confirms", "summary": "Repository B evidence." }],
+  "knowledge": [{ "id": "knowledge-repo-b", "candidateId": "candidate-repo-b", "evidenceIds": ["evidence-repo-b"], "state": "verified", "statement": "Repository B convention." }]
+}

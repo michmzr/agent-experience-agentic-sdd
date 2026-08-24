@@ -1,0 +1,9 @@
+{
+  "sessions": [{ "id": "session-failure", "source": "codex", "startedAt": "2026-08-24T10:00:00.000Z" }],
+  "events": [{ "id": "event-failure", "sessionId": "session-failure", "kind": "command", "occurredAt": "2026-08-24T10:00:00.000Z", "outcome": "failed", "exitStatus": 1 }],
+  "observations": [{ "id": "observation-failure", "eventIds": ["event-failure"], "statement": "The command failed." }],
+  "clusters": [{ "id": "cluster-failure", "observationIds": ["observation-failure"] }],
+  "candidates": [{ "id": "candidate-failure", "clusterId": "cluster-failure", "kind": "failure", "statement": "Investigate the failed command before promotion." }],
+  "evidence": [],
+  "knowledge": []
+}

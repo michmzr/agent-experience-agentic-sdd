@@ -1,0 +1,9 @@
+{
+  "sessions": [{ "id": "session-retention", "source": "codex", "startedAt": "2026-08-24T10:00:00.000Z" }],
+  "events": [{ "id": "event-retention", "sessionId": "session-retention", "kind": "test", "occurredAt": "2026-08-24T10:00:00.000Z" }],
+  "observations": [{ "id": "observation-retention", "eventIds": ["event-retention"], "statement": "Disputed knowledge retains its observation." }],
+  "clusters": [{ "id": "cluster-retention", "observationIds": ["observation-retention"] }],
+  "candidates": [{ "id": "candidate-retention", "clusterId": "cluster-retention", "kind": "failure", "statement": "Preserve evidence for disputed knowledge." }],
+  "evidence": [{ "id": "evidence-retention", "candidateId": "candidate-retention", "polarity": "contradicts", "summary": "A contradiction remains attached." }],
+  "knowledge": [{ "id": "knowledge-retention", "candidateId": "candidate-retention", "evidenceIds": ["evidence-retention"], "state": "disputed", "statement": "Preserve evidence for disputed knowledge." }]
+}

@@ -1,0 +1,10 @@
+{
+  "sessions": [{ "id": "session-global", "source": "codex", "startedAt": "2026-08-24T10:00:00.000Z" }],
+  "events": [{ "id": "event-global", "sessionId": "session-global", "kind": "command", "occurredAt": "2026-08-24T10:00:00.000Z", "tool": "git", "tags": ["safety"] }],
+  "observations": [{ "id": "observation-global", "eventIds": ["event-global"], "statement": "Global source observation." }],
+  "clusters": [{ "id": "cluster-global", "observationIds": ["observation-global"] }],
+  "candidates": [{ "id": "candidate-global", "clusterId": "cluster-global", "kind": "convention", "statement": "An unapproved global convention." }],
+  "evidence": [{ "id": "evidence-global", "candidateId": "candidate-global", "polarity": "confirms", "summary": "One source supports this convention." }],
+  "knowledge": [{ "id": "knowledge-global", "candidateId": "candidate-global", "evidenceIds": ["evidence-global"], "state": "verified", "statement": "An unapproved global convention." }],
+  "knowledgeMetadata": { "knowledge-global": { "scope": "global", "tool": "git", "tags": ["safety"], "createdAt": "2026-08-24T10:00:00.000Z" } }
+}

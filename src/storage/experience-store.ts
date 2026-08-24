@@ -372,7 +372,7 @@ export class ExperienceStore {
 
   private matchesFilter(row: KnowledgeMetadataRow & KnowledgeRow, filter: RetrievalFilter, normalizedPath: string | undefined): boolean {
     if (filter.scope && row.scope !== filter.scope) return false;
-    if (row.scope === 'repository' && row.repository_id !== filter.repositoryId) return false;
+    if (row.scope === 'repository' && filter.repositoryId !== undefined && row.repository_id !== filter.repositoryId) return false;
     if (filter.repositoryId && row.repository_id !== filter.repositoryId) return false;
     if (normalizedPath && row.path !== normalizedPath) return false;
     if (filter.tool && row.tool !== filter.tool) return false;
