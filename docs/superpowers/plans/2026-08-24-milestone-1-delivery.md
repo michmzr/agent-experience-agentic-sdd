@@ -6,7 +6,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 
 | Task | State | Verification / commit |
 | --- | --- | --- |
-| 1. Delivery design and executable contracts | in progress | Design recorded; Codex observed JSONL, Claude Code JSONL, and Cursor supported-export boundaries verified. |
+| 1. Delivery design and executable contracts | in progress | Design and source boundaries verified; `9ce0d20` adds contracts, `pnpm check` 56 passed. |
 | 2. Source adapters and deterministic fixtures | pending | Not started. |
 | 3. Privacy scrubber and artifact boundary | pending | Not started. |
 | 4. Manual review CLI and profile runtime | pending | Not started. |
@@ -17,8 +17,8 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 
 - [x] Define source, privacy, review and proposal boundaries in `2026-08-24-session-intelligence-delivery-design.md`.
 - [x] Verify supported ingestion boundaries for Codex, Claude Code and Cursor.
-- [ ] Add normalized-session and review domain contracts with RED tests.
-- [ ] Run `pnpm check` and record the commit SHA.
+- [x] Add normalized-session and review domain contracts with RED tests.
+- [x] Run `pnpm check` and record the commit SHA: `9ce0d20`, 56 passed, 0 failed.
 
 ### Task 2: Source adapters and deterministic fixtures
 
