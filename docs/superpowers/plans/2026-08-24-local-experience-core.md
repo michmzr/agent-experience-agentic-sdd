@@ -12,6 +12,26 @@
 
 ---
 
+## Execution status
+
+Updated: 2026-08-24. This section is the live execution record; tasks are not treated as accepted until their specified review gates and a fresh full check pass.
+
+| Task | State | Evidence |
+| --- | --- | --- |
+| 1. Bootstrap | Accepted | `3d82da0`, `b95222a`; specification and quality reviews passed. |
+| 2. Domain model | Accepted | `1bdb31b` through `4691fb3`; specification and quality reviews passed. |
+| 3. Private SQLite store | Accepted | `c23f51f`, `293753b`; specification and quality reviews passed. |
+| 4. Retrieval and retention | Accepted | `59a55fc` through `bba542d`; specification and quality reviews passed. |
+| 5. Repository knowledge format | Accepted and merged into this branch | `10b5f9a` through `1605a49`; specification and quality reviews passed. |
+| 6. CLI and integration fixtures | Implemented, awaiting specification and quality reviews | `fa01006`; fresh `pnpm check` passed with 48 tests. |
+| 7. Verification evidence | Pending | Starts after Task 6 is accepted. |
+
+Current full verification: `pnpm check` passed on 2026-08-24 with 48 tests, 0 failures.
+
+Milestone 1 work outside this local-core plan remains pending: the three source adapters, sanitizer, manual review runtime, reviewer orchestration, candidate-lesson and proposal generation, and the expanded benchmark fixtures.
+
+---
+
 ## File structure
 
 - `package.json` - scripts, package metadata, Node engine constraint, development dependencies.
