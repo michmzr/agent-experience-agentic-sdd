@@ -77,7 +77,7 @@ export interface Evidence {
   readonly candidateId: CandidateLessonId;
   readonly polarity: EvidencePolarity;
   readonly summary: string;
-  readonly revalidatesTo?: 'candidate' | 'observed' | 'confirmed' | 'verified';
+  readonly revalidatesTo?: 'observed' | 'confirmed' | 'verified';
 }
 
 export interface KnowledgeEntry {

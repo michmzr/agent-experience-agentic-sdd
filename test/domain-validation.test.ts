@@ -132,3 +132,29 @@ test('rejects encrypted and PGP PEM private-key headers', () => {
     assert.equal(validateImport(record).ok, false, header);
   }
 });
+
+test('returns INVALID_SHAPE instead of throwing for a malformed entity', () => {
+  const record = validImport() as unknown as { observations: unknown[] };
+  record.observations[0] = { id: 'o' };
+
+  assert.doesNotThrow(() => validateImport(record as unknown as ExperienceImport));
+  const result = validateImport(record as unknown as ExperienceImport);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.code, 'INVALID_SHAPE');
+});
+
+test('rejects invalid and non-active evidence revalidation targets', () => {
+  for (const revalidatesTo of ['candidate', 'superseded', 'invalid-state']) {
+    const record = validImport();
+    (record.evidence[0] as { revalidatesTo?: string }).revalidatesTo = revalidatesTo;
+
+    assert.equal(validateImport(record).ok, false, revalidatesTo);
+  }
+});
+
+test('rejects GitHub fine-grained personal access tokens', () => {
+  const record = validImport();
+  record.observations[0].statement = 'github_pat_abcdefghijklmnopqrstuvwxyz1234567890';
+
+  assert.equal(validateImport(record).ok, false);
+});

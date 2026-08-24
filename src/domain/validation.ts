@@ -15,6 +15,7 @@ const forbiddenText = [
   /-----BEGIN (?:[A-Z0-9 ]* )?PRIVATE KEY(?: BLOCK)?-----/i,
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/,
   /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
   /\bsk-[A-Za-z0-9_-]{20,}\b/,
   /\bbearer(?:[_-]?token)?\s*(?:=|:)\s*\S+/i
 ];
@@ -67,6 +68,44 @@ function hasOnlyAllowedKeys(value: unknown, allowedKeys: readonly string[]): boo
   return Object.keys(value).every((key) => allowedKeys.includes(key));
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function hasStringFields(value: Record<string, unknown>, fields: readonly string[]): boolean {
+  return fields.every((field) => typeof value[field] === 'string');
+}
+
+function hasOptionalStringFields(value: Record<string, unknown>, fields: readonly string[]): boolean {
+  return fields.every((field) => value[field] === undefined || typeof value[field] === 'string');
+}
+
+function hasValidEntityShape(collection: typeof collectionKeys[number], value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const entity = value as Record<string, unknown>;
+
+  switch (collection) {
+    case 'sessions':
+      return hasStringFields(entity, ['id', 'source', 'startedAt'])
+        && hasOptionalStringFields(entity, ['repositoryId', 'workspaceId', 'userId']);
+    case 'events':
+      return hasStringFields(entity, ['id', 'sessionId', 'kind', 'occurredAt'])
+        && hasOptionalStringFields(entity, ['tool', 'path', 'outcome'])
+        && (entity.exitStatus === undefined || typeof entity.exitStatus === 'number');
+    case 'observations':
+      return hasStringFields(entity, ['id', 'statement']) && isStringArray(entity.eventIds);
+    case 'clusters':
+      return typeof entity.id === 'string' && isStringArray(entity.observationIds);
+    case 'candidates':
+      return hasStringFields(entity, ['id', 'clusterId', 'kind', 'statement']);
+    case 'evidence':
+      return hasStringFields(entity, ['id', 'candidateId', 'polarity', 'summary'])
+        && (entity.revalidatesTo === undefined || typeof entity.revalidatesTo === 'string');
+    case 'knowledge':
+      return hasStringFields(entity, ['id', 'candidateId', 'state', 'statement']) && isStringArray(entity.evidenceIds);
+  }
+}
+
 export function validateImport(record: ExperienceImport): ValidationResult {
   if (!record || typeof record !== 'object') return invalid('INVALID_SHAPE', 'Import must be an object.');
 
@@ -76,9 +115,11 @@ export function validateImport(record: ExperienceImport): ValidationResult {
   if (Object.keys(record).some((key) => !collectionKeys.includes(key as typeof collectionKeys[number]))) return invalid('FORBIDDEN_FIELD', 'Import contains an unsupported field.');
   if (collectionKeys.some((name) => !Array.isArray(record[name]))) return invalid('INVALID_SHAPE', 'Import collections must be arrays.');
   if (collectionKeys.some((name) => record[name].some((item) => !hasOnlyAllowedKeys(item, allowedEntityKeys[name])))) return invalid('FORBIDDEN_FIELD', 'Import entity contains an unsupported field.');
+  if (collectionKeys.some((name) => record[name].some((item) => !hasValidEntityShape(name, item)))) return invalid('INVALID_SHAPE', 'Import entity has an invalid shape.');
   if (record.sessions.some((session) => !['codex', 'claude-code', 'cursor'].includes(session.source))) return invalid('INVALID_SHAPE', 'Session source is unsupported.');
   if (record.candidates.some((candidate) => !lessonKinds.includes(candidate.kind))) return invalid('INVALID_SHAPE', 'Lesson kind is unsupported.');
   if (record.evidence.some((item) => !evidencePolarities.includes(item.polarity))) return invalid('INVALID_SHAPE', 'Evidence polarity is unsupported.');
+  if (record.evidence.some((item) => item.revalidatesTo !== undefined && !['observed', 'confirmed', 'verified'].includes(item.revalidatesTo))) return invalid('INVALID_SHAPE', 'Evidence revalidation target is unsupported.');
   if (record.knowledge.some((entry) => !states.includes(entry.state))) return invalid('INVALID_SHAPE', 'Knowledge state is unsupported.');
 
   const sessionIds = identifiers(record.sessions);
