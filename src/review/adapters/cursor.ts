@@ -21,6 +21,7 @@ function isOutsideRoot(root: string, location: string): boolean {
 function resolveCursorExport(root: string, location: string): string {
   try {
     const suppliedRoot = resolve(root); const suppliedLocation = resolve(location);
+    if (lstatSync(suppliedRoot).isSymbolicLink()) throw new CursorPathBoundaryError('Cursor export root may not be a symlink.');
     if (isOutsideRoot(suppliedRoot, suppliedLocation)) throw new CursorPathBoundaryError('Cursor export is outside the supplied root.');
 
     let current = suppliedRoot;

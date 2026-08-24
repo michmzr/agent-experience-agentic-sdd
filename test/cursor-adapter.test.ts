@@ -48,3 +48,18 @@ test('rejects an export reached through a symlinked ancestor without exposing it
   assert.equal(message.includes(externalRoot), false);
   assert.equal(message.includes('private-session.md'), false);
 });
+
+test('rejects a symlinked export root without exposing the external path', () => {
+  const containingRoot = exportRoot(); const externalRoot = exportRoot(); const linkedRoot = join(containingRoot, 'linked-root');
+  const external = join(externalRoot, 'private-session.md');
+  writeFileSync(external, '## User\nprivate'); symlinkSync(externalRoot, linkedRoot);
+
+  const artifact = { source: 'cursor' as const, id: 'private-session', location: join(linkedRoot, 'private-session.md'), format: 'markdown-export' as const };
+  let message = '';
+  try { readCursorMarkdownExport(artifact, linkedRoot, '2026-08-24T12:00:00.000Z'); }
+  catch (error) { message = error instanceof Error ? error.message : String(error); }
+
+  assert.match(message, /symlink/i);
+  assert.equal(message.includes(externalRoot), false);
+  assert.equal(message.includes('private-session.md'), false);
+});
