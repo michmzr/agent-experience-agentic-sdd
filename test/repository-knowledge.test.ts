@@ -104,3 +104,30 @@ test('rejects a knowledge identifier that could traverse the output path', () =>
 
   assert.throws(() => writeRepositoryKnowledge(root, document), /safe filename/);
 });
+
+test('rejects raw transcript and private review fields at the export boundary', () => {
+  const root = repositoryRoot();
+  const withTranscript = { ...mergedRepositoryKnowledge(), rawTranscript: 'User: private request\nAssistant: private response' };
+  const withPrivateReview = { ...mergedRepositoryKnowledge(), privateReview: 'Private reviewer notes are not Git-reviewable knowledge.' };
+
+  assert.throws(() => writeRepositoryKnowledge(root, withTranscript), /raw transcript/i);
+  assert.throws(() => writeRepositoryKnowledge(root, withPrivateReview), /private review/i);
+});
+
+test('rejects credential-like text at the export boundary before writing files', () => {
+  const root = repositoryRoot();
+  const document = { ...mergedRepositoryKnowledge(), evidenceSummary: 'Observed key sk-abcdefghijklmnopqrstuvwxyz1234 in a session.' };
+
+  assert.throws(() => writeRepositoryKnowledge(root, document), /credential-like/i);
+  assert.throws(() => readFileSync(join(root, 'agent-experience', 'index.json'), 'utf8'), /ENOENT/);
+});
+
+test('orders tags by Unicode code units instead of locale collation', () => {
+  const root = repositoryRoot();
+  const document = { ...mergedRepositoryKnowledge(), applicability: { tags: ['ä', 'Z', 'a', 'Ä'] } };
+
+  writeRepositoryKnowledge(root, document);
+
+  const index = readFileSync(join(root, 'agent-experience', 'index.json'), 'utf8');
+  assert.match(index, /"tags": \[\n          "Z",\n          "a",\n          "Ä",\n          "ä"/);
+});

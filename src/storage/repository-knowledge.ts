@@ -37,6 +37,15 @@ interface RepositoryIndex {
 }
 
 const safeFilename = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const forbiddenText = [
+  /-----BEGIN (?:[A-Z0-9 ]* )?PRIVATE KEY(?: BLOCK)?-----/i,
+  /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/,
+  /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
+  /\bsk-[A-Za-z0-9_-]{20,}\b/,
+  /\bbearer(?:[_-]?token)?\s*(?:=|:)\s*\S+/i
+];
+const privateFields = new Set(['payload', 'privateReview', 'privateReviewText', 'rawTranscript']);
 
 export function writeRepositoryKnowledge(repositoryRoot: string, document: RepositoryKnowledgeDocument): void {
   validateDocument(document);
@@ -47,12 +56,13 @@ export function writeRepositoryKnowledge(repositoryRoot: string, document: Repos
   const index = readIndex(output.index);
   const entry = toIndexEntry(document);
   const entries = [...index.entries.filter((item) => item.identity !== entry.identity), entry]
-    .sort((left, right) => left.identity.localeCompare(right.identity));
+    .sort((left, right) => codeUnitCompare(left.identity, right.identity));
   atomicWrite(output.entry, markdown(document));
   atomicWrite(output.index, `${JSON.stringify(sortObject({ entries, version: 1 }), null, 2)}\n`);
 }
 
 function validateDocument(document: RepositoryKnowledgeDocument): void {
+  assertExportContentIsSafe(document);
   if (!safeFilename.test(document.entry.id) || document.entry.id === '.' || document.entry.id === '..') {
     throw new Error('Knowledge identifier must be a safe filename.');
   }
@@ -61,6 +71,25 @@ function validateDocument(document: RepositoryKnowledgeDocument): void {
   }
   for (const value of [document.context, document.entry.statement, document.recommendedBehavior, document.evidenceSummary]) {
     if (!value.trim()) throw new Error('Repository knowledge document text must not be empty.');
+  }
+}
+
+function assertExportContentIsSafe(value: unknown, seen = new WeakSet<object>()): void {
+  if (typeof value === 'string') {
+    if (forbiddenText.some((pattern) => pattern.test(value))) {
+      throw new Error('Repository knowledge contains credential-like material.');
+    }
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+  if (seen.has(value)) throw new Error('Repository knowledge must not contain circular data.');
+  seen.add(value);
+  for (const [key, nested] of Object.entries(value)) {
+    if (privateFields.has(key)) {
+      const label = key === 'rawTranscript' ? 'raw transcript' : 'private review';
+      throw new Error(`Repository knowledge must not contain ${label} data.`);
+    }
+    assertExportContentIsSafe(nested, seen);
   }
 }
 
@@ -96,7 +125,7 @@ function toIndexEntry(document: RepositoryKnowledgeDocument): RepositoryIndexEnt
   return {
     applicability: {
       ...(document.applicability.path ? { path: document.applicability.path } : {}),
-      tags: [...new Set(document.applicability.tags ?? [])].sort(),
+      tags: [...new Set(document.applicability.tags ?? [])].sort(codeUnitCompare),
       ...(document.applicability.tool ? { tool: document.applicability.tool } : {})
     },
     ...(document.approval ? { approval: { ...document.approval } } : {}),
@@ -122,6 +151,12 @@ function sortObject(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortObject);
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value as Record<string, unknown>)
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => codeUnitCompare(left, right))
     .map(([key, nested]) => [key, sortObject(nested)]));
+}
+
+function codeUnitCompare(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
 }
