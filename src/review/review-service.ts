@@ -5,28 +5,42 @@ import { CodexSessionAdapter } from './adapters/codex.js';
 import { discoverClaudeCodeArtifacts, normalizeClaudeCodeArtifact } from './adapters/claude-code.js';
 import { discoverCursorExports, readCursorMarkdownExport } from './adapters/cursor.js';
 import type { NormalizedSession } from './contracts.js';
+import { createDefaultReviewRuntime, defaultReviewProfile } from './default-reviewers.js';
 import { groupReviewFindings, type ReviewFinding as OrchestratorFinding } from './orchestrator.js';
 import { createReviewProposals } from './proposals.js';
-import { ReviewRuntime, type Reviewer, type ReviewProfile } from './runtime.js';
+import { type ReviewRuntime, type ReviewProfile } from './runtime.js';
 import { sanitizeForReview } from './sanitizer.js';
+import { selectRepositorySession, type ReviewSelectionPrompt } from './selection.js';
 
 export interface ManualReviewInput {
   readonly source: AgentSource;
   readonly root: string;
-  readonly session: string;
+  readonly session?: string;
   readonly project?: string;
   readonly allowExpensiveChecks: boolean;
   readonly profile?: Pick<ReviewProfile, 'id' | 'version'>;
+  readonly interactive?: boolean;
+  readonly repository?: string;
 }
 
 export interface ManualReviewDependencies {
   readonly runtime?: Pick<ReviewRuntime, 'run'>;
+  readonly discover?: (input: Pick<ManualReviewInput, 'source' | 'root' | 'project'>) => Promise<readonly ReviewSessionDescriptor[]>;
+  readonly prompt?: ReviewSelectionPrompt;
 }
 
-export interface ReviewSessionDescriptor { readonly source: AgentSource; readonly id: string; readonly location: string; }
+export interface ReviewSessionDescriptor {
+  readonly source: AgentSource;
+  readonly id: string;
+  readonly location: string;
+  readonly repositoryHint?: string;
+  readonly repositoryHintVerified?: boolean;
+  readonly updatedAt?: string;
+}
 
 export async function runManualReview(input: ManualReviewInput, dependencies: ManualReviewDependencies = {}) {
-  const normalized = await loadSession(input);
+  const session = await resolveSelectedSession(input, dependencies);
+  const normalized = await loadSession({ ...input, session });
   const artifact = sanitizeForReview(normalized);
   const runtime = dependencies.runtime ?? createDefaultReviewRuntime();
   const run = await runtime.run({ artifact, profile: input.profile ?? defaultReviewProfile, allowExpensiveChecks: input.allowExpensiveChecks });
@@ -49,11 +63,11 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
   return { source: input.source, selectedSession: artifact.session.sessionId, profile: run.profile, skippedReviewerIds: run.skippedReviewerIds, findings: groups, ...intelligence };
 }
 
-export const defaultReviewProfile: Pick<ReviewProfile, 'id' | 'version'> = Object.freeze({ id: 'default', version: '1' });
-
-export function createDefaultReviewRuntime(): ReviewRuntime {
-  const reviewers: Reviewer[] = [reviewer('workflow', false), reviewer('privacy', false), reviewer('diagnostics', true)];
-  return new ReviewRuntime({ profiles: [{ ...defaultReviewProfile, reviewerIds: reviewers.map(({ id }) => id) }], reviewers });
+async function resolveSelectedSession(input: ManualReviewInput, dependencies: ManualReviewDependencies): Promise<string> {
+  if (input.session && input.session !== 'latest') return input.session;
+  const discover = dependencies.discover ?? discoverReviewSessions;
+  const sessions = await discover(input);
+  return selectRepositorySession(sessions, { session: input.session, interactive: input.interactive ?? false, repository: input.repository }, dependencies.prompt);
 }
 
 export async function discoverReviewSessions(input: Pick<ManualReviewInput, 'source' | 'root' | 'project'>): Promise<readonly ReviewSessionDescriptor[]> {
@@ -66,6 +80,7 @@ export async function discoverReviewSessions(input: Pick<ManualReviewInput, 'sou
 }
 
 async function loadSession(input: ManualReviewInput): Promise<NormalizedSession> {
+  if (!input.session) throw new SyntaxError('An explicit session artifact is required in non-interactive mode.');
   if (input.source === 'codex') return new CodexSessionAdapter(input.root).read(input.session);
   if (input.source === 'claude-code') {
     if (!input.project) throw new SyntaxError('Option is required: --project.');
@@ -76,15 +91,6 @@ async function loadSession(input: ManualReviewInput): Promise<NormalizedSession>
   }
   const location = join(input.root, input.session);
   return readCursorMarkdownExport({ source: 'cursor', id: basename(input.session, '.md'), location, format: 'markdown-export' }, input.root, new Date(0).toISOString());
-}
-
-function reviewer(id: string, expensive: boolean): Reviewer {
-  return { id, expensive, async review(artifact) {
-    const toolEvents = artifact.session.events.filter((event) => event.kind === 'tool');
-    if (id === 'workflow') return toolEvents.map((event) => ({ code: `workflow-${event.outcome}`, findingId: `${id}:${event.id}`, rootCauseId: `${event.outcome}-tool:${event.tool ?? 'unknown'}`, recommendation: event.outcome === 'failed' ? `Investigate failed ${event.tool ?? 'unknown'} workflow` : `Reuse ${event.tool ?? 'unknown'} workflow with outcome ${event.outcome}` }));
-    if (id === 'privacy') return artifact.session.events.filter((event) => event.kind === 'message' || event.kind === 'metadata').map((event) => ({ code: `review-${event.kind}`, findingId: `${id}:${event.id}`, rootCauseId: `review-evidence:${event.kind}`, recommendation: `Preserve sanitized ${event.kind} evidence for review` }));
-    return artifact.session.events.filter((event) => event.outcome === 'failed').map((event) => ({ code: 'diagnostic-failure', findingId: `${id}:${event.id}`, rootCauseId: `diagnostic:${event.tool ?? event.kind}`, recommendation: `Run explicit diagnostics for ${event.tool ?? event.kind}` }));
-  } };
 }
 
 function recommendation(value: { readonly state: 'agreed'; readonly value: string } | { readonly state: 'unresolved-disagreement'; readonly values: readonly string[] }): string {

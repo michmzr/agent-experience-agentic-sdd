@@ -86,13 +86,15 @@ function parseReviewRequest(parsed: ParsedArguments) {
     parsed.options,
     subcommand === 'sessions'
       ? ['json', 'source', 'root', 'project']
-      : ['json', 'source', 'session', 'root', 'project', 'profile', 'allow-expensive-checks']
+      : ['json', 'source', 'session', 'root', 'project', 'repository', 'profile', 'interactive', 'allow-expensive-checks']
   );
   const source = requiredReviewSource(parsed.options); const root = requiredString(parsed.options, 'root'); const project = optionalString(parsed.options, 'project');
   if (subcommand === 'sessions') return { kind: 'discover' as const, source, root, project };
-  const session = requiredString(parsed.options, 'session');
-  if (session === 'latest') throw new SyntaxError('Session selector latest is not supported.');
-  return { kind: 'review' as const, source, session, root, project, profile: optionalReviewProfile(parsed.options), allowExpensiveChecks: parsed.options.has('allow-expensive-checks') };
+  const session = optionalString(parsed.options, 'session');
+  const repository = optionalString(parsed.options, 'repository');
+  const interactive = parsed.options.has('interactive');
+  if (session === 'latest' && (!interactive || !repository)) throw new SyntaxError('Interactive repository scope is required for session selection.');
+  return { kind: 'review' as const, source, session, root, project, repository, interactive, profile: optionalReviewProfile(parsed.options), allowExpensiveChecks: parsed.options.has('allow-expensive-checks') };
 }
 
 function parseArguments(args: readonly string[]): ParsedArguments {
@@ -103,7 +105,7 @@ function parseArguments(args: readonly string[]): ParsedArguments {
     if (!value.startsWith('--')) { positionals.push(value); continue; }
     const name = value.slice(2); if (!name) throw new SyntaxError('Option name is required.');
     if (options.has(name)) throw new SyntaxError(`Option may be supplied once: --${name}.`);
-    if (name === 'json' || name === 'allow-expensive-checks') { options.set(name, true); continue; }
+    if (name === 'json' || name === 'interactive' || name === 'allow-expensive-checks') { options.set(name, true); continue; }
     const optionValue = args[index + 1]; if (!optionValue || optionValue.startsWith('--')) throw new SyntaxError(`Option requires a value: --${name}.`);
     options.set(name, optionValue); index += 1;
   }
