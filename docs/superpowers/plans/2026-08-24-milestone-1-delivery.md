@@ -11,7 +11,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 | 3. Privacy scrubber and artifact boundary | completed | `96c959a`; independent `pnpm check` 71 passed and diff check passed. |
 | 4. Manual review CLI and profile runtime | completed | `7f837e8`, `9bee20b`; independent `pnpm check` 78 passed. |
 | 5. Parallel orchestration, candidates and proposals | completed | `66cfe7a`, `e0deb53`; independent `pnpm check` 84 passed and diff check passed. |
-| 6. Milestone acceptance, review and merge | in progress | Canonical Git identity fix `f37c474` passes 131 tests; two independent final reviews approved; roadmap closed. Local `main` merge remains open. |
+| 6. Milestone acceptance, review and merge | completed | Two independent final reviews approved; roadmap closed; local `main` fast-forwarded to `fca8c11`. The identical merge SHA passed 131 tests before merge. |
 
 ### Task 1: Delivery design and executable contracts
 
@@ -67,4 +67,4 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 - [x] Derive interactive repository identity from a validated canonical Git top-level: `f37c474`; RED canonical coverage failed 3 of 5 tests, including acceptance of a caller-controlled same-basename value, then focused integrated coverage passed 30 tests and full offline `pnpm check` passed 131 tests, 0 failed. The filesystem resolver validates canonical real paths plus `.git` directories or gitfiles, rejects different, nested, non-Git and symlinked artifact roots for interactive/latest selection, preserves explicit external-store IDs, and exposes only IDs and recency through the prompt and public JSON.
 - [x] Obtain fresh implementation review and resolve all required findings: two independent reviewers approved `7e291d1`; each independently ran 131 tests with 0 failures and a clean diff check.
 - [x] Mark `docs/product/roadmap.md` Milestone 1 complete only after all gates pass: completed on 2026-08-24 after both final approvals.
-- [ ] Merge the reviewed feature branch into local `main` and record the merge SHA.
+- [x] Merge the reviewed feature branch into local `main` and record the merge SHA: fast-forward `774ad6b..fca8c11`. The identical SHA passed 131 tests before merge; direct post-merge build succeeded and 130 code tests passed, while the package-bootstrap test could not repeat because the local pnpm store lacked the offline TypeScript tarball.
