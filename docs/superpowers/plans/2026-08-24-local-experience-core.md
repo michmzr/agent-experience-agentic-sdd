@@ -24,7 +24,7 @@ Updated: 2026-08-24. This section is the live execution record; tasks are not tr
 | 4. Retrieval and retention | Accepted | `59a55fc` through `bba542d`; specification and quality reviews passed. |
 | 5. Repository knowledge format | Accepted and merged into this branch | `10b5f9a` through `1605a49`; specification and quality reviews passed. |
 | 6. CLI and integration fixtures | Accepted | `fa01006`, `ffa9da4`, `5b31ac5`, `c11538c`; specification and quality reviews passed. Fresh `pnpm check` passed with 52 tests. |
-| 7. Verification evidence | In progress | Started after Task 6 acceptance. |
+| 7. Verification evidence | In progress | Steps 1-3 completed 2026-08-24 16:16:41 CEST: acceptance matrix records a fresh offline-oriented `pnpm check` with 52 passing tests and a no-match network/LLM static scan; staged review found only the planned verification record and execution-plan update, with no whitespace errors or credentials. Commit gate remains. |
 
 Current full verification: `pnpm check` passed on 2026-08-24 with 52 tests, 0 failures.
 
@@ -390,7 +390,7 @@ Expected: one commit containing the CLI and end-to-end fixtures.
 **Files:**
 - Create: `docs/verification/2026-08-24-local-experience-core.md`
 
-- [ ] **Step 1: Write the acceptance evidence matrix**
+- [x] **Step 1: Write the acceptance evidence matrix**
 
 ```md
 | Acceptance criterion | Test or command | Result |
@@ -402,17 +402,23 @@ Expected: one commit containing the CLI and end-to-end fixtures.
 | No network or LLM dependency | `pnpm check` in offline environment | pass |
 ```
 
-- [ ] **Step 2: Run fresh checks**
+Completed: 2026-08-24 16:14:53 CEST. Verification: `git diff --check -- docs/verification/2026-08-24-local-experience-core.md` exited 0. Review state: Markdown inspected; Task 7 remains in progress pending fresh checks and staged-diff review. Commit SHA: pending Task 7 Step 4.
+
+- [x] **Step 2: Run fresh checks**
 
 Run: `pnpm check`
 
 Expected: all checks pass from a clean working tree except the new verification evidence file.
 
-- [ ] **Step 3: Inspect the staged diff for scope and secrets**
+Completed: 2026-08-24 16:15:52 CEST. Verification: `npm_config_offline=true HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 NO_PROXY= pnpm check` completed successfully with 52 tests passed and 0 failed; the documented static scan produced no matches. Review state: fresh check accepted; Task 7 remains in progress pending staged-diff review. Commit SHA: pending Task 7 Step 4.
+
+- [x] **Step 3: Inspect the staged diff for scope and secrets**
 
 Run: `git diff --check && git add docs/verification/2026-08-24-local-experience-core.md && git diff --staged --check && git diff --staged | rg -i 'password|secret|api_key|token'`
 
 Expected: no whitespace errors; no credentials; only the planned source, tests, fixtures, documentation, and verification evidence are staged.
+
+Completed: 2026-08-24 16:16:41 CEST. Verification: `git diff --check` and `git diff --staged --check` exited 0. The staged diff contained only `docs/verification/2026-08-24-local-experience-core.md` and this required execution-plan update. The credential-pattern scan matched only the literal search terms in this plan's documented command, not a credential value. Review state: scope and whitespace accepted; no credentials found. Commit SHA: pending Task 7 Step 4.
 
 - [ ] **Step 4: Commit verification evidence**
 
