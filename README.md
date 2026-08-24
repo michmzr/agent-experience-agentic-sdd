@@ -11,11 +11,19 @@ pnpm install --frozen-lockfile
 pnpm check
 ```
 
-Build, then run the installed package executable:
+For development in this checkout, build and run the declared script:
 
 ```sh
 pnpm build
-pnpm exec ael init
+pnpm run ael -- init
+```
+
+For an installed user, pack the built project and install that tarball globally:
+
+```sh
+pnpm pack
+pnpm add --global ./agent-experience-layer-0.0.0.tgz
+ael init
 ```
 
 ## Commands

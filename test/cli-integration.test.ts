@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -90,6 +90,33 @@ test('exposes the package bin as an executable compiled CLI', () => {
     assert.match(output, /^Initialized local experience store at /);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('runs the declared development script and an installed package bin', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-development-'));
+  const packageDirectory = mkdtempSync(join(tmpdir(), 'ael-package-'));
+  const installDirectory = mkdtempSync(join(tmpdir(), 'ael-install-'));
+  try {
+    const developmentOutput = execFileSync('pnpm', ['run', 'ael', '--', 'init', '--data-dir', dataDir], { cwd: process.cwd(), encoding: 'utf8' });
+    assert.match(developmentOutput, /^Initialized local experience store at /m);
+
+    execFileSync('pnpm', ['pack', '--pack-destination', packageDirectory], { cwd: process.cwd(), encoding: 'utf8' });
+    const tarball = join(packageDirectory, readdirSync(packageDirectory).find((name) => name.endsWith('.tgz'))!);
+    writeFileSync(join(installDirectory, 'package.json'), JSON.stringify({ private: true, dependencies: { 'agent-experience-layer': `file:${tarball}` } }));
+    execFileSync('pnpm', ['install', '--offline', '--ignore-scripts'], { cwd: installDirectory, encoding: 'utf8' });
+
+    const executable = join(installDirectory, 'node_modules', '.bin', 'ael');
+    const help = spawnSync(executable, ['--help'], { encoding: 'utf8' });
+    assert.equal(help.status, 0, help.stderr);
+    assert.match(help.stdout, /^Usage: ael /);
+    const invalid = spawnSync(executable, ['invalid-command'], { encoding: 'utf8' });
+    assert.equal(invalid.status, 2, `${invalid.stdout}\n${invalid.stderr}`);
+    assert.match(invalid.stderr, /Unknown command/);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(packageDirectory, { recursive: true, force: true });
+    rmSync(installDirectory, { recursive: true, force: true });
   }
 });
 

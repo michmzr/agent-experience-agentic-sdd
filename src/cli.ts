@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
+import { basename } from 'node:path';
 
 import { DomainError, errorMessage, ExperienceService } from './application/experience-service.js';
 import type { KnowledgeState } from './domain/types.js';
@@ -13,6 +14,7 @@ const scopes = new Set(['global', 'repo'] as const);
 const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired']);
 
 export function runCli(args: string[]): CliResult {
+  if (args.length === 1 && args[0] === '--help') return { exitCode: 0, stdout: `${usage()}\n`, stderr: '' };
   try {
     const parsed = parseArguments(args);
     const json = parsed.options.has('json');
@@ -63,6 +65,7 @@ function parseArguments(args: readonly string[]): ParsedArguments {
   const positionals: string[] = []; const options = new Map<string, string | true>();
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];
+    if (value === '--') continue;
     if (!value.startsWith('--')) { positionals.push(value); continue; }
     const name = value.slice(2); if (!name) throw new SyntaxError('Option name is required.');
     if (options.has(name)) throw new SyntaxError(`Option may be supplied once: --${name}.`);
@@ -109,8 +112,9 @@ interface KnowledgeRecord { readonly id: string; readonly state: string; readonl
 function formatKnowledgeList(entries: readonly KnowledgeRecord[]): string { return entries.length ? entries.map((entry) => formatKnowledge(entry, false)).join('\n') : 'No knowledge entries found.'; }
 function formatKnowledge(entry: KnowledgeRecord, includeEvidence: boolean): string { return `${entry.id} [${entry.state}]${entry.authoritative ? ' [authoritative]' : ''}\n${entry.statement}${includeEvidence ? `\nEvidence: ${entry.evidenceIds.join(', ')}` : ''}`; }
 function countLabel(count: number, singular: string): string { return `${count} ${count === 1 ? singular : `${singular}s`}`; }
+function usage(): string { return 'Usage: ael <init|experience add|validate|inspect|lessons list|retrieve|export> [options]'; }
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } { return error instanceof DomainError ? { code: error.code, message: error.message } : { code: fallbackCode, message: errorMessage(error) }; }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && basename(process.argv[1]) === basename(fileURLToPath(import.meta.url))) {
   const result = runCli(process.argv.slice(2)); process.stdout.write(result.stdout); process.stderr.write(result.stderr); process.exitCode = result.exitCode;
 }

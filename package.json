@@ -6,10 +6,14 @@
   "bin": {
     "ael": "./dist/src/cli.js"
   },
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": ">=22.17.0"
   },
   "scripts": {
+    "ael": "node dist/src/cli.js",
     "build": "tsc -p tsconfig.build.json",
     "test": "pnpm build && node --test dist/test/**/*.test.js",
     "check": "pnpm build && pnpm test"
