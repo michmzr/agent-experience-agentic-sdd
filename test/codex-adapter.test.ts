@@ -1,0 +1,68 @@
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+
+import { CodexSessionAdapter } from '../src/review/adapters/codex.js';
+
+async function fixtureRoot(): Promise<string> {
+  return mkdtemp(join(tmpdir(), 'ael-codex-adapter-'));
+}
+
+test('discovers only regular observed JSONL artifacts below an injected root', async () => {
+  const root = await fixtureRoot();
+  await mkdir(join(root, 'nested'));
+  await writeFile(join(root, 'session.jsonl'), '{"kind":"metadata","occurredAt":"2026-08-24T10:00:00.000Z"}\n');
+  await writeFile(join(root, 'nested', 'second.jsonl'), '{"kind":"message","occurredAt":"2026-08-24T10:01:00.000Z"}\n');
+  await writeFile(join(root, 'notes.txt'), 'not a session');
+
+  const artifacts = await new CodexSessionAdapter(root).discover();
+
+  assert.deepEqual(artifacts.map((artifact) => ({ id: artifact.id, format: artifact.format })), [
+    { id: 'nested/second.jsonl', format: 'observed-jsonl' },
+    { id: 'session.jsonl', format: 'observed-jsonl' }
+  ]);
+});
+
+test('normalizes known records while excluding raw payloads', async () => {
+  const root = await fixtureRoot();
+  await writeFile(
+    join(root, 'session.jsonl'),
+    '{"kind":"metadata","occurredAt":"2026-08-24T10:00:00.000Z","payload":"private-token"}\n{"kind":"tool","occurredAt":"2026-08-24T10:01:00.000Z","tool":"pnpm","exitStatus":0,"payload":{"arguments":"secret"}}\n'
+  );
+
+  const session = await new CodexSessionAdapter(root).read('session.jsonl');
+
+  assert.equal(session.source, 'codex');
+  assert.equal(session.sessionId, 'session.jsonl');
+  assert.deepEqual(session.events, [
+    { id: 'session.jsonl:0', kind: 'metadata', occurredAt: '2026-08-24T10:00:00.000Z', outcome: 'unknown' },
+    { id: 'session.jsonl:1', kind: 'tool', occurredAt: '2026-08-24T10:01:00.000Z', tool: 'pnpm', exitStatus: 0, outcome: 'passed' }
+  ]);
+  assert.equal(JSON.stringify(session).includes('private-token'), false);
+  assert.equal(JSON.stringify(session).includes('secret'), false);
+});
+
+test('rejects a symlink or selection that escapes the injected root', async () => {
+  const root = await fixtureRoot();
+  const outside = await fixtureRoot();
+  await writeFile(join(outside, 'outside.jsonl'), '{"kind":"metadata","occurredAt":"2026-08-24T10:00:00.000Z"}\n');
+  await symlink(join(outside, 'outside.jsonl'), join(root, 'linked.jsonl'));
+  await writeFile(join(root, 'inside.jsonl'), '{"kind":"metadata","occurredAt":"2026-08-24T10:00:00.000Z"}\n');
+  const adapter = new CodexSessionAdapter(root);
+
+  assert.deepEqual((await adapter.discover()).map((artifact) => artifact.id), ['inside.jsonl']);
+  await assert.rejects(() => adapter.read('linked.jsonl'), /outside|symlink|selected session artifact/i);
+  await assert.rejects(() => adapter.read('../outside.jsonl'), /outside|selected session artifact/i);
+});
+
+test('rejects unknown JSONL record kinds without including raw input in the error', async () => {
+  const root = await fixtureRoot();
+  await writeFile(join(root, 'session.jsonl'), '{"kind":"unrecognized","occurredAt":"2026-08-24T10:00:00.000Z","payload":"do-not-leak"}\n');
+
+  await assert.rejects(
+    () => new CodexSessionAdapter(root).read('session.jsonl'),
+    (error: unknown) => error instanceof Error && /unsupported session record/i.test(error.message) && !error.message.includes('do-not-leak')
+  );
+});
