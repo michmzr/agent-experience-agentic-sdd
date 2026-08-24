@@ -102,7 +102,12 @@ test('redacts canonical provider credentials even when they have no identifying 
   const credentials = [
     'github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99II00JJ',
     'ghp_11AA22BB33CC44DD55EE66FF77GG88HH99II',
+    'gho_11AA22BB33CC44DD55EE66FF77GG88HH99II',
+    'ghu_11AA22BB33CC44DD55EE66FF77GG88HH99II',
+    'ghs_11AA22BB33CC44DD55EE66FF77GG88HH99II',
+    'ghr_11AA22BB33CC44DD55EE66FF77GG88HH99II',
     'AKIAIOSFODNN7EXAMPLE',
+    'ASIAIOSFODNN7EXAMPLE',
     'sk-proj-11AA22BB33CC44DD55EE66FF77GG88HH99II'
   ];
   const artifact = sanitizeForReview({
@@ -123,16 +128,16 @@ test('redacts arbitrary absolute POSIX roots without corrupting URL syntax', () 
     repositoryHint: '/workspace/service',
     events: [{
       ...sensitiveSession.events[0],
-      tool: '/custom-root/build/output.json https://example.test/workspace/service file:///workspace/service'
+      tool: '/custom-root/build/output.json https://example.test/workspace/service http://example.test/custom-root file:///workspace/service'
     }]
   });
 
   assert.equal(artifact.session.repositoryHint, '[REDACTED:absolute-path]');
   assert.equal(
     artifact.session.events[0]?.tool,
-    '[REDACTED:absolute-path] https://example.test/workspace/service file:///workspace/service'
+    '[REDACTED:absolute-path] https://example.test/workspace/service http://example.test/custom-root file:///[REDACTED:absolute-path]'
   );
-  assert.equal(artifact.redactions['absolute-path'], 2);
+  assert.equal(artifact.redactions['absolute-path'], 3);
 });
 
 test('uses deterministic distinct pseudonyms for different opaque identities', () => {
@@ -152,7 +157,7 @@ test('recognizes only artifacts created by the sanitizer as trusted review input
   assert.doesNotThrow(() => assertSanitizedReviewArtifact(artifact));
   assert.throws(
     () => assertSanitizedReviewArtifact(structuredClone(artifact)),
-    (error: unknown) => error instanceof SanitizationError
+    (error: unknown) => error instanceof SanitizationError && /sanitized review artifact/i.test(error.message)
   );
   assert.throws(
     () => assertSanitizedReviewArtifact({ ...artifact }),
