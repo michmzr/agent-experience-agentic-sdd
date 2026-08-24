@@ -24,7 +24,7 @@ Updated: 2026-08-24. This section is the live execution record; tasks are not tr
 | 4. Retrieval and retention | Accepted | `59a55fc` through `bba542d`; specification and quality reviews passed. |
 | 5. Repository knowledge format | Accepted and merged into this branch | `10b5f9a` through `1605a49`; specification and quality reviews passed. |
 | 6. CLI and integration fixtures | Accepted | `fa01006`, `ffa9da4`, `5b31ac5`, `c11538c`; specification and quality reviews passed. Fresh `pnpm check` passed with 52 tests. |
-| 7. Verification evidence | Refresh in progress | `889eaf5` fixed the persisted lifecycle regression and passed 53 tests. Offline-oriented verification evidence and scoped diff review must be rerun before Task 7 can be accepted again. |
+| 7. Verification evidence | Refresh in progress | Refresh Steps 1-4 completed 2026-08-24 17:44:01 CEST: the documented offline-oriented `pnpm check` passed with 53 tests, including the persisted-lifecycle CLI regression; the network/LLM scan had no matches; evidence and staged-diff review passed with documentation-only scope and no credentials. Commit gate remains. |
 
 Current full verification: `pnpm check` passed on 2026-08-24 with 53 tests, 0 failures.
 
@@ -389,6 +389,24 @@ Expected: one commit containing the CLI and end-to-end fixtures.
 
 **Files:**
 - Create: `docs/verification/2026-08-24-local-experience-core.md`
+
+### Refresh after persisted lifecycle correction
+
+- [x] **Step 1: Run the documented offline-oriented full check**
+
+Completed: 2026-08-24 17:42:35 CEST. Verification: `npm_config_offline=true HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 NO_PROXY= pnpm check` completed successfully with 53 tests passed, 0 failed, and 0 skipped. The test suite included `persists contradictory fixture evidence as a disputed lifecycle transition instead of accepting its claimed verified state` from `test/cli-integration.test.ts`. Review state: fresh full check accepted; the refresh remains in progress pending static scan, documentation update, and staged-diff review. Commit SHA: pending refresh commit.
+
+- [x] **Step 2: Run the documented network and LLM static scan**
+
+Completed: 2026-08-24 17:43:04 CEST. Verification: `rg -n -i 'node:(http|https|net|tls|dns)|\\bfetch\\s*\\(|\\baxios\\b|\\bundici\\b|\\bwebsocket\\b|\\bopenai\\b|\\banthropic\\b|\\bllm\\b|https?://' src test README.md package.json` returned no matches. Review state: source, tests, package manifest, and README contain no listed network or LLM client imports or calls; the refresh remains in progress pending evidence update and staged-diff review. Commit SHA: pending refresh commit.
+
+- [x] **Step 3: Refresh the evidence matrix**
+
+Completed: 2026-08-24 17:43:34 CEST. Verification: `git diff --check -- docs/verification/2026-08-24-local-experience-core.md` exited 0. The matrix now records the 53-test full check and the persisted-lifecycle CLI regression. Review state: evidence content and Markdown whitespace accepted; the refresh remains in progress pending staged-diff review. Commit SHA: pending refresh commit.
+
+- [x] **Step 4: Review staged refresh scope, whitespace, and credentials**
+
+Completed: 2026-08-24 17:44:01 CEST. Verification: `git diff --check` and `git diff --staged --check` exited 0. The staged scope contained only `docs/verification/2026-08-24-local-experience-core.md` and this required execution-plan update. `git diff --staged | rg -n -i 'password|secret|api_key|token'` produced no matches. Review state: scope, whitespace, and credential review accepted; the refresh remains in progress pending commit. Commit SHA: pending refresh commit.
 
 - [x] **Step 1: Write the acceptance evidence matrix**
 
