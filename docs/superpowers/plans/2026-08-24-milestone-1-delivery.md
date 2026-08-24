@@ -11,7 +11,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 | 3. Privacy scrubber and artifact boundary | completed | `96c959a`; independent `pnpm check` 71 passed and diff check passed. |
 | 4. Manual review CLI and profile runtime | completed | `7f837e8`, `9bee20b`; independent `pnpm check` 78 passed. |
 | 5. Parallel orchestration, candidates and proposals | completed | `66cfe7a`, `e0deb53`; independent `pnpm check` 84 passed and diff check passed. |
-| 6. Milestone acceptance, review and merge | in progress | Review-output privacy and CLI option fixes pass 108 tests. Final spec review found three open items: non-interactive `latest`, bounded sanitized review text, and injected versioned profile selection. |
+| 6. Milestone acceptance, review and merge | in progress | Bounded allowlisted review text fixed in `bc11ecb`; focused tests 3 passed and offline `pnpm check` 114 passed. Non-interactive `latest`, injected profile selection and final approval remain open. |
 
 ### Task 1: Delivery design and executable contracts
 
@@ -57,7 +57,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 - [x] Close third-gate review-output privacy finding: `c332adc`; focused privacy tests 2 passed, full `pnpm check` 108 passed, 0 failed; raw selected session identifiers and public discovery locations are absent from output.
 - [x] Close third-gate command-specific CLI allowlist finding: `7f610d6`; RED proved that `review sessions` accepted `--session` and `--allow-expensive-checks`, and GREEN focused coverage plus full `pnpm check` passed 108 tests, 0 failed. The distinct allowlist now returns exit code 2 with `INVALID_SYNTAX: Unsupported option` for both flags.
 - [ ] Remove non-interactive `--session latest`; final specification review finding open.
-- [ ] Add bounded, allowlisted session text that is sanitized and residual-scanned before review; final specification review finding open.
+- [x] Add bounded, allowlisted session text that is sanitized and residual-scanned before review: `bc11ecb`; focused evidence tests 3 passed, full offline `pnpm check` 114 passed, 0 failed, and diff check passed.
 - [ ] Inject a versioned profile registry/runtime and expose explicit profile selection; final quality review finding open.
 - [ ] Obtain fresh implementation review and resolve all required findings.
 - [ ] Mark `docs/product/roadmap.md` Milestone 1 complete only after all gates pass.
