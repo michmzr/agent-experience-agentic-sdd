@@ -8,8 +8,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "test": "pnpm build && node --test dist/test/*.test.js",
-    "check": "tsc --noEmit"
+    "test": "pnpm build && node --test dist/test/**/*.test.js",
+    "check": "pnpm build && pnpm test"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
