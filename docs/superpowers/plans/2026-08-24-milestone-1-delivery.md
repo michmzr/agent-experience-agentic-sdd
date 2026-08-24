@@ -62,7 +62,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 - [ ] Sanitize and residual-scan complete source text before truncation so a credential crossing the event limit cannot escape detection.
 - [ ] Enforce fail-closed maximum artifact bytes, event count and aggregate review-text size before reviewer dispatch.
 - [ ] Implement interactive repository-scoped discovery and latest-for-current-repository selection with explicit confirmation; align README.
-- [ ] Add all reviewer perspectives required by Spec 006 to the default versioned profile with deterministic coverage.
+- [x] Add all reviewer perspectives required by Spec 006 to the default versioned profile with deterministic coverage: `b92e095`; RED failed because the default-reviewers module did not exist, then the focused compiled Node test passed with all ten ordered reviewers and evidence-derived findings.
 - [ ] Obtain fresh implementation review and resolve all required findings.
 - [ ] Mark `docs/product/roadmap.md` Milestone 1 complete only after all gates pass.
 - [ ] Merge the reviewed feature branch into local `main` and record the merge SHA.
