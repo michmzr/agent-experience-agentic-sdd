@@ -24,11 +24,11 @@ Updated: 2026-08-24. This section is the live execution record; tasks are not tr
 | 4. Retrieval and retention | Accepted | `59a55fc` through `bba542d`; specification and quality reviews passed. |
 | 5. Repository knowledge format | Accepted and merged into this branch | `10b5f9a` through `1605a49`; specification and quality reviews passed. |
 | 6. CLI and integration fixtures | Accepted | `fa01006`, `ffa9da4`, `5b31ac5`, `c11538c`; specification and quality reviews passed. Fresh `pnpm check` passed with 52 tests. |
-| 7. Verification evidence | Refreshed | 2026-08-24: TDD RED reproduced the persisted-state regression; GREEN and the full `pnpm check` passed with 53 tests, 0 failures. Evidence commit: pending `fix: persist contradictory evidence lifecycle`. |
+| 7. Verification evidence | Refresh in progress | `889eaf5` fixed the persisted lifecycle regression and passed 53 tests. Offline-oriented verification evidence and scoped diff review must be rerun before Task 7 can be accepted again. |
 
 Current full verification: `pnpm check` passed on 2026-08-24 with 53 tests, 0 failures.
 
-Task 6 review state: specification and repeated quality reviews accepted the implementation. The Task 3 persisted-lifecycle regression is corrected: a valid contradictory import cannot retain a caller-supplied active state, and its lifecycle history is written in the same transaction.
+Task 6 review state: specification and repeated quality reviews accepted the implementation. The Task 3 persisted-lifecycle regression is corrected: a valid contradictory import cannot retain a caller-supplied active state, and its lifecycle history is written in the same transaction. Task 7 refresh is active.
 
 Milestone 1 work outside this local-core plan remains pending: the three source adapters, sanitizer, manual review runtime, reviewer orchestration, candidate-lesson and proposal generation, and the expanded benchmark fixtures.
 
