@@ -43,7 +43,7 @@ const categories: readonly RedactionCategory[] = [
 const baseRules: readonly [RedactionCategory, RegExp][] = [
   ['private-key', /-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z]+)? PRIVATE KEY-----/gi],
   ['credential-url', /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@[^\s/]+(?:\/[^\s]*)?/gi],
-  ['absolute-path', /(?:^|\s)(?:\/Users\/[^\s/]+|\/home\/[^\s/]+)(?:\/[^\s]*)?/g],
+  ['absolute-path', /(?<![A-Za-z0-9+.:/\\-])\/(?:Users|home|private|var|tmp|opt|etc|srv|root|Volumes|usr|Library|Applications)(?:\/[^\s"'`;,)]*)?|(?<![A-Za-z0-9])(?:[A-Za-z]:\\(?:[^\\\s"'`;,)]*\\?)+|\\\\[^\\\s"'`;,)]*\\[^\\\s"'`;,)]*(?:\\[^\\\s"'`;,)]*)*)/g],
   ['token', /\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi],
   ['token', /\b(?:token|api[_-]?key|access[_-]?key)\s*[:=]\s*[^\s;,]+/gi],
   ['password', /\b(?:password|passwd|pwd)\s*[:=]\s*[^\s;,]+/gi],
@@ -62,7 +62,7 @@ export function sanitizeForReview(input: NormalizedSession, options: SanitizeFor
     return result;
   };
 
-  return {
+  const artifact: SanitizedReviewArtifact = {
     policy,
     redactions,
     session: {
@@ -74,6 +74,8 @@ export function sanitizeForReview(input: NormalizedSession, options: SanitizeFor
       events: input.events.map((event) => sanitizeEvent(event, sanitize))
     }
   };
+  assertNoSensitiveContent(artifact.session, configuredPatterns);
+  return artifact;
 }
 
 function sanitizeEvent(event: NormalizedSessionEvent, sanitize: (value: string, redactOpaqueId?: boolean) => string): NormalizedSessionEvent {
@@ -99,8 +101,29 @@ function normalizePatterns(patterns: readonly RegExp[]): readonly RegExp[] {
     if (!(pattern instanceof RegExp) || pattern.source.length === 0 || pattern.flags.includes('y') || pattern.test('')) throw new SanitizationError();
   }
   return patterns
-    .map((pattern) => new RegExp(pattern.source, pattern.flags))
+    .map((pattern) => new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`))
     .sort((left, right) => `${left.source}/${left.flags}`.localeCompare(`${right.source}/${right.flags}`));
+}
+
+function assertNoSensitiveContent(session: NormalizedSession, configuredPatterns: readonly RegExp[]): void {
+  const values = [
+    session.source,
+    session.repositoryHint,
+    session.sessionId,
+    session.startedAt,
+    session.endedAt,
+    ...session.events.flatMap((event) => [event.id, event.kind, event.occurredAt, event.tool, event.outcome])
+  ].filter((value): value is string => value !== undefined);
+  const residualPatterns = [...baseRules.map(([, pattern]) => pattern), ...configuredPatterns];
+
+  for (const value of values) {
+    for (const pattern of residualPatterns) {
+      pattern.lastIndex = 0;
+      const remains = pattern.test(value);
+      pattern.lastIndex = 0;
+      if (remains) throw new SanitizationError();
+    }
+  }
 }
 
 function policyHash(patterns: readonly RegExp[]): string {

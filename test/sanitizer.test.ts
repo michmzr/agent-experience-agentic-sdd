@@ -64,6 +64,56 @@ test('changes the policy hash when configured redaction patterns change', () => 
   assert.notEqual(first.policy.hash, second.policy.hash);
 });
 
+test('applies configured patterns globally even when the supplied expression is not global', () => {
+  const artifact = sanitizeForReview({
+    ...sensitiveSession,
+    events: [{
+      ...sensitiveSession.events[0],
+      tool: 'customer-reference customer-reference'
+    }]
+  }, { configuredPatterns: [/customer-reference/i] });
+
+  assert.equal(artifact.session.events[0]?.tool, '[REDACTED:configured-pattern] [REDACTED:configured-pattern]');
+  assert.equal(artifact.redactions['configured-pattern'], 2);
+});
+
+test('redacts POSIX and Windows absolute paths outside home directories', () => {
+  const artifact = sanitizeForReview({
+    ...sensitiveSession,
+    repositoryHint: '/private/var/folders/build/project',
+    events: [{
+      ...sensitiveSession.events[0],
+      tool: '/var/log/service.log /tmp/review.json C:\\Users\\alice\\repo\\secret.txt \\\\server\\share\\private\\file.txt'
+    }]
+  });
+  const serialized = JSON.stringify(artifact);
+
+  for (const rawValue of ['/private/var/folders/build/project', '/var/log/service.log', '/tmp/review.json', 'C:\\\\Users', 'server\\\\share']) {
+    assert.equal(serialized.includes(rawValue), false, `review artifact leaked an absolute path`);
+  }
+  assert.equal(artifact.redactions['absolute-path'], 5);
+});
+
+test('fails closed when a supported sensitive pattern remains after redaction without leaking values', () => {
+  const rawSecret = 'must-not-leak';
+  const input = {
+    ...sensitiveSession,
+    events: [{ ...sensitiveSession.events[0], tool: rawSecret }]
+  };
+
+  assert.throws(
+    () => sanitizeForReview(input, { configuredPatterns: [/(?=must-not-leak)/] }),
+    (error: unknown) => error instanceof SanitizationError && !error.message.includes(rawSecret)
+  );
+});
+
+test('scans validated metadata fields for residual configured sensitive patterns', () => {
+  assert.throws(
+    () => sanitizeForReview(sensitiveSession, { configuredPatterns: [/2026-08-24/] }),
+    (error: unknown) => error instanceof SanitizationError && !error.message.includes('2026-08-24')
+  );
+});
+
 test('fails closed with a typed error for malformed normalized content without leaking input', () => {
   const malformed = { ...sensitiveSession, events: [{ ...sensitiveSession.events[0], payload: 'token=must-not-leak' }] };
 
