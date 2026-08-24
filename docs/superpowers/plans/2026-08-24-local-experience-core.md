@@ -24,7 +24,7 @@ Updated: 2026-08-24. This section is the live execution record; tasks are not tr
 | 4. Retrieval and retention | Accepted | `59a55fc` through `bba542d`; specification and quality reviews passed. |
 | 5. Repository knowledge format | Accepted and merged into this branch | `10b5f9a` through `1605a49`; specification and quality reviews passed. |
 | 6. CLI and integration fixtures | Accepted | `fa01006`, `ffa9da4`, `5b31ac5`, `c11538c`; specification and quality reviews passed. Fresh `pnpm check` passed with 52 tests. |
-| 7. Verification evidence | Refresh in progress | Refresh Steps 1-4 completed 2026-08-24 17:44:01 CEST: the documented offline-oriented `pnpm check` passed with 53 tests, including the persisted-lifecycle CLI regression; the network/LLM scan had no matches; evidence and staged-diff review passed with documentation-only scope and no credentials. Commit gate remains. |
+| 7. Verification evidence | Accepted | Refresh completed 2026-08-24 17:44:33 CEST: the documented offline-oriented `pnpm check` passed with 53 tests, including the persisted-lifecycle CLI regression; the network/LLM scan had no matches; evidence and staged-diff review passed with documentation-only scope and no credentials. Evidence commit: `acabfc0`. |
 
 Current full verification: `pnpm check` passed on 2026-08-24 with 53 tests, 0 failures.
 
@@ -407,6 +407,10 @@ Completed: 2026-08-24 17:43:34 CEST. Verification: `git diff --check -- docs/ver
 - [x] **Step 4: Review staged refresh scope, whitespace, and credentials**
 
 Completed: 2026-08-24 17:44:01 CEST. Verification: `git diff --check` and `git diff --staged --check` exited 0. The staged scope contained only `docs/verification/2026-08-24-local-experience-core.md` and this required execution-plan update. `git diff --staged | rg -n -i 'password|secret|api_key|token'` produced no matches. Review state: scope, whitespace, and credential review accepted; the refresh remains in progress pending commit. Commit SHA: pending refresh commit.
+
+- [x] **Step 5: Commit refreshed verification evidence**
+
+Completed: 2026-08-24 17:44:33 CEST. Verification: `git commit -m "docs: refresh local core verification evidence"` created `acabfc0`, containing only the refreshed verification record and execution-plan progress through Refresh Step 4. Review state: Task 7 refresh accepted. Commit SHA: `acabfc0`.
 
 - [x] **Step 1: Write the acceptance evidence matrix**
 
