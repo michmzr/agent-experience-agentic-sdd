@@ -14,10 +14,10 @@ function fixture(): ExperienceImport & { knowledgeMetadata: NonNullable<Experien
       { id: 'session-repo-b' as ExperienceImport['sessions'][number]['id'], source: 'codex', startedAt: '2026-08-20T10:00:00.000Z', repositoryId: 'repo-b' as ExperienceImport['sessions'][number]['repositoryId'] }
     ],
     events: [
-      { id: 'event-old' as ExperienceImport['events'][number]['id'], sessionId: 'session-repo-a' as ExperienceImport['sessions'][number]['id'], kind: 'file-edit', occurredAt: '2026-08-20T10:00:00.000Z', path: 'src/a.ts', tool: 'git' },
-      { id: 'event-new' as ExperienceImport['events'][number]['id'], sessionId: 'session-repo-a' as ExperienceImport['sessions'][number]['id'], kind: 'file-edit', occurredAt: '2026-08-21T10:00:00.000Z', path: 'src/a.ts', tool: 'git' },
-      { id: 'event-other-repo' as ExperienceImport['events'][number]['id'], sessionId: 'session-repo-b' as ExperienceImport['sessions'][number]['id'], kind: 'file-edit', occurredAt: '2026-08-22T10:00:00.000Z', path: 'src/a.ts', tool: 'git' },
-      { id: 'event-disputed' as ExperienceImport['events'][number]['id'], sessionId: 'session-repo-a' as ExperienceImport['sessions'][number]['id'], kind: 'test-result', occurredAt: '2026-08-23T10:00:00.000Z' }
+      { id: 'event-old' as ExperienceImport['events'][number]['id'], sessionId: 'session-repo-a' as ExperienceImport['sessions'][number]['id'], kind: 'file-edit', occurredAt: '2026-08-20T10:00:00.000Z', path: 'src/a.ts', tool: 'git', tags: ['safety'] },
+      { id: 'event-new' as ExperienceImport['events'][number]['id'], sessionId: 'session-repo-a' as ExperienceImport['sessions'][number]['id'], kind: 'file-edit', occurredAt: '2026-08-21T10:00:00.000Z', path: 'src/a.ts', tool: 'git', tags: ['safety'] },
+      { id: 'event-other-repo' as ExperienceImport['events'][number]['id'], sessionId: 'session-repo-b' as ExperienceImport['sessions'][number]['id'], kind: 'file-edit', occurredAt: '2026-08-22T10:00:00.000Z', path: 'src/a.ts', tool: 'git', tags: ['safety'] },
+      { id: 'event-disputed' as ExperienceImport['events'][number]['id'], sessionId: 'session-repo-a' as ExperienceImport['sessions'][number]['id'], kind: 'test-result', occurredAt: '2026-08-23T10:00:00.000Z', path: 'src/disputed.ts', tool: 'node', tags: ['retention'] }
     ],
     observations: [
       { id: 'observation-old' as ExperienceImport['observations'][number]['id'], eventIds: ['event-old' as ExperienceImport['events'][number]['id']], statement: 'Old exact observation.' },
@@ -197,5 +197,44 @@ test('tombstones an unreferenced event before purging it on a later expiry', () 
   assert.equal(store.expireUnprotected('2030-01-01T00:00:00.000Z'), 1);
   assert.equal(store.expireUnprotected('2030-01-02T00:00:00.000Z'), 1);
   assert.equal(store.expireUnprotected('2030-01-03T00:00:00.000Z'), 0);
+  store.close();
+});
+
+test('rejects retrieval path and tool metadata that disagrees with source events atomically', () => {
+  const store = createStore();
+  const record = fixture();
+  record.knowledgeMetadata['knowledge-new'] = {
+    ...record.knowledgeMetadata['knowledge-new'],
+    path: 'src/forged.ts', tool: 'forged-tool'
+  };
+
+  assert.throws(() => store.import(record), /INVALID_METADATA/);
+  assert.deepEqual(store.listKnowledge(), []);
+  store.close();
+});
+
+test('rejects retrieval tags and creation time that disagree with source events atomically', () => {
+  const store = createStore();
+  const record = fixture();
+  record.knowledgeMetadata['knowledge-new'] = {
+    ...record.knowledgeMetadata['knowledge-new'],
+    tags: ['forged'], createdAt: '2030-01-01T00:00:00.000Z'
+  };
+
+  assert.throws(() => store.import(record), /INVALID_METADATA/);
+  assert.deepEqual(store.listKnowledge(), []);
+  store.close();
+});
+
+test('rejects mixed global and repository source events for repository knowledge', () => {
+  const store = createStore();
+  const record = fixture();
+  record.sessions.push({ id: 'session-global' as ExperienceImport['sessions'][number]['id'], source: 'codex', startedAt: '2026-08-21T10:00:00.000Z' });
+  record.events.push({ id: 'event-global' as ExperienceImport['events'][number]['id'], sessionId: 'session-global' as ExperienceImport['sessions'][number]['id'], kind: 'file-edit', occurredAt: '2026-08-21T10:00:00.000Z', path: 'src/a.ts', tool: 'git', tags: ['safety'] });
+  record.observations.push({ id: 'observation-global' as ExperienceImport['observations'][number]['id'], eventIds: ['event-global' as ExperienceImport['events'][number]['id']], statement: 'Global observation.' });
+  record.clusters[1] = { ...record.clusters[1], observationIds: ['observation-new' as ExperienceImport['observations'][number]['id'], 'observation-global' as ExperienceImport['observations'][number]['id']] };
+
+  assert.throws(() => store.import(record), /INVALID_METADATA: Mixed global and repository provenance/);
+  assert.deepEqual(store.listKnowledge(), []);
   store.close();
 });

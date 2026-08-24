@@ -28,7 +28,7 @@ const collectionKeys = ['sessions', 'events', 'observations', 'clusters', 'candi
 const metadataKeys = ['scope', 'repositoryId', 'path', 'tool', 'tags', 'createdAt', 'approvalKind', 'approvedAt', 'activation', 'mergedProvenance'] as const;
 const allowedEntityKeys: Record<typeof collectionKeys[number], readonly string[]> = {
   sessions: ['id', 'source', 'startedAt', 'repositoryId', 'workspaceId', 'userId'],
-  events: ['id', 'sessionId', 'kind', 'occurredAt', 'tool', 'path', 'outcome', 'exitStatus'],
+  events: ['id', 'sessionId', 'kind', 'occurredAt', 'tool', 'path', 'tags', 'outcome', 'exitStatus'],
   observations: ['id', 'eventIds', 'statement'],
   clusters: ['id', 'observationIds'],
   candidates: ['id', 'clusterId', 'kind', 'statement'],
@@ -97,6 +97,7 @@ function hasValidEntityShape(collection: typeof collectionKeys[number], value: u
     case 'events':
       return hasStringFields(entity, ['id', 'sessionId', 'kind', 'occurredAt'])
         && hasOptionalStringFields(entity, ['tool', 'path', 'outcome'])
+        && (entity.tags === undefined || isStringArray(entity.tags))
         && (entity.exitStatus === undefined || typeof entity.exitStatus === 'number');
     case 'observations':
       return hasStringFields(entity, ['id', 'statement']) && isStringArray(entity.eventIds);

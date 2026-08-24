@@ -108,6 +108,10 @@ const eventRetentionMigration = `
   );
 `;
 
+const eventMetadataMigration = `
+  ALTER TABLE events ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';
+`;
+
 export class ExperienceStore {
   private readonly database: DatabaseSync;
 
@@ -129,8 +133,8 @@ export class ExperienceStore {
     try {
       const sessions = this.database.prepare('INSERT INTO sessions (id, source, started_at, repository_id, workspace_id, user_id) VALUES (?, ?, ?, ?, ?, ?)');
       for (const item of record.sessions) sessions.run(item.id, item.source, item.startedAt, item.repositoryId ?? null, item.workspaceId ?? null, item.userId ?? null);
-      const events = this.database.prepare('INSERT INTO events (id, session_id, kind, occurred_at, tool, path, outcome, exit_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-      for (const item of record.events) events.run(item.id, item.sessionId, item.kind, item.occurredAt, item.tool ?? null, item.path ?? null, item.outcome ?? null, item.exitStatus ?? null);
+      const events = this.database.prepare('INSERT INTO events (id, session_id, kind, occurred_at, tool, path, tags_json, outcome, exit_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      for (const item of record.events) events.run(item.id, item.sessionId, item.kind, item.occurredAt, item.tool ?? null, item.path ?? null, JSON.stringify(normalizeTags(item.tags ?? [])), item.outcome ?? null, item.exitStatus ?? null);
       const observations = this.database.prepare('INSERT INTO observations (id, statement) VALUES (?, ?)');
       const observationEvents = this.database.prepare('INSERT INTO observation_events (observation_id, event_id, position) VALUES (?, ?, ?)');
       for (const item of record.observations) {
@@ -300,6 +304,10 @@ export class ExperienceStore {
         this.database.exec(eventRetentionMigration);
         this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(3, new Date().toISOString());
       }
+      if (!applied.has(4)) {
+        this.database.exec(eventMetadataMigration);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(4, new Date().toISOString());
+      }
       this.database.exec('COMMIT');
     } catch (error) {
       this.database.exec('ROLLBACK');
@@ -330,15 +338,16 @@ export class ExperienceStore {
       .map((event) => record.sessions.find((item) => item.id === event.sessionId)?.repositoryId)
       .filter((repositoryId): repositoryId is NonNullable<typeof repositoryId> => repositoryId !== undefined));
     if (repositoryIds.size > 1) throw new Error('INVALID_METADATA: Mixed repository provenance is not eligible for repository knowledge.');
+    const hasGlobalSource = events.some((event) => record.sessions.find((item) => item.id === event.sessionId)?.repositoryId === undefined);
     const repositoryId = [...repositoryIds][0];
-    const event = events[0];
-    const session = record.sessions.find((item) => item.id === event?.sessionId);
+    if (repositoryId && hasGlobalSource) throw new Error('INVALID_METADATA: Mixed global and repository provenance is not eligible for repository knowledge.');
     return {
       scope: repositoryId ? 'repository' : 'global',
       repositoryId,
-      path: event?.path,
-      tool: event?.tool,
-      createdAt: event?.occurredAt ?? session?.startedAt ?? new Date(0).toISOString()
+      path: consistentValue(events.map((event) => event.path ? normalizePath(event.path) : undefined), 'path'),
+      tool: consistentValue(events.map((event) => event.tool), 'tool'),
+      tags: consistentTags(events.map((event) => event.tags ?? [])),
+      createdAt: consistentValue(events.map((event) => event.occurredAt), 'creation timestamp') ?? new Date(0).toISOString()
     };
   }
 
@@ -351,10 +360,14 @@ export class ExperienceStore {
     if (!input) return provenance;
     if (input.scope !== undefined && input.scope !== provenance.scope) throw new Error('INVALID_METADATA: Knowledge scope must match source provenance.');
     if (input.repositoryId !== undefined && input.repositoryId !== provenance.repositoryId) throw new Error('INVALID_METADATA: Repository ID must match source provenance.');
+    if (input.path !== undefined && normalizePath(input.path) !== provenance.path) throw new Error('INVALID_METADATA: Path must match source provenance.');
+    if (input.tool !== undefined && input.tool !== provenance.tool) throw new Error('INVALID_METADATA: Tool must match source provenance.');
+    if (input.createdAt !== provenance.createdAt) throw new Error('INVALID_METADATA: Creation time must match source provenance.');
+    if (input.tags !== undefined && JSON.stringify(normalizeTags(input.tags)) !== JSON.stringify(provenance.tags ?? [])) throw new Error('INVALID_METADATA: Tags must match source provenance.');
     if (input.activation === 'merged-team-active' && (!provenance.repositoryId || !input.mergedProvenance?.startsWith(`${provenance.repositoryId}:`))) {
       throw new Error('INVALID_METADATA: Team activation requires matching merged provenance.');
     }
-    return { ...provenance, ...input, scope: provenance.scope, repositoryId: provenance.repositoryId };
+    return { ...input, ...provenance, scope: provenance.scope, repositoryId: provenance.repositoryId };
   }
 
   private matchesFilter(row: KnowledgeMetadataRow & KnowledgeRow, filter: RetrievalFilter, normalizedPath: string | undefined): boolean {
@@ -386,4 +399,20 @@ export class ExperienceStore {
 function normalizePath(value: string): string {
   const normalized = posix.normalize(value.replaceAll('\\', '/'));
   return normalized.startsWith('./') ? normalized.slice(2) : normalized;
+}
+
+function normalizeTags(tags: readonly string[]): string[] {
+  return [...new Set(tags)].sort();
+}
+
+function consistentValue<T>(values: readonly T[], field: string): T | undefined {
+  const [value, ...remaining] = values;
+  if (remaining.some((item) => item !== value)) throw new Error(`INVALID_METADATA: Ambiguous ${field} across source events.`);
+  return value;
+}
+
+function consistentTags(values: readonly (readonly string[])[]): string[] {
+  const [tags = [], ...remaining] = values.map(normalizeTags);
+  if (remaining.some((item) => JSON.stringify(item) !== JSON.stringify(tags))) throw new Error('INVALID_METADATA: Ambiguous tags across source events.');
+  return tags;
 }

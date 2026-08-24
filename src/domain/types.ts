@@ -50,6 +50,7 @@ export interface Event {
   occurredAt: string;
   tool?: string;
   path?: string;
+  tags?: readonly string[];
   outcome?: 'passed' | 'failed' | 'unknown';
   exitStatus?: number;
 }
