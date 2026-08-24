@@ -11,7 +11,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 | 3. Privacy scrubber and artifact boundary | completed | `96c959a`; independent `pnpm check` 71 passed and diff check passed. |
 | 4. Manual review CLI and profile runtime | completed | `7f837e8`, `9bee20b`; independent `pnpm check` 78 passed. |
 | 5. Parallel orchestration, candidates and proposals | completed | `66cfe7a`, `e0deb53`; independent `pnpm check` 84 passed and diff check passed. |
-| 6. Milestone acceptance, review and merge | in progress | Public prompt and recency pass 125 tests. Final review found one blocker: repository identity is derived from an untrusted directory basename rather than a canonical repository boundary. |
+| 6. Milestone acceptance, review and merge | in progress | Canonical Git repository identity fix `f37c474` passes 131 tests. Fresh implementation review remains open before roadmap closure and merge. |
 
 ### Task 1: Delivery design and executable contracts
 
@@ -64,7 +64,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 - [x] Implement interactive repository-scoped discovery and latest-for-current-repository selection with explicit confirmation; align README: `b4e02df`; injected discovery and prompt boundaries filter to verified repository hints, confirm every interactive selection, select latest only from dated scoped descriptors, and reject latest outside interactive repository scope. Focused coverage and full offline `pnpm check` passed 121 tests, 0 failed.
 - [x] Add all reviewer perspectives required by Spec 006 to the default versioned profile with deterministic coverage: `b92e095`; RED failed because the default-reviewers module did not exist, then the focused compiled Node test passed with all ten ordered reviewers and evidence-derived findings.
 - [x] Wire the public CLI to a concrete terminal selection prompt and verified repository/recency descriptors: terminal prompt `5eea067`, verified Codex/Claude Code/Cursor scope and artifact-stat recency `e102daa`; selector receives no locations, public JSON omits paths, focused metadata coverage 3 passed, combined focused coverage 14 passed, and full offline `pnpm check` passed 125 tests, 0 failed.
-- [ ] Derive interactive repository identity from a validated canonical Git top-level and reject same-basename or non-repository roots.
+- [x] Derive interactive repository identity from a validated canonical Git top-level: `f37c474`; RED canonical coverage failed 3 of 5 tests, including acceptance of a caller-controlled same-basename value, then focused integrated coverage passed 30 tests and full offline `pnpm check` passed 131 tests, 0 failed. The filesystem resolver validates canonical real paths plus `.git` directories or gitfiles, rejects different, nested, non-Git and symlinked artifact roots for interactive/latest selection, preserves explicit external-store IDs, and exposes only IDs and recency through the prompt and public JSON.
 - [ ] Obtain fresh implementation review and resolve all required findings.
 - [ ] Mark `docs/product/roadmap.md` Milestone 1 complete only after all gates pass.
 - [ ] Merge the reviewed feature branch into local `main` and record the merge SHA.
