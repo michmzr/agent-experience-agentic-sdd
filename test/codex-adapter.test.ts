@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -44,6 +44,29 @@ test('normalizes known records while excluding raw payloads', async () => {
   assert.equal(JSON.stringify(session).includes('secret'), false);
 });
 
+test('normalizes observed Codex envelopes while excluding transcript and tool output', async () => {
+  const root = await fixtureRoot();
+  const observedFixture = await readFile(
+    join(process.cwd(), 'test/fixtures/session-review/observed-codex-session.jsonl'),
+    'utf8'
+  );
+  await writeFile(join(root, 'session.jsonl'), observedFixture);
+
+  const session = await new CodexSessionAdapter(root).read('session.jsonl');
+
+  assert.deepEqual(session.events, [
+    { id: 'session.jsonl:0', kind: 'metadata', occurredAt: '2026-08-24T10:00:00.000Z', outcome: 'unknown' },
+    { id: 'session.jsonl:1', kind: 'metadata', occurredAt: '2026-08-24T10:00:01.000Z', outcome: 'unknown' },
+    { id: 'session.jsonl:2', kind: 'message', occurredAt: '2026-08-24T10:00:02.000Z', outcome: 'unknown' },
+    { id: 'session.jsonl:3', kind: 'tool', occurredAt: '2026-08-24T10:00:03.000Z', tool: 'shell', outcome: 'unknown' },
+    { id: 'session.jsonl:4', kind: 'tool', occurredAt: '2026-08-24T10:00:04.000Z', outcome: 'unknown' }
+  ]);
+  const serialized = JSON.stringify(session);
+  for (const rawValue of ['private transcript', 'private arguments', 'private tool output', 'private instructions']) {
+    assert.equal(serialized.includes(rawValue), false);
+  }
+});
+
 test('rejects a symlink or selection that escapes the injected root', async () => {
   const root = await fixtureRoot();
   const outside = await fixtureRoot();
@@ -64,5 +87,20 @@ test('rejects unknown JSONL record kinds without including raw input in the erro
   await assert.rejects(
     () => new CodexSessionAdapter(root).read('session.jsonl'),
     (error: unknown) => error instanceof Error && /unsupported session record/i.test(error.message) && !error.message.includes('do-not-leak')
+  );
+});
+
+test('rejects an unknown observed Codex envelope type without including its payload in the error', async () => {
+  const root = await fixtureRoot();
+  await writeFile(
+    join(root, 'session.jsonl'),
+    '{"timestamp":"2026-08-24T10:00:00.000Z","type":"unknown_observed_type","payload":{"message":"do-not-leak-observed"}}\n'
+  );
+
+  await assert.rejects(
+    () => new CodexSessionAdapter(root).read('session.jsonl'),
+    (error: unknown) => error instanceof Error
+      && /unsupported session record/i.test(error.message)
+      && !error.message.includes('do-not-leak-observed')
   );
 });

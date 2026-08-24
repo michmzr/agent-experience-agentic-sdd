@@ -90,9 +90,13 @@ export class CodexSessionAdapter {
     } catch {
       throw new Error('Codex session record is invalid JSON.');
     }
-    if (!isRecord(value) || !isKnownKind(value.kind) || typeof value.occurredAt !== 'string') {
-      throw new Error('Unsupported session record.');
-    }
+    if (!isRecord(value)) throw new Error('Unsupported session record.');
+    if ('kind' in value || 'occurredAt' in value) return this.parseSyntheticRecord(value);
+    return this.parseObservedRecord(value);
+  }
+
+  private parseSyntheticRecord(value: Record<string, unknown>): LocalSessionRecord {
+    if (!isKnownKind(value.kind) || typeof value.occurredAt !== 'string') throw new Error('Unsupported session record.');
     if (value.tool !== undefined && typeof value.tool !== 'string') throw new Error('Unsupported session record.');
     if (value.exitStatus !== undefined && (typeof value.exitStatus !== 'number' || !Number.isFinite(value.exitStatus))) {
       throw new Error('Unsupported session record.');
@@ -104,6 +108,31 @@ export class CodexSessionAdapter {
       ...(typeof value.exitStatus === 'number' ? { exitStatus: value.exitStatus } : {})
     };
   }
+
+  private parseObservedRecord(value: Record<string, unknown>): LocalSessionRecord {
+    if (typeof value.timestamp !== 'string' || !isObservedEnvelopeType(value.type) || !isRecord(value.payload)) {
+      throw new Error('Unsupported session record.');
+    }
+    if (value.type === 'session_meta' || value.type === 'turn_context') {
+      return { kind: 'metadata', occurredAt: value.timestamp };
+    }
+    if (value.type === 'event_msg') {
+      return { kind: 'message', occurredAt: value.timestamp };
+    }
+    return this.parseObservedResponseItem(value.timestamp, value.payload);
+  }
+
+  private parseObservedResponseItem(timestamp: string, payload: Record<string, unknown>): LocalSessionRecord {
+    if (!isObservedResponseItemType(payload.type)) throw new Error('Unsupported session record.');
+    if (payload.type === 'function_call' || payload.type === 'custom_tool_call') {
+      if (!isSafeToolName(payload.name)) throw new Error('Unsupported session record.');
+      return { kind: 'tool', occurredAt: timestamp, tool: payload.name };
+    }
+    if (payload.type === 'function_call_output' || payload.type === 'custom_tool_call_output') {
+      return { kind: 'tool', occurredAt: timestamp };
+    }
+    return { kind: 'message', occurredAt: timestamp };
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -112,4 +141,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isKnownKind(value: unknown): value is 'tool' | 'message' | 'metadata' {
   return value === 'tool' || value === 'message' || value === 'metadata';
+}
+
+function isObservedEnvelopeType(value: unknown): value is 'session_meta' | 'event_msg' | 'response_item' | 'turn_context' {
+  return value === 'session_meta' || value === 'event_msg' || value === 'response_item' || value === 'turn_context';
+}
+
+function isObservedResponseItemType(
+  value: unknown
+): value is 'message' | 'reasoning' | 'function_call' | 'function_call_output' | 'custom_tool_call' | 'custom_tool_call_output' {
+  return value === 'message'
+    || value === 'reasoning'
+    || value === 'function_call'
+    || value === 'function_call_output'
+    || value === 'custom_tool_call'
+    || value === 'custom_tool_call_output';
+}
+
+function isSafeToolName(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_.:/-]{1,128}$/.test(value);
 }
