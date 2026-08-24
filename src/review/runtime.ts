@@ -1,4 +1,4 @@
-import type { SanitizedReviewArtifact } from './sanitizer.js';
+import { assertSanitizedReviewArtifact, type SanitizedReviewArtifact } from './sanitizer.js';
 
 export interface ReviewFinding {
   readonly code: string;
@@ -49,6 +49,7 @@ export class ReviewRuntime {
   }
 
   async run(input: RunReviewInput): Promise<ReviewRun> {
+    assertSanitizedReviewArtifact(input.artifact);
     const profile = this.#profiles.get(profileKey(input.profile));
     if (!profile) throw new Error(`Review profile ${input.profile.id}@${input.profile.version} was not found.`);
 

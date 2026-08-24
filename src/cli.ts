@@ -20,8 +20,6 @@ export function runCli(args: string[]): CliResult {
   try {
     const parsed = parseArguments(args);
     const json = parsed.options.has('json');
-    const review = executeReviewCommand(parsed);
-    if (review !== undefined) return success(review, json, parsed.positionals);
     const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
     return success(execute(service, parsed), json, parsed.positionals);
   } catch (error) {
@@ -41,7 +39,7 @@ export async function runCliAsync(args: string[]): Promise<CliResult> {
     return success(await runManualReview(request), json, parsed.positionals);
   } catch (error) {
     const syntax = error instanceof SyntaxError;
-    const diagnostic = toDiagnostic(error, syntax ? 'INVALID_SYNTAX' : 'REVIEW_ERROR');
+    const diagnostic = syntax ? toDiagnostic(error, 'INVALID_SYNTAX') : { code: 'REVIEW_ERROR', message: 'Review failed.' };
     return args.includes('--json') ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' } : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${diagnostic.code}: ${diagnostic.message}\n` };
   }
 }
@@ -76,24 +74,6 @@ function execute(service: ExperienceService, parsed: ParsedArguments): unknown {
     return service.export(filterOptions(parsed.options));
   }
   throw new SyntaxError(`Unknown command: ${[command, subcommand, ...rest].filter(Boolean).join(' ')}`);
-}
-
-function executeReviewCommand(parsed: ParsedArguments): unknown | undefined {
-  const [command, subcommand, ...rest] = parsed.positionals;
-  if (command !== 'review') return undefined;
-  if (subcommand !== 'session' || rest.length !== 0) {
-    throw new SyntaxError(`Unknown command: ${[command, subcommand, ...rest].filter(Boolean).join(' ')}`);
-  }
-  assertNoUnknownOptions(parsed.options, ['json', 'source', 'session', 'allow-expensive-checks']);
-  const source = requiredReviewSource(parsed.options);
-  const session = requiredString(parsed.options, 'session');
-  if (session === 'latest') throw new SyntaxError('Review requires an explicit --session value, not latest.');
-  return {
-    review: 'validated',
-    source,
-    session,
-    allowExpensiveChecks: parsed.options.has('allow-expensive-checks')
-  };
 }
 
 function parseReviewRequest(parsed: ParsedArguments) {
@@ -157,7 +137,10 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
     const knowledge = (value as { knowledge: KnowledgeRecord[] }).knowledge;
     return `Exported ${countLabel(knowledge.length, 'knowledge entry')}.${knowledge.length ? `\n${formatKnowledgeList(knowledge)}` : ''}`;
   }
-  if (command === 'review' && subcommand === 'session') return 'Review request validated. Session data was not read.';
+  if (command === 'review' && subcommand === 'session') {
+    const review = value as { findings: readonly unknown[]; candidates: readonly unknown[]; proposals: readonly unknown[]; skippedReviewerIds: readonly string[] };
+    return `Review completed: ${review.findings.length} finding groups, ${review.candidates.length} candidates, ${review.proposals.length} proposals.${review.skippedReviewerIds.length ? ` Skipped reviewers: ${review.skippedReviewerIds.join(', ')}.` : ''}`;
+  }
   return JSON.stringify(value);
 }
 interface KnowledgeRecord { readonly id: string; readonly state: string; readonly statement: string; readonly evidenceIds: readonly string[]; readonly authoritative?: boolean; }

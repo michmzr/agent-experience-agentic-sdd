@@ -78,3 +78,18 @@ test('accepts sanitized artifacts only at the runtime boundary', () => {
   acceptsOnlySanitizedArtifact(raw);
   assert.ok(artifact);
 });
+
+test('rejects a structurally forged sanitized artifact before invoking reviewers', async () => {
+  let calls = 0;
+  const runtime = new ReviewRuntime({
+    profiles: [{ id: 'local', version: '1', reviewerIds: ['regular'] }],
+    reviewers: [{ id: 'regular', expensive: false, async review() { calls += 1; return []; } }]
+  });
+  const forged = structuredClone(artifact);
+
+  await assert.rejects(
+    runtime.run({ artifact: forged, profile: { id: 'local', version: '1' }, allowExpensiveChecks: false }),
+    /malformed or unsupported/i
+  );
+  assert.equal(calls, 0);
+});

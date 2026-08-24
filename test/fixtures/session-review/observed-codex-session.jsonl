@@ -3,3 +3,6 @@
 {"timestamp":"2026-08-24T10:00:02.000Z","type":"event_msg","payload":{"type":"user_message","message":"private transcript"}}
 {"timestamp":"2026-08-24T10:00:03.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"private arguments","call_id":"fixture-call"}}
 {"timestamp":"2026-08-24T10:00:04.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"fixture-call","output":"private tool output"}}
+{"timestamp":"2026-08-24T10:00:05.000Z","type":"compacted","payload":{"replacement_history":"private compacted history"}}
+{"timestamp":"2026-08-24T10:00:06.000Z","type":"inter_agent_communication_metadata","payload":{"receiver":"private agent"}}
+{"timestamp":"2026-08-24T10:00:07.000Z","type":"world_state","payload":{"state":"private world state"}}

@@ -113,7 +113,7 @@ export class CodexSessionAdapter {
     if (typeof value.timestamp !== 'string' || !isObservedEnvelopeType(value.type) || !isRecord(value.payload)) {
       throw new Error('Unsupported session record.');
     }
-    if (value.type === 'session_meta' || value.type === 'turn_context') {
+    if (value.type === 'session_meta' || value.type === 'turn_context' || value.type === 'compacted' || value.type === 'inter_agent_communication_metadata' || value.type === 'world_state') {
       return { kind: 'metadata', occurredAt: value.timestamp };
     }
     if (value.type === 'event_msg') {
@@ -143,8 +143,9 @@ function isKnownKind(value: unknown): value is 'tool' | 'message' | 'metadata' {
   return value === 'tool' || value === 'message' || value === 'metadata';
 }
 
-function isObservedEnvelopeType(value: unknown): value is 'session_meta' | 'event_msg' | 'response_item' | 'turn_context' {
-  return value === 'session_meta' || value === 'event_msg' || value === 'response_item' || value === 'turn_context';
+function isObservedEnvelopeType(value: unknown): value is 'session_meta' | 'event_msg' | 'response_item' | 'turn_context' | 'compacted' | 'inter_agent_communication_metadata' | 'world_state' {
+  return value === 'session_meta' || value === 'event_msg' || value === 'response_item' || value === 'turn_context'
+    || value === 'compacted' || value === 'inter_agent_communication_metadata' || value === 'world_state';
 }
 
 function isObservedResponseItemType(
