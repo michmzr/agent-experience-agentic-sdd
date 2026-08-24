@@ -22,6 +22,8 @@ For a written execution plan, update the plan file immediately after every verif
 
 Use fresh verification evidence. A successful tool call is not sufficient if the change requires tests, build, lint, benchmark or review.
 
+Recheck subagent state immediately before each user-facing status or final message. Never carry a `running` observation across a wait, tool call, completion notification or response boundary. Without that final check, label the state as last observed rather than current.
+
 ## 6. Learn
 
 Capture reusable positive and negative experience with context. Do not directly create durable rules from raw events.

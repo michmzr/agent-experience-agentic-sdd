@@ -16,6 +16,7 @@
 - Keep shared knowledge concise enough to be reviewed in Git.
 - When executing a written plan, update its checklist immediately after each verified action, task, or stage. Record the current status, verification command and outcome, and the relevant commit SHA in the plan's execution-status section.
 - Mark a plan item complete only after its required verification and review gates pass. Do not report an agent or task as running without a fresh status check.
+- Recheck subagent status immediately before every user-facing status or final message. If no immediate check was made, describe the state as last observed and never as current. Treat a completed-agent notification as invalidating every earlier `running` observation.
 
 ## Never
 
