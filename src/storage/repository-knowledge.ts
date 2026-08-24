@@ -46,12 +46,21 @@ const forbiddenText = [
   /\bbearer(?:[_-]?token)?\s*(?:=|:)\s*\S+/i
 ];
 const privateFields = new Set(['payload', 'privateReview', 'privateReviewText', 'rawTranscript']);
+const indexKeys = ['entries', 'version'] as const;
+const indexEntryKeys = ['applicability', 'approval', 'identity', 'kind', 'lastVerification', 'mergedProvenance', 'state'] as const;
+const applicabilityKeys = ['path', 'tags', 'tool'] as const;
+const approvalKeys = ['at', 'kind'] as const;
+const verificationKeys = ['at', 'by'] as const;
+const knowledgeStates: readonly KnowledgeState[] = ['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired'];
+const lessonKinds: readonly LessonKind[] = ['failure', 'successful-workflow', 'project-fact', 'convention', 'tool-capability', 'environment-quirk', 'heuristic', 'preference'];
 
 export function writeRepositoryKnowledge(repositoryRoot: string, document: RepositoryKnowledgeDocument): void {
   validateDocument(document);
   const output = outputPaths(repositoryRoot, document.entry.id);
   ensureDirectory(output.root);
   ensureDirectory(output.knowledge);
+  assertExistingFileIsNotSymlink(output.index);
+  assertExistingFileIsNotSymlink(output.entry);
 
   const index = readIndex(output.index);
   const entry = toIndexEntry(document);
@@ -110,15 +119,70 @@ function ensureDirectory(path: string): void {
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Repository knowledge output directory is unsafe.');
 }
 
+function assertExistingFileIsNotSymlink(path: string): void {
+  try {
+    if (lstatSync(path).isSymbolicLink()) throw new Error('Repository knowledge output file is a symlink.');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+}
+
 function readIndex(path: string): RepositoryIndex {
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as RepositoryIndex;
-    if (parsed.version !== 1 || !Array.isArray(parsed.entries)) throw new Error('Invalid repository knowledge index.');
-    return { version: 1, entries: parsed.entries };
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    return parseRepositoryIndex(parsed);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, entries: [] };
     throw error;
   }
+}
+
+function parseRepositoryIndex(value: unknown): RepositoryIndex {
+  assertExportContentIsSafe(value);
+  if (!isRecord(value) || !hasOnlyKeys(value, indexKeys) || value.version !== 1 || !Array.isArray(value.entries)) {
+    throw new Error('Invalid repository knowledge index.');
+  }
+  return { version: 1, entries: value.entries.map(parseRepositoryIndexEntry) };
+}
+
+function parseRepositoryIndexEntry(value: unknown): RepositoryIndexEntry {
+  if (!isRecord(value) || !hasOnlyKeys(value, indexEntryKeys)
+    || typeof value.identity !== 'string' || !safeFilename.test(value.identity) || value.identity === '.' || value.identity === '..'
+    || typeof value.kind !== 'string' || !lessonKinds.includes(value.kind as LessonKind)
+    || typeof value.state !== 'string' || !knowledgeStates.includes(value.state as KnowledgeState)
+    || !isApplicability(value.applicability)
+    || (value.approval !== undefined && !isApproval(value.approval))
+    || (value.lastVerification !== undefined && !isLastVerification(value.lastVerification))
+    || (value.mergedProvenance !== undefined && typeof value.mergedProvenance !== 'string')) {
+    throw new Error('Invalid repository knowledge index entry.');
+  }
+  return value as unknown as RepositoryIndexEntry;
+}
+
+function isApplicability(value: unknown): value is RepositoryIndexEntry['applicability'] {
+  return isRecord(value) && hasOnlyKeys(value, applicabilityKeys)
+    && Array.isArray(value.tags) && value.tags.every((tag) => typeof tag === 'string')
+    && (value.path === undefined || typeof value.path === 'string')
+    && (value.tool === undefined || typeof value.tool === 'string');
+}
+
+function isApproval(value: unknown): value is NonNullable<RepositoryIndexEntry['approval']> {
+  return isRecord(value) && hasOnlyKeys(value, approvalKeys)
+    && typeof value.at === 'string' && (value.kind === 'system' || value.kind === 'user');
+}
+
+function isLastVerification(value: unknown): value is NonNullable<RepositoryIndexEntry['lastVerification']> {
+  return isRecord(value) && hasOnlyKeys(value, verificationKeys)
+    && typeof value.at === 'string' && (value.by === undefined || typeof value.by === 'string');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).every((key) => keys.includes(key));
 }
 
 function toIndexEntry(document: RepositoryKnowledgeDocument): RepositoryIndexEntry {

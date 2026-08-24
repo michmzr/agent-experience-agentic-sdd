@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -130,4 +130,62 @@ test('orders tags by Unicode code units instead of locale collation', () => {
 
   const index = readFileSync(join(root, 'agent-experience', 'index.json'), 'utf8');
   assert.match(index, /"tags": \[\n          "Z",\n          "a",\n          "Ä",\n          "ä"/);
+});
+
+test('rejects an existing index that contains private review data without rewriting it', () => {
+  const root = repositoryRoot();
+  const directory = join(root, 'agent-experience');
+  const indexPath = join(directory, 'index.json');
+  const contaminated = JSON.stringify({
+    version: 1,
+    entries: [{ identity: 'existing', kind: 'convention', state: 'verified', applicability: { tags: [] }, rawTranscript: 'private session' }]
+  });
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(indexPath, contaminated);
+
+  assert.throws(() => writeRepositoryKnowledge(root, mergedRepositoryKnowledge()), /raw transcript/i);
+  assert.equal(readFileSync(indexPath, 'utf8'), contaminated);
+  assert.equal(existsSync(join(directory, 'knowledge', 'knowledge-destructive-reset.md')), false);
+});
+
+test('rejects an existing index that contains credential-like text without rewriting it', () => {
+  const root = repositoryRoot();
+  const directory = join(root, 'agent-experience');
+  const indexPath = join(directory, 'index.json');
+  const contaminated = JSON.stringify({
+    version: 1,
+    entries: [{ identity: 'existing', kind: 'convention', state: 'verified', applicability: { tags: [] }, mergedProvenance: 'sk-abcdefghijklmnopqrstuvwxyz1234' }]
+  });
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(indexPath, contaminated);
+
+  assert.throws(() => writeRepositoryKnowledge(root, mergedRepositoryKnowledge()), /credential-like/i);
+  assert.equal(readFileSync(indexPath, 'utf8'), contaminated);
+});
+
+test('rejects a symlinked index target without following or replacing it', () => {
+  const root = repositoryRoot();
+  const directory = join(root, 'agent-experience');
+  const external = join(root, 'external-index.json');
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(external, 'external index must stay untouched');
+  symlinkSync(external, join(directory, 'index.json'));
+
+  assert.throws(() => writeRepositoryKnowledge(root, mergedRepositoryKnowledge()), /symlink/i);
+  assert.equal(readFileSync(external, 'utf8'), 'external index must stay untouched');
+  assert.equal(existsSync(join(directory, 'knowledge', 'knowledge-destructive-reset.md')), false);
+});
+
+test('rejects a symlinked entry target without following or replacing it', () => {
+  const root = repositoryRoot();
+  const document = mergedRepositoryKnowledge();
+  writeRepositoryKnowledge(root, document);
+  const entryPath = join(root, 'agent-experience', 'knowledge', 'knowledge-destructive-reset.md');
+  const external = join(root, 'external-entry.md');
+  writeFileSync(external, 'external entry must stay untouched');
+  unlinkSync(entryPath);
+  symlinkSync(external, entryPath);
+
+  assert.throws(() => writeRepositoryKnowledge(root, document), /symlink/i);
+  assert.equal(readFileSync(external, 'utf8'), 'external entry must stay untouched');
 });
