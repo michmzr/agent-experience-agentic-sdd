@@ -5,6 +5,7 @@ import { basename } from 'node:path';
 import { DomainError, errorMessage, ExperienceService } from './application/experience-service.js';
 import type { KnowledgeState } from './domain/types.js';
 import type { KnowledgeScope } from './storage/experience-store.js';
+import { runManualReview } from './review/review-service.js';
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string; }
 
@@ -29,6 +30,19 @@ export function runCli(args: string[]): CliResult {
     return args.includes('--json')
       ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' }
       : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${diagnostic.code}: ${diagnostic.message}\n` };
+  }
+}
+
+export async function runCliAsync(args: string[]): Promise<CliResult> {
+  if (args[0] !== 'review') return runCli(args);
+  try {
+    const parsed = parseArguments(args); const json = parsed.options.has('json');
+    const request = parseReviewRequest(parsed);
+    return success(await runManualReview(request), json, parsed.positionals);
+  } catch (error) {
+    const syntax = error instanceof SyntaxError;
+    const diagnostic = toDiagnostic(error, syntax ? 'INVALID_SYNTAX' : 'REVIEW_ERROR');
+    return args.includes('--json') ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' } : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${diagnostic.code}: ${diagnostic.message}\n` };
   }
 }
 
@@ -80,6 +94,15 @@ function executeReviewCommand(parsed: ParsedArguments): unknown | undefined {
     session,
     allowExpensiveChecks: parsed.options.has('allow-expensive-checks')
   };
+}
+
+function parseReviewRequest(parsed: ParsedArguments) {
+  const [command, subcommand, ...rest] = parsed.positionals;
+  if (command !== 'review' || subcommand !== 'session' || rest.length !== 0) throw new SyntaxError(`Unknown command: ${parsed.positionals.join(' ')}`);
+  assertNoUnknownOptions(parsed.options, ['json', 'source', 'session', 'root', 'project', 'allow-expensive-checks']);
+  const source = requiredReviewSource(parsed.options); const session = requiredString(parsed.options, 'session');
+  if (session === 'latest') throw new SyntaxError('Review requires an explicit --session value, not latest.');
+  return { source, session, root: requiredString(parsed.options, 'root'), project: optionalString(parsed.options, 'project'), allowExpensiveChecks: parsed.options.has('allow-expensive-checks') };
 }
 
 function parseArguments(args: readonly string[]): ParsedArguments {
@@ -141,9 +164,9 @@ interface KnowledgeRecord { readonly id: string; readonly state: string; readonl
 function formatKnowledgeList(entries: readonly KnowledgeRecord[]): string { return entries.length ? entries.map((entry) => formatKnowledge(entry, false)).join('\n') : 'No knowledge entries found.'; }
 function formatKnowledge(entry: KnowledgeRecord, includeEvidence: boolean): string { return `${entry.id} [${entry.state}]${entry.authoritative ? ' [authoritative]' : ''}\n${entry.statement}${includeEvidence ? `\nEvidence: ${entry.evidenceIds.join(', ')}` : ''}`; }
 function countLabel(count: number, singular: string): string { return `${count} ${count === 1 ? singular : `${singular}s`}`; }
-function usage(): string { return 'Usage: ael <init|experience add|validate|inspect|lessons list|retrieve|export> [options]'; }
+function usage(): string { return 'Usage: ael <init|experience add|validate|inspect|lessons list|retrieve|export|review session> [options]'; }
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } { return error instanceof DomainError ? { code: error.code, message: error.message } : { code: fallbackCode, message: errorMessage(error) }; }
 
 if (process.argv[1] && basename(process.argv[1]) === basename(fileURLToPath(import.meta.url))) {
-  const result = runCli(process.argv.slice(2)); process.stdout.write(result.stdout); process.stderr.write(result.stderr); process.exitCode = result.exitCode;
+  const result = await runCliAsync(process.argv.slice(2)); process.stdout.write(result.stdout); process.stderr.write(result.stderr); process.exitCode = result.exitCode;
 }
