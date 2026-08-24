@@ -23,12 +23,12 @@ Updated: 2026-08-24. This section is the live execution record; tasks are not tr
 | 3. Private SQLite store | Accepted | `c23f51f`, `293753b`; specification and quality reviews passed. |
 | 4. Retrieval and retention | Accepted | `59a55fc` through `bba542d`; specification and quality reviews passed. |
 | 5. Repository knowledge format | Accepted and merged into this branch | `10b5f9a` through `1605a49`; specification and quality reviews passed. |
-| 6. CLI and integration fixtures | Corrected; awaiting repeated quality review | `fa01006`, `ffa9da4`, `5b31ac5`, `c11538c`; fresh `pnpm check` passed with 52 tests. Development and installed-package `ael` invocation paths are separately tested. |
-| 7. Verification evidence | Pending | Starts after Task 6 is accepted. |
+| 6. CLI and integration fixtures | Accepted | `fa01006`, `ffa9da4`, `5b31ac5`, `c11538c`; specification and quality reviews passed. Fresh `pnpm check` passed with 52 tests. |
+| 7. Verification evidence | In progress | Started after Task 6 acceptance. |
 
 Current full verification: `pnpm check` passed on 2026-08-24 with 52 tests, 0 failures.
 
-Task 6 review state: human rendering is accepted. The documented development invocation and installed-package executable behavior were corrected in `c11538c`; the next action is repeated quality review.
+Task 6 review state: specification and repeated quality reviews accepted the implementation. Task 7 verification evidence is active.
 
 Milestone 1 work outside this local-core plan remains pending: the three source adapters, sanitizer, manual review runtime, reviewer orchestration, candidate-lesson and proposal generation, and the expanded benchmark fixtures.
 
