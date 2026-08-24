@@ -2,6 +2,8 @@ import { lstat, readdir, readFile, realpath } from 'node:fs/promises';
 import { basename, extname, join, relative, resolve } from 'node:path';
 
 import {
+  assertSessionArtifactSize,
+  MAX_NORMALIZED_SESSION_EVENTS,
   normalizeSession,
   type LocalSessionRecord,
   type NormalizedSession,
@@ -55,13 +57,16 @@ export async function normalizeClaudeCodeArtifact(artifact: ClaudeCodeArtifact):
   const projectsRoot = await realpath(artifact.root);
   const artifactStatus = await lstat(artifact.location);
   if (artifactStatus.isSymbolicLink() || !artifactStatus.isFile()) throw new Error('Claude Code session artifact must be a regular file.');
+  assertSessionArtifactSize(artifactStatus.size);
   const artifactPath = await realpath(artifact.location);
   assertWithin(projectsRoot, artifactPath, 'Claude Code session artifact');
   if (extname(artifactPath) !== '.jsonl' || isExcludedSidecar(basename(artifactPath))) {
     throw new Error('Claude Code session artifact is unsupported.');
   }
 
-  const records = parseRecords(await readFile(artifactPath, 'utf8'));
+  const contents = await readFile(artifactPath, 'utf8');
+  assertSessionArtifactSize(Buffer.byteLength(contents, 'utf8'));
+  const records = parseRecords(contents);
   return normalizeSession({ source: 'claude-code', artifact, records });
 }
 
@@ -86,8 +91,9 @@ function assertWithin(root: string, target: string, label: string): void {
 
 function parseRecords(contents: string): readonly LocalSessionRecord[] {
   const records: LocalSessionRecord[] = [];
-  for (const line of contents.split(/\r?\n/)) {
-    if (!line.trim()) continue;
+  const lines = contents.split(/\r?\n/).filter((line) => line.trim());
+  if (lines.length > MAX_NORMALIZED_SESSION_EVENTS) throw new Error('Session resource limit exceeded.');
+  for (const line of lines) {
     let parsed: ClaudeCodeJsonRecord;
     try {
       parsed = JSON.parse(line) as ClaudeCodeJsonRecord;

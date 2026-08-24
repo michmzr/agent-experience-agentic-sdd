@@ -1,7 +1,14 @@
 import { lstat, readdir, readFile, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
 
-import { normalizeSession, type LocalSessionRecord, type NormalizedSession, type SessionArtifact } from '../contracts.js';
+import {
+  assertSessionArtifactSize,
+  MAX_NORMALIZED_SESSION_EVENTS,
+  normalizeSession,
+  type LocalSessionRecord,
+  type NormalizedSession,
+  type SessionArtifact
+} from '../contracts.js';
 
 /**
  * Reads the explicitly supplied, locally observed Codex JSONL artifact format.
@@ -25,7 +32,10 @@ export class CodexSessionAdapter {
   public async read(artifactId: string): Promise<NormalizedSession> {
     const root = await this.resolveRoot();
     const artifactPath = await this.resolveArtifact(root, artifactId);
-    const records = this.parseRecords(await readFile(artifactPath, 'utf8'));
+    assertSessionArtifactSize((await lstat(artifactPath)).size);
+    const contents = await readFile(artifactPath, 'utf8');
+    assertSessionArtifactSize(Buffer.byteLength(contents, 'utf8'));
+    const records = this.parseRecords(contents);
     return normalizeSession({
       source: 'codex',
       artifact: { source: 'codex', id: artifactId, location: artifactPath, format: 'observed-jsonl' },
@@ -80,6 +90,7 @@ export class CodexSessionAdapter {
   private parseRecords(contents: string): LocalSessionRecord[] {
     const lines = contents.split(/\r?\n/).filter((line) => line.trim().length > 0);
     if (lines.length === 0) throw new Error('Codex session artifact contains no records.');
+    if (lines.length > MAX_NORMALIZED_SESSION_EVENTS) throw new Error('Session resource limit exceeded.');
     return lines.map((line) => this.parseRecord(line));
   }
 

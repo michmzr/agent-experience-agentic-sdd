@@ -2,6 +2,9 @@ import type { AgentSource } from '../domain/types.js';
 
 export type SessionArtifactFormat = 'observed-jsonl' | 'jsonl' | 'markdown-export';
 
+export const MAX_SESSION_ARTIFACT_BYTES = 1024 * 1024;
+export const MAX_NORMALIZED_SESSION_EVENTS = 1024;
+export const MAX_SESSION_REVIEW_TEXT_LENGTH = 256 * 1024;
 export const MAX_SESSION_EVENT_TEXT_LENGTH = 4096;
 
 export interface SessionArtifact {
@@ -48,6 +51,12 @@ export interface NormalizeSessionInput {
 
 export function normalizeSession(input: NormalizeSessionInput): NormalizedSession {
   if (input.records.length === 0) throw new Error('A session must contain at least one supported record.');
+  if (input.records.length > MAX_NORMALIZED_SESSION_EVENTS) throw new Error('Session resource limit exceeded.');
+  let textLength = 0;
+  for (const record of input.records) {
+    if (typeof record.text === 'string') textLength += record.text.length;
+    if (textLength > MAX_SESSION_REVIEW_TEXT_LENGTH) throw new Error('Session resource limit exceeded.');
+  }
   const events = input.records.map((record, index) => normalizeRecord(input.artifact.id, record, index));
   return {
     source: input.source,
@@ -64,7 +73,7 @@ function normalizeRecord(sessionId: string, record: LocalSessionRecord, index: n
   if (!Number.isFinite(Date.parse(record.occurredAt))) throw new Error('Session record timestamp is invalid.');
   if (record.text !== undefined && typeof record.text !== 'string') throw new Error('Session record text is invalid.');
   const outcome = record.exitStatus === undefined ? 'unknown' : record.exitStatus === 0 ? 'passed' : 'failed';
-  const text = record.text?.trim().slice(0, MAX_SESSION_EVENT_TEXT_LENGTH);
+  const text = record.text?.trim();
   return {
     id: `${sessionId}:${index}`,
     kind: record.kind as NormalizedSessionEvent['kind'],
@@ -74,6 +83,12 @@ function normalizeRecord(sessionId: string, record: LocalSessionRecord, index: n
     ...(text ? { text } : {}),
     outcome
   };
+}
+
+export function assertSessionArtifactSize(byteLength: number): void {
+  if (!Number.isSafeInteger(byteLength) || byteLength < 0 || byteLength > MAX_SESSION_ARTIFACT_BYTES) {
+    throw new Error('Session artifact resource limit exceeded.');
+  }
 }
 
 export function selectSessionArtifact(artifacts: readonly SessionArtifact[], options: { readonly interactive: boolean; readonly artifactId?: string }): SessionArtifact {

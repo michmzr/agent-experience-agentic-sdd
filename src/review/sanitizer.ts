@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto';
 
-import { MAX_SESSION_EVENT_TEXT_LENGTH, type NormalizedSession, type NormalizedSessionEvent } from './contracts.js';
+import {
+  MAX_NORMALIZED_SESSION_EVENTS,
+  MAX_SESSION_EVENT_TEXT_LENGTH,
+  MAX_SESSION_REVIEW_TEXT_LENGTH,
+  type NormalizedSession,
+  type NormalizedSessionEvent
+} from './contracts.js';
 
 export type RedactionCategory =
   | 'absolute-path'
@@ -64,8 +70,11 @@ export function sanitizeForReview(input: NormalizedSession, options: SanitizeFor
     let result = redactOpaqueId ? pseudonymizeOpaqueId(value, redactions) : value;
     for (const [category, pattern] of baseRules) result = redact(result, pattern, category, redactions);
     for (const pattern of configuredPatterns) result = redact(result, pattern, 'configured-pattern', redactions);
+    assertNoSensitiveValues([result], configuredPatterns);
     return result;
   };
+  const sanitizedEvents = input.events.map((event) => sanitizeEvent(event, sanitize));
+  if (totalTextLength(sanitizedEvents) > MAX_SESSION_REVIEW_TEXT_LENGTH) throw new SanitizationError('Session resource limit exceeded.');
 
   const artifact: SanitizedReviewArtifact = {
     policy,
@@ -76,7 +85,7 @@ export function sanitizeForReview(input: NormalizedSession, options: SanitizeFor
       ...(input.repositoryHint ? { repositoryHint: sanitize(input.repositoryHint) } : {}),
       startedAt: input.startedAt,
       endedAt: input.endedAt,
-      events: input.events.map((event) => sanitizeEvent(event, sanitize))
+      events: sanitizedEvents.map(truncateEventText)
     }
   };
   assertNoSensitiveContent(artifact.session, configuredPatterns);
@@ -94,7 +103,7 @@ export function assertSanitizedReviewArtifact(value: unknown): asserts value is 
 }
 
 function sanitizeEvent(event: NormalizedSessionEvent, sanitize: (value: string, redactOpaqueId?: boolean) => string): NormalizedSessionEvent {
-  const text = event.text ? sanitize(event.text).slice(0, MAX_SESSION_EVENT_TEXT_LENGTH) : undefined;
+  const text = event.text ? sanitize(event.text) : undefined;
   return {
     id: sanitize(event.id, true),
     kind: event.kind,
@@ -104,6 +113,15 @@ function sanitizeEvent(event: NormalizedSessionEvent, sanitize: (value: string, 
     ...(text ? { text } : {}),
     outcome: event.outcome
   };
+}
+
+function truncateEventText(event: NormalizedSessionEvent): NormalizedSessionEvent {
+  if (!event.text || event.text.length <= MAX_SESSION_EVENT_TEXT_LENGTH) return event;
+  return { ...event, text: event.text.slice(0, MAX_SESSION_EVENT_TEXT_LENGTH) };
+}
+
+function totalTextLength(events: readonly NormalizedSessionEvent[]): number {
+  return events.reduce((total, event) => total + (event.text?.length ?? 0), 0);
 }
 
 function redact(value: string, expression: RegExp, category: RedactionCategory, counts: Record<RedactionCategory, number>): string {
@@ -146,8 +164,11 @@ function assertNoSensitiveContent(session: NormalizedSession, configuredPatterns
     session.endedAt,
     ...session.events.flatMap((event) => [event.id, event.kind, event.occurredAt, event.tool, event.text, event.outcome])
   ].filter((value): value is string => value !== undefined);
-  const residualPatterns = [...baseRules.map(([, pattern]) => pattern), ...configuredPatterns];
+  assertNoSensitiveValues(values, configuredPatterns);
+}
 
+function assertNoSensitiveValues(values: readonly string[], configuredPatterns: readonly RegExp[]): void {
+  const residualPatterns = [...baseRules.map(([, pattern]) => pattern), ...configuredPatterns];
   for (const value of values) {
     for (const pattern of residualPatterns) {
       pattern.lastIndex = 0;
@@ -175,14 +196,20 @@ function validateNormalizedSession(value: unknown): asserts value is NormalizedS
   if (!isRecord(value) || !isSource(value.source) || !isNonEmptyString(value.sessionId) || !isTimestamp(value.startedAt) || !isTimestamp(value.endedAt) || !Array.isArray(value.events)) throw new SanitizationError();
   if (!hasOnlyKeys(value, ['source', 'sessionId', 'repositoryHint', 'startedAt', 'endedAt', 'events'])) throw new SanitizationError();
   if (value.repositoryHint !== undefined && typeof value.repositoryHint !== 'string') throw new SanitizationError();
-  for (const event of value.events) validateEvent(event);
+  if (value.events.length > MAX_NORMALIZED_SESSION_EVENTS) throw new SanitizationError('Session resource limit exceeded.');
+  let textLength = 0;
+  for (const event of value.events) {
+    validateEvent(event);
+    textLength += event.text?.length ?? 0;
+    if (textLength > MAX_SESSION_REVIEW_TEXT_LENGTH) throw new SanitizationError('Session resource limit exceeded.');
+  }
 }
 
 function validateEvent(value: unknown): asserts value is NormalizedSessionEvent {
   if (!isRecord(value) || !isNonEmptyString(value.id) || !isEventKind(value.kind) || !isTimestamp(value.occurredAt) || !isOutcome(value.outcome)) throw new SanitizationError();
   if (!hasOnlyKeys(value, ['id', 'kind', 'occurredAt', 'tool', 'exitStatus', 'text', 'outcome'])) throw new SanitizationError();
   if (value.tool !== undefined && typeof value.tool !== 'string') throw new SanitizationError();
-  if (value.text !== undefined && (!isNonEmptyString(value.text) || value.text.length > MAX_SESSION_EVENT_TEXT_LENGTH)) throw new SanitizationError();
+  if (value.text !== undefined && !isNonEmptyString(value.text)) throw new SanitizationError();
   if (value.exitStatus !== undefined && (!Number.isInteger(value.exitStatus) || !Number.isFinite(value.exitStatus))) throw new SanitizationError();
 }
 

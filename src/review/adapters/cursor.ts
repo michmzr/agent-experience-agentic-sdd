@@ -1,7 +1,13 @@
 import { lstatSync, readdirSync, readFileSync, realpathSync, type Dirent } from 'node:fs';
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
-import { normalizeSession, type NormalizedSession, type SessionArtifact } from '../contracts.js';
+import {
+  assertSessionArtifactSize,
+  MAX_NORMALIZED_SESSION_EVENTS,
+  normalizeSession,
+  type NormalizedSession,
+  type SessionArtifact
+} from '../contracts.js';
 
 class CursorPathBoundaryError extends Error {}
 
@@ -58,11 +64,14 @@ export function readCursorMarkdownExport(artifact: SessionArtifact, root: string
   if (artifact.source !== 'cursor') throw new Error('Cursor adapter requires a Cursor artifact.');
   if (artifact.format !== 'markdown-export') throw new Error('Cursor adapter requires a Markdown export.');
   const location = resolveCursorExport(root, artifact.location);
+  assertSessionArtifactSize(lstatSync(location).size);
   let contents: string;
   try { contents = readFileSync(location, 'utf8'); }
   catch { throw new Error('Cursor export could not be read.'); }
+  assertSessionArtifactSize(Buffer.byteLength(contents, 'utf8'));
   const headings = [...contents.matchAll(/^##\s+(?:User|Assistant)\s*$/gim)];
   if (headings.length === 0) throw new Error('Cursor export contains no supported message headings.');
+  if (headings.length > MAX_NORMALIZED_SESSION_EVENTS) throw new Error('Session resource limit exceeded.');
   const records = headings.map((heading, index) => {
     const start = (heading.index ?? 0) + heading[0].length;
     const end = headings[index + 1]?.index ?? contents.length;

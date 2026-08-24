@@ -47,7 +47,7 @@ test('all source adapters preserve only representative allowlisted session text'
   }
 });
 
-test('normalized session text is deterministically bounded while raw payload remains excluded', () => {
+test('normalized session retains complete bounded input until sanitized output truncation while excluding raw payload', () => {
   const rawPayload = 'payload-must-not-cross-boundary';
   const session = normalizeSession({
     source: 'codex',
@@ -55,7 +55,9 @@ test('normalized session text is deterministically bounded while raw payload rem
     records: [{ kind: 'message', occurredAt: timestamp, text: `prefix-${'x'.repeat(MAX_SESSION_EVENT_TEXT_LENGTH)}`, payload: rawPayload }]
   });
 
-  assert.equal(session.events[0]?.text?.length, MAX_SESSION_EVENT_TEXT_LENGTH);
+  const artifact = sanitizeForReview(session);
+  assert.equal(session.events[0]?.text?.length, MAX_SESSION_EVENT_TEXT_LENGTH + 'prefix-'.length);
+  assert.equal(artifact.session.events[0]?.text?.length, MAX_SESSION_EVENT_TEXT_LENGTH);
   assert.equal(session.events[0]?.text?.startsWith('prefix-'), true);
   assert.equal(JSON.stringify(session).includes(rawPayload), false);
 });
@@ -74,8 +76,6 @@ test('sanitizer redacts and residual-scans bounded session text before runtime',
     () => sanitizeForReview(normalized, { configuredPatterns: [/(?=safe evidence)/] }),
     (error: unknown) => error instanceof SanitizationError && !error.message.includes('safe evidence')
   );
-  assert.throws(
-    () => sanitizeForReview({ ...normalized, events: [{ ...normalized.events[0]!, text: 'x'.repeat(MAX_SESSION_EVENT_TEXT_LENGTH + 1) }] }),
-    (error: unknown) => error instanceof SanitizationError
-  );
+  const truncated = sanitizeForReview({ ...normalized, events: [{ ...normalized.events[0]!, text: 'x'.repeat(MAX_SESSION_EVENT_TEXT_LENGTH + 1) }] });
+  assert.equal(truncated.session.events[0]?.text?.length, MAX_SESSION_EVENT_TEXT_LENGTH);
 });
