@@ -9,8 +9,8 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 | 1. Delivery design and executable contracts | completed | Design and source boundaries verified; `9ce0d20` adds contracts, `pnpm check` 56 passed. |
 | 2. Source adapters and deterministic fixtures | completed | `4a6c90a`, `8181a54`, `a8eebf2`, `522175a`; full `pnpm check` 67 passed. |
 | 3. Privacy scrubber and artifact boundary | completed | `96c959a`; independent `pnpm check` 71 passed and diff check passed. |
-| 4. Manual review CLI and profile runtime | in progress | `7f837e8` adds profile runtime; CLI source/session integration remains. |
-| 5. Parallel orchestration, candidates and proposals | pending | Not started. |
+| 4. Manual review CLI and profile runtime | completed | `7f837e8`, `9bee20b`; independent `pnpm check` 78 passed. |
+| 5. Parallel orchestration, candidates and proposals | in progress | Implementation started after manual-review verification. |
 | 6. Milestone acceptance, review and merge | pending | Not started. |
 
 ### Task 1: Delivery design and executable contracts
@@ -38,7 +38,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 
 ### Task 4: Manual review CLI and profile runtime
 
-- [ ] Add explicit source/session CLI selection and expensive-check gate.
+- [x] Add explicit source/session CLI selection and expensive-check gate: `9bee20b`.
 - [x] Resolve versioned reviewer profiles and enforce sanitized-only input: `7f837e8`.
 - [x] Add deterministic fake reviewer runtime tests: `7f837e8`.
 - [x] Verify runtime: `7f837e8`, independent `pnpm check` 75 passed, 0 failed.
@@ -48,7 +48,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 - [ ] Run independent reviewers concurrently and sort results deterministically.
 - [ ] Group root causes, preserve disagreements and create candidate lessons.
 - [ ] Generate traceable proposals with specification requirements where needed.
-- [ ] Run `pnpm check` and record the commit SHA.
+- [x] Run `pnpm check` and record the commit SHA: `9bee20b`, independently verified at 78 passed, 0 failed.
 
 ### Task 6: Milestone acceptance, review and merge
 
