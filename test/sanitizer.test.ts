@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { SanitizationError, sanitizeForReview } from '../src/review/sanitizer.js';
+import {
+  assertSanitizedReviewArtifact,
+  SanitizationError,
+  sanitizeForReview
+} from '../src/review/sanitizer.js';
 
 const sensitiveSession = {
   source: 'codex' as const,
@@ -92,6 +96,79 @@ test('redacts POSIX and Windows absolute paths outside home directories', () => 
     assert.equal(serialized.includes(rawValue), false, `review artifact leaked an absolute path`);
   }
   assert.equal(artifact.redactions['absolute-path'], 5);
+});
+
+test('redacts canonical provider credentials even when they have no identifying label', () => {
+  const credentials = [
+    'github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99II00JJ',
+    'ghp_11AA22BB33CC44DD55EE66FF77GG88HH99II',
+    'AKIAIOSFODNN7EXAMPLE',
+    'sk-proj-11AA22BB33CC44DD55EE66FF77GG88HH99II'
+  ];
+  const artifact = sanitizeForReview({
+    ...sensitiveSession,
+    events: [{ ...sensitiveSession.events[0], tool: credentials.join(' ') }]
+  });
+  const serialized = JSON.stringify(artifact);
+
+  for (const credential of credentials) {
+    assert.equal(serialized.includes(credential), false, `review artifact leaked a canonical credential`);
+  }
+  assert.equal(artifact.redactions.token, credentials.length);
+});
+
+test('redacts arbitrary absolute POSIX roots without corrupting URL syntax', () => {
+  const artifact = sanitizeForReview({
+    ...sensitiveSession,
+    repositoryHint: '/workspace/service',
+    events: [{
+      ...sensitiveSession.events[0],
+      tool: '/custom-root/build/output.json https://example.test/workspace/service file:///workspace/service'
+    }]
+  });
+
+  assert.equal(artifact.session.repositoryHint, '[REDACTED:absolute-path]');
+  assert.equal(
+    artifact.session.events[0]?.tool,
+    '[REDACTED:absolute-path] https://example.test/workspace/service file:///workspace/service'
+  );
+  assert.equal(artifact.redactions['absolute-path'], 2);
+});
+
+test('uses deterministic distinct pseudonyms for different opaque identities', () => {
+  const first = sanitizeForReview(sensitiveSession);
+  const second = sanitizeForReview(sensitiveSession);
+
+  assert.equal(first.session.sessionId, second.session.sessionId);
+  assert.equal(first.session.events[0]?.id, second.session.events[0]?.id);
+  assert.notEqual(first.session.sessionId, first.session.events[0]?.id);
+  assert.notEqual(first.session.events[0]?.id, first.session.events[1]?.id);
+  assert.match(first.session.sessionId, /^\[REDACTED:opaque-id:[a-f0-9]{64}\]$/);
+});
+
+test('recognizes only artifacts created by the sanitizer as trusted review input', () => {
+  const artifact = sanitizeForReview(sensitiveSession);
+
+  assert.doesNotThrow(() => assertSanitizedReviewArtifact(artifact));
+  assert.throws(
+    () => assertSanitizedReviewArtifact(structuredClone(artifact)),
+    (error: unknown) => error instanceof SanitizationError
+  );
+  assert.throws(
+    () => assertSanitizedReviewArtifact({ ...artifact }),
+    (error: unknown) => error instanceof SanitizationError
+  );
+});
+
+test('prevents a trusted artifact from being mutated after sanitization', () => {
+  const artifact = sanitizeForReview(sensitiveSession);
+  const injectedCredential = 'github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99II00JJ';
+
+  assert.throws(() => {
+    (artifact.session.events[0] as { tool?: string }).tool = injectedCredential;
+  }, TypeError);
+  assert.equal(JSON.stringify(artifact).includes(injectedCredential), false);
+  assert.doesNotThrow(() => assertSanitizedReviewArtifact(artifact));
 });
 
 test('fails closed when a supported sensitive pattern remains after redaction without leaking values', () => {

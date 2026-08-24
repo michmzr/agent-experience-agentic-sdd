@@ -40,12 +40,15 @@ const categories: readonly RedactionCategory[] = [
   'absolute-path', 'configured-pattern', 'credential-url', 'opaque-id', 'password', 'private-key', 'secret', 'token'
 ];
 
+const sanitizedArtifacts = new WeakSet<object>();
+
 const baseRules: readonly [RedactionCategory, RegExp][] = [
   ['private-key', /-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z]+)? PRIVATE KEY-----/gi],
   ['credential-url', /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@[^\s/]+(?:\/[^\s]*)?/gi],
-  ['absolute-path', /(?<![A-Za-z0-9+.:/\\-])\/(?:Users|home|private|var|tmp|opt|etc|srv|root|Volumes|usr|Library|Applications)(?:\/[^\s"'`;,)]*)?|(?<![A-Za-z0-9])(?:[A-Za-z]:\\(?:[^\\\s"'`;,)]*\\?)+|\\\\[^\\\s"'`;,)]*\\[^\\\s"'`;,)]*(?:\\[^\\\s"'`;,)]*)*)/g],
+  ['absolute-path', /(?<![A-Za-z0-9+.:/\\\]-])\/(?!\/)[^\s"'`;,)](?:[^\s"'`;,)]*)?|(?<![A-Za-z0-9])(?:[A-Za-z]:\\(?:[^\\\s"'`;,)]*\\?)+|\\\\[^\\\s"'`;,)]*\\[^\\\s"'`;,)]*(?:\\[^\\\s"'`;,)]*)*)/g],
   ['token', /\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi],
   ['token', /\b(?:token|api[_-]?key|access[_-]?key)\s*[:=]\s*[^\s;,]+/gi],
+  ['token', /(?<![A-Za-z0-9_])(?:github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{16,})(?![A-Za-z0-9_])/g],
   ['password', /\b(?:password|passwd|pwd)\s*[:=]\s*[^\s;,]+/gi],
   ['secret', /\b(?:secret|client[_-]?secret)\s*[:=]\s*[^\s;,]+/gi]
 ];
@@ -56,7 +59,7 @@ export function sanitizeForReview(input: NormalizedSession, options: SanitizeFor
   const redactions = emptyCounts();
   const policy = { version: '1' as const, hash: policyHash(configuredPatterns) };
   const sanitize = (value: string, redactOpaqueId = false): string => {
-    let result = redactOpaqueId ? redact(value, /.+/g, 'opaque-id', redactions) : value;
+    let result = redactOpaqueId ? pseudonymizeOpaqueId(value, redactions) : value;
     for (const [category, pattern] of baseRules) result = redact(result, pattern, category, redactions);
     for (const pattern of configuredPatterns) result = redact(result, pattern, 'configured-pattern', redactions);
     return result;
@@ -75,7 +78,13 @@ export function sanitizeForReview(input: NormalizedSession, options: SanitizeFor
     }
   };
   assertNoSensitiveContent(artifact.session, configuredPatterns);
+  freezeArtifact(artifact);
+  sanitizedArtifacts.add(artifact);
   return artifact;
+}
+
+export function assertSanitizedReviewArtifact(value: unknown): asserts value is SanitizedReviewArtifact {
+  if (!isRecord(value) || !sanitizedArtifacts.has(value)) throw new SanitizationError();
 }
 
 function sanitizeEvent(event: NormalizedSessionEvent, sanitize: (value: string, redactOpaqueId?: boolean) => string): NormalizedSessionEvent {
@@ -94,6 +103,21 @@ function redact(value: string, expression: RegExp, category: RedactionCategory, 
     counts[category] += 1;
     return `[REDACTED:${category}]`;
   });
+}
+
+function pseudonymizeOpaqueId(value: string, counts: Record<RedactionCategory, number>): string {
+  counts['opaque-id'] += 1;
+  const digest = createHash('sha256').update('ael:opaque-id:v1\0').update(value).digest('hex');
+  return `[REDACTED:opaque-id:${digest}]`;
+}
+
+function freezeArtifact(artifact: SanitizedReviewArtifact): void {
+  for (const event of artifact.session.events) Object.freeze(event);
+  Object.freeze(artifact.session.events);
+  Object.freeze(artifact.session);
+  Object.freeze(artifact.redactions);
+  Object.freeze(artifact.policy);
+  Object.freeze(artifact);
 }
 
 function normalizePatterns(patterns: readonly RegExp[]): readonly RegExp[] {
@@ -127,7 +151,11 @@ function assertNoSensitiveContent(session: NormalizedSession, configuredPatterns
 }
 
 function policyHash(patterns: readonly RegExp[]): string {
-  const policy = JSON.stringify({ version: '1', baseCategories: categories, configuredPatterns: patterns.map((pattern) => `${pattern.source}/${pattern.flags}`) });
+  const policy = JSON.stringify({
+    version: '1',
+    baseRules: baseRules.map(([category, pattern]) => [category, pattern.source, pattern.flags]),
+    configuredPatterns: patterns.map((pattern) => `${pattern.source}/${pattern.flags}`)
+  });
   return createHash('sha256').update(policy).digest('hex');
 }
 
