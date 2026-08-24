@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -74,6 +75,35 @@ test('accepts the repo scope contract for init, validate, lessons, retrieve, and
     assert.equal(runCli(['retrieve', '--scope', 'repo', '--repository-id', 'repo-a', '--json', '--data-dir', dataDir]).exitCode, 0);
     assert.equal(runCli(['export', '--scope', 'repo', '--repository-id', 'repo-a', '--json', '--data-dir', dataDir]).exitCode, 0);
     assert.equal(runCli(['lessons', 'list', '--scope', 'repository', '--data-dir', dataDir]).exitCode, 2);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('exposes the package bin as an executable compiled CLI', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-bin-'));
+  try {
+    const packageJson = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'));
+    assert.equal(packageJson.bin.ael, './dist/src/cli.js');
+    assert.equal(readFileSync(join(process.cwd(), packageJson.bin.ael), 'utf8').startsWith('#!/usr/bin/env node\n'), true);
+    const output = execFileSync(process.execPath, [join(process.cwd(), packageJson.bin.ael), 'init', '--data-dir', dataDir], { encoding: 'utf8' });
+    assert.match(output, /^Initialized local experience store at /);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('renders deterministic command-specific human success output', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-human-'));
+  try {
+    assert.match(runCli(['init', '--data-dir', dataDir]).stdout, /^Initialized local experience store at /);
+    assert.equal(runCli(['experience', 'add', '--input', fixture('positive-workflow.json'), '--data-dir', dataDir]).stdout, 'Imported 1 knowledge entry.\n');
+    assert.equal(runCli(['validate', '--data-dir', dataDir]).stdout, 'Validation passed.\n');
+    assert.equal(runCli(['inspect', 'knowledge-1', '--data-dir', dataDir]).stdout, 'knowledge-1 [verified]\nUse the reviewed workflow for safety-sensitive changes.\nEvidence: evidence-1\n');
+    assert.equal(runCli(['lessons', 'list', '--data-dir', dataDir]).stdout, 'knowledge-1 [verified] [authoritative]\nUse the reviewed workflow for safety-sensitive changes.\n');
+    assert.equal(runCli(['retrieve', '--scope', 'repo', '--repository-id', 'repo-a', '--data-dir', dataDir]).stdout, 'knowledge-1 [verified] [authoritative]\nUse the reviewed workflow for safety-sensitive changes.\n');
+    assert.equal(runCli(['export', '--scope', 'repo', '--repository-id', 'repo-a', '--data-dir', dataDir]).stdout, 'Exported 1 knowledge entry.\nknowledge-1 [verified] [authoritative]\nUse the reviewed workflow for safety-sensitive changes.\n');
+    assert.match(runCli(['inspect', 'knowledge-1', '--json', '--data-dir', dataDir]).stdout, /^\{"id":"knowledge-1"/);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

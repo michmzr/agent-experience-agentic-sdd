@@ -11,10 +11,11 @@ pnpm install --frozen-lockfile
 pnpm check
 ```
 
-Run the compiled CLI with Node:
+Build, then run the installed package executable:
 
 ```sh
-node dist/src/cli.js init
+pnpm build
+pnpm exec ael init
 ```
 
 ## Commands

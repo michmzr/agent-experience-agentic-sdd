@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
 
 import { DomainError, errorMessage, ExperienceService } from './application/experience-service.js';
@@ -16,7 +17,7 @@ export function runCli(args: string[]): CliResult {
     const parsed = parseArguments(args);
     const json = parsed.options.has('json');
     const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
-    return success(execute(service, parsed), json);
+    return success(execute(service, parsed), json, parsed.positionals);
   } catch (error) {
     const syntax = error instanceof SyntaxError;
     const diagnostic = toDiagnostic(error, syntax ? 'INVALID_SYNTAX' : 'STORAGE_ERROR');
@@ -90,8 +91,24 @@ function optionalState(options: Map<string, string | true>): KnowledgeState | un
 function filterOptions(options: Map<string, string | true>) {
   return { scope: optionalScope(options), repositoryId: optionalString(options, 'repository-id'), state: optionalState(options), tag: optionalString(options, 'tag') };
 }
-function success(value: unknown, json: boolean): CliResult { return json ? { exitCode: 0, stdout: `${JSON.stringify(value)}\n`, stderr: '' } : { exitCode: 0, stdout: `${humanOutput(value)}\n`, stderr: '' }; }
-function humanOutput(value: unknown): string { return Array.isArray(value) ? value.map((item) => JSON.stringify(item)).join('\n') : JSON.stringify(value); }
+function success(value: unknown, json: boolean, positionals: readonly string[]): CliResult { return json ? { exitCode: 0, stdout: `${JSON.stringify(value)}\n`, stderr: '' } : { exitCode: 0, stdout: `${humanOutput(value, positionals)}\n`, stderr: '' }; }
+function humanOutput(value: unknown, positionals: readonly string[]): string {
+  const [command, subcommand] = positionals;
+  if (command === 'init') return `Initialized local experience store at ${(value as { databasePath: string }).databasePath}.`;
+  if (command === 'experience' && subcommand === 'add') return `Imported ${countLabel((value as { imported: number }).imported, 'knowledge entry')}.`;
+  if (command === 'validate') return 'Validation passed.';
+  if (command === 'inspect') return formatKnowledge(value as KnowledgeRecord, true);
+  if (command === 'lessons' || command === 'retrieve') return formatKnowledgeList(value as KnowledgeRecord[]);
+  if (command === 'export') {
+    const knowledge = (value as { knowledge: KnowledgeRecord[] }).knowledge;
+    return `Exported ${countLabel(knowledge.length, 'knowledge entry')}.${knowledge.length ? `\n${formatKnowledgeList(knowledge)}` : ''}`;
+  }
+  return JSON.stringify(value);
+}
+interface KnowledgeRecord { readonly id: string; readonly state: string; readonly statement: string; readonly evidenceIds: readonly string[]; readonly authoritative?: boolean; }
+function formatKnowledgeList(entries: readonly KnowledgeRecord[]): string { return entries.length ? entries.map((entry) => formatKnowledge(entry, false)).join('\n') : 'No knowledge entries found.'; }
+function formatKnowledge(entry: KnowledgeRecord, includeEvidence: boolean): string { return `${entry.id} [${entry.state}]${entry.authoritative ? ' [authoritative]' : ''}\n${entry.statement}${includeEvidence ? `\nEvidence: ${entry.evidenceIds.join(', ')}` : ''}`; }
+function countLabel(count: number, singular: string): string { return `${count} ${count === 1 ? singular : `${singular}s`}`; }
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } { return error instanceof DomainError ? { code: error.code, message: error.message } : { code: fallbackCode, message: errorMessage(error) }; }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
