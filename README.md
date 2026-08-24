@@ -38,12 +38,12 @@ ael retrieve [--scope global|repo] [--repository-id <id>] [--path <path>] [--too
 ael export [--scope global|repo] [--repository-id <id>] [--format json]
 ael review sessions --source codex|claude-code|cursor --root <directory> [--project <claude-project>] [--json]
 ael review session --source codex|claude-code|cursor --root <directory> --session <id> [--project <claude-project>] [--profile <id@version>] [--allow-expensive-checks] [--json]
-ael review session --source codex|claude-code|cursor --root <directory> --interactive --repository <verified-repository-hint> [--session latest] [--project <claude-project>] [--profile <id@version>] [--allow-expensive-checks] [--json]
+ael review session --source codex|claude-code|cursor --root <directory> --interactive --repository <repository-directory> [--session latest] [--project <claude-project>] [--profile <id@version>] [--allow-expensive-checks] [--json]
 ```
 
 Pass `--data-dir <directory>` to every command to select a private local data directory. The default is `~/Library/Application Support/AgentExperience` on macOS and `$XDG_DATA_HOME/agent-experience` or `~/.local/share/agent-experience` on Linux. Use `--json` for structured results and diagnostics. Successful commands return exit code 0, domain or storage failures return 1, and invalid command syntax returns 2.
 
-Explicit session IDs run without a prompt. Interactive selection and `latest` require a verified repository hint, an injected prompt boundary that presents only matching descriptors, and a confirmation before the selected artifact is read. Discovery that lacks verified repository hints fails closed.
+Explicit session IDs run without a prompt and may read an injected external artifact store. Interactive selection and `latest` require `--repository` to name a directory inside a Git repository. The command resolves its canonical Git top level and accepts only artifacts whose real paths resolve inside that same top level. The prompt exposes only session IDs and recency, then requires confirmation before reading the selected artifact. Non-Git stores and different or nested repositories cannot qualify for interactive selection.
 
 ## Privacy limits
 

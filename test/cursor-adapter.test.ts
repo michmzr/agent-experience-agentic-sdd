@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import { discoverCursorExports, readCursorMarkdownExport } from '../src/review/adapters/cursor.js';
@@ -16,7 +16,7 @@ test('discovers only explicit regular Markdown exports in the supplied root', ()
   const [artifact] = discoverCursorExports(root);
   assert.deepEqual(
     { source: artifact?.source, id: artifact?.id, location: artifact?.location, format: artifact?.format, repositoryHint: artifact?.repositoryHint, repositoryHintVerified: artifact?.repositoryHintVerified },
-    { source: 'cursor', id: 'review', location: join(root, 'review.md'), format: 'markdown-export', repositoryHint: basename(root), repositoryHintVerified: true }
+    { source: 'cursor', id: 'review', location: join(root, 'review.md'), format: 'markdown-export', repositoryHint: undefined, repositoryHintVerified: undefined }
   );
   assert.equal(Number.isFinite(Date.parse(artifact?.updatedAt ?? '')), true);
 });

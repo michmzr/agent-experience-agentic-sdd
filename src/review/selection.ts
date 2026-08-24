@@ -1,8 +1,11 @@
 export interface RepositorySessionDescriptor {
   readonly id: string;
-  readonly repositoryHint?: string;
-  readonly repositoryHintVerified?: boolean;
   readonly updatedAt?: string;
+}
+
+export interface RepositoryScopedSessionDescriptor extends RepositorySessionDescriptor {
+  readonly repositoryIdentity?: string;
+  readonly repositoryHintVerified?: boolean;
 }
 
 export interface ReviewSelectionPrompt {
@@ -13,26 +16,27 @@ export interface ReviewSelectionPrompt {
 export interface ReviewSelectionRequest {
   readonly session?: string;
   readonly interactive: boolean;
-  readonly repository?: string;
+  readonly repositoryIdentity?: string;
 }
 
 export async function selectRepositorySession(
-  sessions: readonly RepositorySessionDescriptor[],
+  sessions: readonly RepositoryScopedSessionDescriptor[],
   request: ReviewSelectionRequest,
   prompt: ReviewSelectionPrompt | undefined
 ): Promise<string> {
   if (request.session && request.session !== 'latest') return request.session;
-  if (!request.interactive || !request.repository) {
+  if (!request.interactive || !request.repositoryIdentity) {
     throw new SyntaxError('Interactive repository scope is required for session selection.');
   }
   if (!prompt) throw new Error('Interactive session selection requires a prompt boundary.');
 
-  const scoped = sessions.filter((session) => session.repositoryHintVerified === true && session.repositoryHint === request.repository);
+  const scoped = sessions.filter((session) => session.repositoryHintVerified === true && session.repositoryIdentity === request.repositoryIdentity);
   if (scoped.length === 0) throw new Error('No verified repository-scoped sessions were found.');
+  const selectable = scoped.map(({ id, updatedAt }) => ({ id, updatedAt }));
 
   const selected = request.session === 'latest'
-    ? latest(scoped)
-    : await selectedFromPrompt(scoped, prompt);
+    ? latest(selectable)
+    : await selectedFromPrompt(selectable, prompt);
   if (!await prompt.confirm(selected)) throw new Error('Session selection was not confirmed.');
   return selected.id;
 }

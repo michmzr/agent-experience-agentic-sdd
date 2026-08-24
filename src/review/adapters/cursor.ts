@@ -8,6 +8,7 @@ import {
   type NormalizedSession,
   type SessionArtifact
 } from '../contracts.js';
+import { isWithinRepository, resolveRepositoryIdentity } from '../repository-identity.js';
 
 class CursorPathBoundaryError extends Error {}
 
@@ -25,7 +26,7 @@ function resolveCursorDiscoveryRoot(root: string): string {
 
 export function discoverCursorExports(root: string): readonly SessionArtifact[] {
   const resolvedRoot = resolveCursorDiscoveryRoot(root);
-  const repositoryHint = basename(resolvedRoot) || 'root';
+  const repository = resolveRepositoryIdentity(resolvedRoot);
   let entries: Dirent<string>[];
   try { entries = readdirSync(resolvedRoot, { withFileTypes: true }); }
   catch { throw new CursorPathBoundaryError('Cursor export root could not be read.'); }
@@ -34,13 +35,17 @@ export function discoverCursorExports(root: string): readonly SessionArtifact[] 
     .sort((left, right) => left.name.localeCompare(right.name, 'en'))
     .map((entry) => {
       const location = resolve(resolvedRoot, entry.name);
+      if (repository && !isWithinRepository(repository, location)) throw new CursorPathBoundaryError('Cursor export repository scope could not be verified.');
       return {
         source: 'cursor' as const,
         id: basename(entry.name, extname(entry.name)),
         location,
         format: 'markdown-export' as const,
-        repositoryHint,
-        repositoryHintVerified: true,
+        ...(repository ? {
+          repositoryHint: repository.hint,
+          repositoryHintVerified: true,
+          repositoryIdentity: repository.canonicalTopLevel
+        } : {}),
         updatedAt: lstatSync(location).mtime.toISOString()
       };
     });

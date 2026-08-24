@@ -1,4 +1,4 @@
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 import type { AgentSource, LessonKind } from '../domain/types.js';
 import { CodexSessionAdapter } from './adapters/codex.js';
@@ -10,6 +10,7 @@ import { groupReviewFindings, type ReviewFinding as OrchestratorFinding } from '
 import { createReviewProposals } from './proposals.js';
 import { type ReviewRuntime, type ReviewProfile } from './runtime.js';
 import { sanitizeForReview } from './sanitizer.js';
+import { isWithinRepository, resolveRepositoryIdentity, type RepositoryIdentityResolver } from './repository-identity.js';
 import { selectRepositorySession, type ReviewSelectionPrompt } from './selection.js';
 
 export interface ManualReviewInput {
@@ -27,6 +28,7 @@ export interface ManualReviewDependencies {
   readonly runtime?: Pick<ReviewRuntime, 'run'>;
   readonly discover?: (input: Pick<ManualReviewInput, 'source' | 'root' | 'project'>) => Promise<readonly ReviewSessionDescriptor[]>;
   readonly prompt?: ReviewSelectionPrompt;
+  readonly repositoryIdentityResolver?: RepositoryIdentityResolver;
 }
 
 export interface ReviewSessionDescriptor {
@@ -35,6 +37,7 @@ export interface ReviewSessionDescriptor {
   readonly location: string;
   readonly repositoryHint?: string;
   readonly repositoryHintVerified?: boolean;
+  readonly repositoryIdentity?: string;
   readonly updatedAt?: string;
 }
 
@@ -65,19 +68,34 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
 
 async function resolveSelectedSession(input: ManualReviewInput, dependencies: ManualReviewDependencies): Promise<string> {
   if (input.session && input.session !== 'latest') return input.session;
+  if (!input.interactive || !input.repository) throw new SyntaxError('Interactive repository scope is required for session selection.');
+  const identityResolver = dependencies.repositoryIdentityResolver ?? resolveRepositoryIdentity;
+  const repository = identityResolver(input.repository);
+  if (!repository) throw new Error('Repository identity could not be verified.');
   const discover = dependencies.discover ?? discoverReviewSessions;
   const sessions = await discover(input);
-  const selectable = sessions.map(({ id, repositoryHint, repositoryHintVerified, updatedAt }) => ({ id, repositoryHint, repositoryHintVerified, updatedAt }));
-  return selectRepositorySession(selectable, { session: input.session, interactive: input.interactive ?? false, repository: input.repository }, dependencies.prompt);
+  const selectable = sessions.map(({ id, location, repositoryHintVerified, repositoryIdentity, updatedAt }) => {
+    const artifactRepository = identityResolver(dirname(location));
+    const verified = repositoryHintVerified === true
+      && repositoryIdentity === repository.canonicalTopLevel
+      && artifactRepository?.canonicalTopLevel === repository.canonicalTopLevel
+      && isWithinRepository(repository, location);
+    return {
+      id,
+      updatedAt,
+      ...(verified ? { repositoryHintVerified: true, repositoryIdentity: repository.canonicalTopLevel } : {})
+    };
+  });
+  return selectRepositorySession(selectable, { session: input.session, interactive: true, repositoryIdentity: repository.canonicalTopLevel }, dependencies.prompt);
 }
 
 export async function discoverReviewSessions(input: Pick<ManualReviewInput, 'source' | 'root' | 'project'>): Promise<readonly ReviewSessionDescriptor[]> {
-  if (input.source === 'codex') return (await new CodexSessionAdapter(input.root).discover()).map(({ id, location, repositoryHint, repositoryHintVerified, updatedAt }) => ({ source: input.source, id, location, repositoryHint, repositoryHintVerified, updatedAt }));
+  if (input.source === 'codex') return (await new CodexSessionAdapter(input.root).discover()).map(({ id, location, repositoryHint, repositoryHintVerified, repositoryIdentity, updatedAt }) => ({ source: input.source, id, location, repositoryHint, repositoryHintVerified, repositoryIdentity, updatedAt }));
   if (input.source === 'claude-code') {
     if (!input.project) throw new SyntaxError('Option is required: --project.');
-    return (await discoverClaudeCodeArtifacts({ configDir: input.root, project: input.project })).map(({ id, location, repositoryHint, repositoryHintVerified, updatedAt }) => ({ source: input.source, id, location, repositoryHint, repositoryHintVerified, updatedAt }));
+    return (await discoverClaudeCodeArtifacts({ configDir: input.root, project: input.project })).map(({ id, location, repositoryHint, repositoryHintVerified, repositoryIdentity, updatedAt }) => ({ source: input.source, id, location, repositoryHint, repositoryHintVerified, repositoryIdentity, updatedAt }));
   }
-  return discoverCursorExports(input.root).map(({ id, location, repositoryHint, repositoryHintVerified, updatedAt }) => ({ source: input.source, id: `${id}.md`, location, repositoryHint, repositoryHintVerified, updatedAt }));
+  return discoverCursorExports(input.root).map(({ id, location, repositoryHint, repositoryHintVerified, repositoryIdentity, updatedAt }) => ({ source: input.source, id: `${id}.md`, location, repositoryHint, repositoryHintVerified, repositoryIdentity, updatedAt }));
 }
 
 async function loadSession(input: ManualReviewInput): Promise<NormalizedSession> {

@@ -45,7 +45,7 @@ export async function runCliAsync(args: string[], options: RunCliAsyncOptions = 
       ? { ...options.reviewDependencies, prompt: options.reviewDependencies?.prompt ?? new TerminalReviewSelectionPrompt(options.terminal ?? createProcessTerminalHost()) }
       : options.reviewDependencies;
     const value = request.kind === 'discover'
-      ? (await discoverReviewSessions(request)).map(({ source, id, repositoryHint, repositoryHintVerified, updatedAt }) => ({ source, id, repositoryHint, repositoryHintVerified, updatedAt }))
+      ? (await discoverReviewSessions(request)).map(({ source, id, updatedAt }) => ({ source, id, updatedAt }))
       : await runManualReview(request, reviewDependencies);
     return success(value, json, parsed.positionals);
   } catch (error) {

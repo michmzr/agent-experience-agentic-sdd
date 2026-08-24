@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { basename, join } from 'node:path';
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
 
 import { runCliAsync } from '../src/cli.js';
 import { discoverReviewSessions, runManualReview, type ReviewSessionDescriptor } from '../src/review/review-service.js';
 import type { RepositorySessionDescriptor } from '../src/review/selection.js';
+import { initializeGitRepository } from './helpers/git-repository.js';
 
 const timestamp = '2026-08-24T12:34:56.000Z';
 const sessionRecord = `${JSON.stringify({ kind: 'message', occurredAt: timestamp })}\n`;
@@ -29,9 +30,9 @@ test('all source discoveries derive verified repository scope and recency from c
     discoverReviewSessions({ source: 'cursor', root: cursorRoot })
   ]);
 
-  assert.deepEqual(scopeProjection(codex), [{ source: 'codex', id: 'session.jsonl', repositoryHint: basename(codexRoot), repositoryHintVerified: true, updatedAt: timestamp }]);
-  assert.deepEqual(scopeProjection(claude), [{ source: 'claude-code', id: 'session', repositoryHint: project, repositoryHintVerified: true, updatedAt: timestamp }]);
-  assert.deepEqual(scopeProjection(cursor), [{ source: 'cursor', id: 'session.md', repositoryHint: basename(cursorRoot), repositoryHintVerified: true, updatedAt: timestamp }]);
+  assert.deepEqual(scopeProjection(codex), [{ source: 'codex', id: 'session.jsonl', repositoryHint: basename(codexRoot), repositoryHintVerified: true, repositoryIdentity: realpathSync(codexRoot), updatedAt: timestamp }]);
+  assert.deepEqual(scopeProjection(claude), [{ source: 'claude-code', id: 'session', repositoryHint: basename(claudeConfig), repositoryHintVerified: true, repositoryIdentity: realpathSync(claudeConfig), updatedAt: timestamp }]);
+  assert.deepEqual(scopeProjection(cursor), [{ source: 'cursor', id: 'session.md', repositoryHint: basename(cursorRoot), repositoryHintVerified: true, repositoryIdentity: realpathSync(cursorRoot), updatedAt: timestamp }]);
 });
 
 test('public discovery returns selectable metadata without internal artifact paths', async () => {
@@ -41,7 +42,7 @@ test('public discovery returns selectable metadata without internal artifact pat
   const result = await runCliAsync(['review', 'sessions', '--source', 'codex', '--root', root, '--json']);
   assert.equal(result.exitCode, 0);
   assert.deepEqual(JSON.parse(result.stdout), [{
-    source: 'codex', id: 'session.jsonl', repositoryHint: basename(root), repositoryHintVerified: true, updatedAt: timestamp
+    source: 'codex', id: 'session.jsonl', updatedAt: timestamp
   }]);
   assert.equal(result.stdout.includes(root), false);
   assert.equal(result.stdout.includes('location'), false);
@@ -50,24 +51,25 @@ test('public discovery returns selectable metadata without internal artifact pat
 test('interactive selection receives only verified selectable metadata without locations', async () => {
   const root = fixtureRoot('ael-selector-scope-'); const artifact = join(root, 'session.jsonl');
   writeFileSync(artifact, sessionRecord); setUpdatedAt(artifact);
-  const repositoryHint = basename(root);
   let received: readonly RepositorySessionDescriptor[] = [];
 
   await runManualReview(
-    { source: 'codex', root, interactive: true, repository: repositoryHint, allowExpensiveChecks: false },
+    { source: 'codex', root, interactive: true, repository: root, allowExpensiveChecks: false },
     { prompt: {
       async choose(sessions) { received = sessions; return 'session.jsonl'; },
       async confirm() { return true; }
     } }
   );
 
-  assert.deepEqual(received, [{ id: 'session.jsonl', repositoryHint, repositoryHintVerified: true, updatedAt: timestamp }]);
+  assert.deepEqual(received, [{ id: 'session.jsonl', updatedAt: timestamp }]);
   assert.equal(JSON.stringify(received).includes(root), false);
   assert.equal(JSON.stringify(received).includes('location'), false);
 });
 
 function fixtureRoot(prefix: string): string {
-  return mkdtempSync(join(tmpdir(), prefix));
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  initializeGitRepository(root);
+  return root;
 }
 
 function setUpdatedAt(path: string): void {
@@ -76,5 +78,5 @@ function setUpdatedAt(path: string): void {
 }
 
 function scopeProjection(descriptors: readonly ReviewSessionDescriptor[]) {
-  return descriptors.map(({ source, id, repositoryHint, repositoryHintVerified, updatedAt }) => ({ source, id, repositoryHint, repositoryHintVerified, updatedAt }));
+  return descriptors.map(({ source, id, repositoryHint, repositoryHintVerified, repositoryIdentity, updatedAt }) => ({ source, id, repositoryHint, repositoryHintVerified, repositoryIdentity, updatedAt }));
 }

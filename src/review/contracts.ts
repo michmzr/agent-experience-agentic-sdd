@@ -14,6 +14,7 @@ export interface SessionArtifact {
   readonly format: SessionArtifactFormat;
   readonly repositoryHint?: string;
   readonly repositoryHintVerified?: boolean;
+  readonly repositoryIdentity?: string;
   readonly updatedAt?: string;
 }
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import { runCliAsync } from '../src/cli.js';
@@ -30,10 +30,9 @@ test('public JSON session discovery omits internal artifact locations', async ()
 
   assert.equal(result.exitCode, 0);
   assert.equal(sessions.length, 1);
-  assert.deepEqual(
-    { source: sessions[0]?.source, id: sessions[0]?.id, repositoryHint: sessions[0]?.repositoryHint, repositoryHintVerified: sessions[0]?.repositoryHintVerified },
-    { source: 'codex', id: 'private-session.jsonl', repositoryHint: basename(root), repositoryHintVerified: true }
-  );
+  assert.deepEqual({ source: sessions[0]?.source, id: sessions[0]?.id }, { source: 'codex', id: 'private-session.jsonl' });
+  assert.equal('repositoryHint' in (sessions[0] ?? {}), false);
+  assert.equal('repositoryHintVerified' in (sessions[0] ?? {}), false);
   assert.equal(Number.isFinite(Date.parse(String(sessions[0]?.updatedAt))), true);
   assert.equal(result.stdout.includes(root), false);
   assert.equal(result.stdout.includes('location'), false);

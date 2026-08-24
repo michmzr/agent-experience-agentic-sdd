@@ -9,6 +9,7 @@ import {
   type NormalizedSession,
   type SessionArtifact
 } from '../contracts.js';
+import { isWithinRepository, resolveRepositoryIdentity } from '../repository-identity.js';
 
 export interface ClaudeCodeAdapterOptions {
   readonly configDir: string;
@@ -34,6 +35,7 @@ export async function discoverClaudeCodeArtifacts(options: ClaudeCodeAdapterOpti
   const project = requiredProject(options.project);
   const projectRoot = await realpath(join(projectsRoot, project));
   assertWithin(projectsRoot, projectRoot, 'Claude Code project directory');
+  const repository = resolveRepositoryIdentity(projectRoot);
 
   const entries = await readdir(projectRoot, { withFileTypes: true });
   const artifacts: ClaudeCodeArtifact[] = [];
@@ -42,14 +44,18 @@ export async function discoverClaudeCodeArtifacts(options: ClaudeCodeAdapterOpti
     const location = join(projectRoot, entry.name);
     const fileStatus = await lstat(location);
     if (fileStatus.isSymbolicLink()) continue;
+    if (repository && !isWithinRepository(repository, location)) throw new Error('Claude Code session artifact repository scope could not be verified.');
     artifacts.push({
       source: 'claude-code',
       id: basename(entry.name, '.jsonl'),
       location,
       format: 'jsonl',
       root: projectsRoot,
-      repositoryHint: project,
-      repositoryHintVerified: true,
+      ...(repository ? {
+        repositoryHint: repository.hint,
+        repositoryHintVerified: true,
+        repositoryIdentity: repository.canonicalTopLevel
+      } : {}),
       updatedAt: fileStatus.mtime.toISOString()
     });
   }

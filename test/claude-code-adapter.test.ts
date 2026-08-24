@@ -44,7 +44,7 @@ test('normalizes allowlisted Claude Code evidence text without retaining unrelat
   const session = await normalizeClaudeCodeArtifact(artifacts[0]!);
 
   assert.deepEqual(session, {
-    source: 'claude-code', sessionId: 'session-a', repositoryHint: project, startedAt: '2026-08-24T10:00:00.000Z', endedAt: '2026-08-24T10:02:00.000Z',
+    source: 'claude-code', sessionId: 'session-a', startedAt: '2026-08-24T10:00:00.000Z', endedAt: '2026-08-24T10:02:00.000Z',
     events: [
       { id: 'session-a:0', kind: 'message', occurredAt: '2026-08-24T10:00:00.000Z', text: 'token=secret', outcome: 'unknown' },
       { id: 'session-a:1', kind: 'tool', occurredAt: '2026-08-24T10:01:00.000Z', tool: 'Bash', exitStatus: 0, text: 'private-command', outcome: 'passed' },

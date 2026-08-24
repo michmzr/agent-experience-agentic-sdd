@@ -1,5 +1,5 @@
 import { lstat, readdir, readFile, realpath } from 'node:fs/promises';
-import { basename, isAbsolute, join, relative, sep } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 
 import {
   assertSessionArtifactSize,
@@ -9,6 +9,7 @@ import {
   type NormalizedSession,
   type SessionArtifact
 } from '../contracts.js';
+import { isWithinRepository, resolveRepositoryIdentity } from '../repository-identity.js';
 
 /**
  * Reads the explicitly supplied, locally observed Codex JSONL artifact format.
@@ -21,16 +22,20 @@ export class CodexSessionAdapter {
   public async discover(): Promise<readonly SessionArtifact[]> {
     const root = await this.resolveRoot();
     const paths = await this.findJsonlFiles(root, root);
-    const repositoryHint = basename(root) || 'root';
+    const repository = resolveRepositoryIdentity(root);
     return Promise.all(paths.map(async (path) => {
+      if (repository && !isWithinRepository(repository, path)) throw new Error('Codex session artifact repository scope could not be verified.');
       const status = await lstat(path);
       return {
         source: 'codex' as const,
         id: relative(root, path).split(sep).join('/'),
         location: path,
         format: 'observed-jsonl' as const,
-        repositoryHint,
-        repositoryHintVerified: true,
+        ...(repository ? {
+          repositoryHint: repository.hint,
+          repositoryHintVerified: true,
+          repositoryIdentity: repository.canonicalTopLevel
+        } : {}),
         updatedAt: status.mtime.toISOString()
       };
     }));
