@@ -10,8 +10,8 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 | 2. Source adapters and deterministic fixtures | completed | `4a6c90a`, `8181a54`, `a8eebf2`, `522175a`; full `pnpm check` 67 passed. |
 | 3. Privacy scrubber and artifact boundary | completed | `96c959a`; independent `pnpm check` 71 passed and diff check passed. |
 | 4. Manual review CLI and profile runtime | completed | `7f837e8`, `9bee20b`; independent `pnpm check` 78 passed. |
-| 5. Parallel orchestration, candidates and proposals | in progress | Implementation started after manual-review verification. |
-| 6. Milestone acceptance, review and merge | pending | Not started. |
+| 5. Parallel orchestration, candidates and proposals | completed | `66cfe7a`, `e0deb53`; independent `pnpm check` 84 passed and diff check passed. |
+| 6. Milestone acceptance, review and merge | in progress | Acceptance fixtures and independent final review started. |
 
 ### Task 1: Delivery design and executable contracts
 
@@ -45,10 +45,10 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 
 ### Task 5: Parallel orchestration, candidates and proposals
 
-- [ ] Run independent reviewers concurrently and sort results deterministically.
-- [ ] Group root causes, preserve disagreements and create candidate lessons.
-- [ ] Generate traceable proposals with specification requirements where needed.
-- [x] Run `pnpm check` and record the commit SHA: `9bee20b`, independently verified at 78 passed, 0 failed.
+- [x] Run independent reviewers concurrently and sort results deterministically: `7f837e8`.
+- [x] Group root causes, preserve disagreements and create candidate lessons: `66cfe7a`, `e0deb53`.
+- [x] Generate traceable proposals with specification requirements where needed: `e0deb53`.
+- [x] Run `pnpm check` and record the commit SHA: `e0deb53`, independently verified at 84 passed, 0 failed.
 
 ### Task 6: Milestone acceptance, review and merge
 
