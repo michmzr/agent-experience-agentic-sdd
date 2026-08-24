@@ -11,7 +11,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 | 3. Privacy scrubber and artifact boundary | completed | `96c959a`; independent `pnpm check` 71 passed and diff check passed. |
 | 4. Manual review CLI and profile runtime | completed | `7f837e8`, `9bee20b`; independent `pnpm check` 78 passed. |
 | 5. Parallel orchestration, candidates and proposals | completed | `66cfe7a`, `e0deb53`; independent `pnpm check` 84 passed and diff check passed. |
-| 6. Milestone acceptance, review and merge | in progress | Prior fixes pass 114 tests. Repeat final review found open privacy limits, required interactive repository selection, and incomplete built-in reviewer perspectives. |
+| 6. Milestone acceptance, review and merge | in progress | Privacy and resource limits fixed in `066809b`; focused tests 6 passed and full offline `pnpm check` 121 passed. Interactive repository selection and final approval remain open. |
 
 ### Task 1: Delivery design and executable contracts
 
@@ -59,8 +59,8 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 - [x] Remove non-interactive `--session latest`: `4aef5d7`; RED showed mtime-based selection, then the CLI rejected `latest` with `INVALID_SYNTAX` before loading data and the selection path was deleted. Focused coverage and offline `pnpm check` passed 114 tests, 0 failed.
 - [x] Add bounded, allowlisted session text that is sanitized and residual-scanned before review: `bc11ecb`; focused evidence tests 3 passed, full offline `pnpm check` 114 passed, 0 failed, and diff check passed.
 - [x] Inject a versioned profile registry/runtime and expose explicit profile selection: `4aef5d7`; the manual-review service accepts an injected runtime, defaults to `default@1`, and the CLI accepts `--profile id@version`. Regression tests cover explicit default selection and unknown profile identifiers or versions; focused coverage and offline `pnpm check` passed 114 tests, 0 failed.
-- [ ] Sanitize and residual-scan complete source text before truncation so a credential crossing the event limit cannot escape detection.
-- [ ] Enforce fail-closed maximum artifact bytes, event count and aggregate review-text size before reviewer dispatch.
+- [x] Sanitize and residual-scan complete source text before truncation so a credential crossing the event limit cannot escape detection: `066809b`; boundary regression passed and reviewer-visible output remains limited to 4096 characters per event.
+- [x] Enforce fail-closed maximum artifact bytes, event count and aggregate review-text size before reviewer dispatch: `066809b`; resource-focused tests 3 passed, combined privacy tests 6 passed, full offline `pnpm check` 121 passed, 0 failed, and diff check passed.
 - [ ] Implement interactive repository-scoped discovery and latest-for-current-repository selection with explicit confirmation; align README.
 - [x] Add all reviewer perspectives required by Spec 006 to the default versioned profile with deterministic coverage: `b92e095`; RED failed because the default-reviewers module did not exist, then the focused compiled Node test passed with all ten ordered reviewers and evidence-derived findings.
 - [ ] Obtain fresh implementation review and resolve all required findings.
