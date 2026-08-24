@@ -101,6 +101,13 @@ const retrievalMigration = `
   );
 `;
 
+const eventRetentionMigration = `
+  CREATE TABLE IF NOT EXISTS event_tombstones (
+    event_id TEXT PRIMARY KEY REFERENCES events(id),
+    tombstoned_at TEXT NOT NULL
+  );
+`;
+
 export class ExperienceStore {
   private readonly database: DatabaseSync;
 
@@ -247,13 +254,29 @@ export class ExperienceStore {
         removeTombstone.run(observation.id);
         removeObservation.run(observation.id);
       }
-      const removeEvents = this.database.prepare(`
-        DELETE FROM events
-        WHERE NOT EXISTS (SELECT 1 FROM observation_events WHERE observation_events.event_id = events.id)
-      `);
-      removeEvents.run();
+      const eventCandidates = this.database.prepare(`
+        SELECT e.id
+        FROM events e
+        LEFT JOIN event_tombstones t ON t.event_id = e.id
+        WHERE t.event_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM observation_events oe WHERE oe.event_id = e.id)
+      `).all() as Array<{ id: string }>;
+      const tombstoneEvent = this.database.prepare('INSERT INTO event_tombstones (event_id, tombstoned_at) VALUES (?, ?)');
+      for (const event of eventCandidates) tombstoneEvent.run(event.id, now);
+      const expiredEvents = this.database.prepare(`
+        SELECT t.event_id AS id
+        FROM event_tombstones t
+        WHERE t.tombstoned_at < ?
+          AND NOT EXISTS (SELECT 1 FROM observation_events oe WHERE oe.event_id = t.event_id)
+      `).all(now) as Array<{ id: string }>;
+      const removeEventTombstone = this.database.prepare('DELETE FROM event_tombstones WHERE event_id = ?');
+      const removeEvent = this.database.prepare('DELETE FROM events WHERE id = ?');
+      for (const event of expiredEvents) {
+        removeEventTombstone.run(event.id);
+        removeEvent.run(event.id);
+      }
       this.database.exec('COMMIT');
-      return candidates.length + expired.length;
+      return candidates.length + expired.length + eventCandidates.length + expiredEvents.length;
     } catch (error) {
       this.database.exec('ROLLBACK');
       throw error;
@@ -272,6 +295,10 @@ export class ExperienceStore {
       if (!applied.has(2)) {
         this.database.exec(retrievalMigration);
         this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(2, new Date().toISOString());
+      }
+      if (!applied.has(3)) {
+        this.database.exec(eventRetentionMigration);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(3, new Date().toISOString());
       }
       this.database.exec('COMMIT');
     } catch (error) {
@@ -294,13 +321,21 @@ export class ExperienceStore {
   private defaultMetadata(knowledgeId: string, record: ExperienceImport): Required<Pick<KnowledgeMetadata, 'scope' | 'createdAt'>> & KnowledgeMetadata {
     const candidate = record.knowledge.find((item) => item.id === knowledgeId);
     const cluster = record.candidates.find((item) => item.id === candidate?.candidateId)?.clusterId;
-    const observationId = record.clusters.find((item) => item.id === cluster)?.observationIds[0];
-    const eventId = record.observations.find((item) => item.id === observationId)?.eventIds[0];
-    const event = record.events.find((item) => item.id === eventId);
+    const observationIds = record.clusters.find((item) => item.id === cluster)?.observationIds ?? [];
+    const events = observationIds.flatMap((observationId) => {
+      const eventIds = record.observations.find((item) => item.id === observationId)?.eventIds ?? [];
+      return eventIds.map((eventId) => record.events.find((item) => item.id === eventId)).filter((event): event is ExperienceImport['events'][number] => event !== undefined);
+    });
+    const repositoryIds = new Set(events
+      .map((event) => record.sessions.find((item) => item.id === event.sessionId)?.repositoryId)
+      .filter((repositoryId): repositoryId is NonNullable<typeof repositoryId> => repositoryId !== undefined));
+    if (repositoryIds.size > 1) throw new Error('INVALID_METADATA: Mixed repository provenance is not eligible for repository knowledge.');
+    const repositoryId = [...repositoryIds][0];
+    const event = events[0];
     const session = record.sessions.find((item) => item.id === event?.sessionId);
     return {
-      scope: session?.repositoryId ? 'repository' : 'global',
-      repositoryId: session?.repositoryId,
+      scope: repositoryId ? 'repository' : 'global',
+      repositoryId,
       path: event?.path,
       tool: event?.tool,
       createdAt: event?.occurredAt ?? session?.startedAt ?? new Date(0).toISOString()

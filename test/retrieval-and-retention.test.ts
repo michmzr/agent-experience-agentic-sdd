@@ -121,7 +121,8 @@ test('tombstones terminal knowledge observations without purging referenced reco
   store.import(record);
 
   assert.equal(store.expireUnprotected('2030-01-01T00:00:00.000Z'), 1);
-  assert.equal(store.expireUnprotected('2030-01-02T00:00:00.000Z'), 1);
+  assert.equal(store.expireUnprotected('2030-01-02T00:00:00.000Z'), 2);
+  assert.equal(store.expireUnprotected('2030-01-03T00:00:00.000Z'), 1);
   assert.equal(store.inspect('knowledge-old' as KnowledgeEntry['id'])?.statement, 'Old convention.');
   store.close();
 });
@@ -163,5 +164,38 @@ test('rejects repository metadata that contradicts source provenance', () => {
 
   assert.throws(() => store.import(record), /INVALID_METADATA/);
   assert.deepEqual(store.listKnowledge(), []);
+  store.close();
+});
+
+test('rejects durable repository knowledge with mixed repository source provenance', () => {
+  const store = createStore();
+  const record = fixture();
+  record.clusters[1] = {
+    ...record.clusters[1],
+    observationIds: [
+      'observation-new' as ExperienceImport['observations'][number]['id'],
+      'observation-other-repo' as ExperienceImport['observations'][number]['id']
+    ]
+  };
+
+  assert.throws(() => store.import(record), /INVALID_METADATA: Mixed repository provenance/);
+  assert.deepEqual(store.listKnowledge(), []);
+  store.close();
+});
+
+test('tombstones an unreferenced event before purging it on a later expiry', () => {
+  const store = createStore();
+  const record = fixture();
+  record.events.push({
+    id: 'event-unreferenced' as ExperienceImport['events'][number]['id'],
+    sessionId: 'session-repo-a' as ExperienceImport['sessions'][number]['id'],
+    kind: 'tool-result',
+    occurredAt: '2026-08-24T00:00:00.000Z'
+  });
+  store.import(record);
+
+  assert.equal(store.expireUnprotected('2030-01-01T00:00:00.000Z'), 1);
+  assert.equal(store.expireUnprotected('2030-01-02T00:00:00.000Z'), 1);
+  assert.equal(store.expireUnprotected('2030-01-03T00:00:00.000Z'), 0);
   store.close();
 });
