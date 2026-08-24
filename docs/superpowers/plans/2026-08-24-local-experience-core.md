@@ -23,12 +23,12 @@ Updated: 2026-08-24. This section is the live execution record; tasks are not tr
 | 3. Private SQLite store | Accepted | `c23f51f`, `293753b`; specification and quality reviews passed. |
 | 4. Retrieval and retention | Accepted | `59a55fc` through `bba542d`; specification and quality reviews passed. |
 | 5. Repository knowledge format | Accepted and merged into this branch | `10b5f9a` through `1605a49`; specification and quality reviews passed. |
-| 6. CLI and integration fixtures | Corrected; awaiting repeated specification review, then quality review | `fa01006`, `ffa9da4`; fresh `pnpm check` passed with 49 tests. The CLI now accepts only the approved `global|repo` scope values. |
+| 6. CLI and integration fixtures | Specification review accepted; awaiting quality review | `fa01006`, `ffa9da4`; fresh `pnpm check` passed with 49 tests. The CLI now accepts only the approved `global|repo` scope values. |
 | 7. Verification evidence | Pending | Starts after Task 6 is accepted. |
 
 Current full verification: `pnpm check` passed on 2026-08-24 with 49 tests, 0 failures.
 
-Task 6 review state: the incompatible `repository` scope spelling was corrected in `ffa9da4`. The next action is repeated specification review, followed by quality review.
+Task 6 review state: repeated specification review accepted `ffa9da4`; the next action is quality review.
 
 Milestone 1 work outside this local-core plan remains pending: the three source adapters, sanitizer, manual review runtime, reviewer orchestration, candidate-lesson and proposal generation, and the expanded benchmark fixtures.
 
