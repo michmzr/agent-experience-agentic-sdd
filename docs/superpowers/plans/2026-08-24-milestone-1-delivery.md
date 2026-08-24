@@ -11,7 +11,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 | 3. Privacy scrubber and artifact boundary | completed | `96c959a`; independent `pnpm check` 71 passed and diff check passed. |
 | 4. Manual review CLI and profile runtime | completed | `7f837e8`, `9bee20b`; independent `pnpm check` 78 passed. |
 | 5. Parallel orchestration, candidates and proposals | completed | `66cfe7a`, `e0deb53`; independent `pnpm check` 84 passed and diff check passed. |
-| 6. Milestone acceptance, review and merge | in progress | Final reviews requested changes: credential/path/privacy boundaries, unique provenance, runtime artifact validation, truthful canonical async CLI, and broader observed Codex envelopes. |
+| 6. Milestone acceptance, review and merge | in progress | Final-review fixes `cf86f3a`, `cc8ca2a`, `80e30e4`; independent offline suite 99 passed; repeat final reviews pending. |
 
 ### Task 1: Delivery design and executable contracts
 
