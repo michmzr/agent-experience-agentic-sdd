@@ -11,7 +11,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 | 3. Privacy scrubber and artifact boundary | completed | `96c959a`; independent `pnpm check` 71 passed and diff check passed. |
 | 4. Manual review CLI and profile runtime | completed | `7f837e8`, `9bee20b`; independent `pnpm check` 78 passed. |
 | 5. Parallel orchestration, candidates and proposals | completed | `66cfe7a`, `e0deb53`; independent `pnpm check` 84 passed and diff check passed. |
-| 6. Milestone acceptance, review and merge | in progress | Fixture `6d0045b`; CLI pipeline fixed in `6659965`; sanitizer and observed Codex fixes remain in RED/GREEN cycles. |
+| 6. Milestone acceptance, review and merge | in progress | Review fixes: `6659965`, `66464f0`, `f161c45`; independent offline suite 92 passed; final re-review pending. |
 
 ### Task 1: Delivery design and executable contracts
 
@@ -53,7 +53,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 ### Task 6: Milestone acceptance, review and merge
 
 - [x] Add or update quality fixtures for all Milestone 1 acceptance paths: `6d0045b`, independently verified at 85 passed, 0 failed.
-- [ ] Run offline verification and security/privacy scans.
+- [x] Run offline verification and security/privacy scans: 92 passed, 0 failed; diff check clean; no production network/process client matches.
 - [ ] Obtain fresh implementation review and resolve all required findings.
 - [ ] Mark `docs/product/roadmap.md` Milestone 1 complete only after all gates pass.
 - [ ] Merge the reviewed feature branch into local `main` and record the merge SHA.
