@@ -11,7 +11,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 | 3. Privacy scrubber and artifact boundary | completed | `96c959a`; independent `pnpm check` 71 passed and diff check passed. |
 | 4. Manual review CLI and profile runtime | completed | `7f837e8`, `9bee20b`; independent `pnpm check` 78 passed. |
 | 5. Parallel orchestration, candidates and proposals | completed | `66cfe7a`, `e0deb53`; independent `pnpm check` 84 passed and diff check passed. |
-| 6. Milestone acceptance, review and merge | in progress | Terminal prompt `5eea067` and verified discovery metadata `e102daa` close the last reported implementation blocker; focused metadata tests 3 passed and full offline `pnpm check` 125 passed. Fresh final approval remains open. |
+| 6. Milestone acceptance, review and merge | in progress | Public prompt and recency pass 125 tests. Final review found one blocker: repository identity is derived from an untrusted directory basename rather than a canonical repository boundary. |
 
 ### Task 1: Delivery design and executable contracts
 
@@ -64,6 +64,7 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 - [x] Implement interactive repository-scoped discovery and latest-for-current-repository selection with explicit confirmation; align README: `b4e02df`; injected discovery and prompt boundaries filter to verified repository hints, confirm every interactive selection, select latest only from dated scoped descriptors, and reject latest outside interactive repository scope. Focused coverage and full offline `pnpm check` passed 121 tests, 0 failed.
 - [x] Add all reviewer perspectives required by Spec 006 to the default versioned profile with deterministic coverage: `b92e095`; RED failed because the default-reviewers module did not exist, then the focused compiled Node test passed with all ten ordered reviewers and evidence-derived findings.
 - [x] Wire the public CLI to a concrete terminal selection prompt and verified repository/recency descriptors: terminal prompt `5eea067`, verified Codex/Claude Code/Cursor scope and artifact-stat recency `e102daa`; selector receives no locations, public JSON omits paths, focused metadata coverage 3 passed, combined focused coverage 14 passed, and full offline `pnpm check` passed 125 tests, 0 failed.
+- [ ] Derive interactive repository identity from a validated canonical Git top-level and reject same-basename or non-repository roots.
 - [ ] Obtain fresh implementation review and resolve all required findings.
 - [ ] Mark `docs/product/roadmap.md` Milestone 1 complete only after all gates pass.
 - [ ] Merge the reviewed feature branch into local `main` and record the merge SHA.
