@@ -5,9 +5,14 @@ import { basename } from 'node:path';
 import { DomainError, errorMessage, ExperienceService } from './application/experience-service.js';
 import type { KnowledgeState } from './domain/types.js';
 import type { KnowledgeScope } from './storage/experience-store.js';
-import { discoverReviewSessions, runManualReview } from './review/review-service.js';
+import { discoverReviewSessions, runManualReview, type ManualReviewDependencies } from './review/review-service.js';
+import { createProcessTerminalHost, TerminalReviewSelectionPrompt, type TerminalHost } from './review/terminal-prompt.js';
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string; }
+export interface RunCliAsyncOptions {
+  readonly terminal?: TerminalHost;
+  readonly reviewDependencies?: ManualReviewDependencies;
+}
 
 interface ParsedArguments { readonly positionals: string[]; readonly options: Map<string, string | true>; }
 
@@ -31,14 +36,17 @@ export function runCli(args: string[]): CliResult {
   }
 }
 
-export async function runCliAsync(args: string[]): Promise<CliResult> {
+export async function runCliAsync(args: string[], options: RunCliAsyncOptions = {}): Promise<CliResult> {
   if (args[0] !== 'review') return runCli(args);
   try {
     const parsed = parseArguments(args); const json = parsed.options.has('json');
     const request = parseReviewRequest(parsed);
+    const reviewDependencies = request.kind === 'review' && request.interactive
+      ? { ...options.reviewDependencies, prompt: options.reviewDependencies?.prompt ?? new TerminalReviewSelectionPrompt(options.terminal ?? createProcessTerminalHost()) }
+      : options.reviewDependencies;
     const value = request.kind === 'discover'
       ? (await discoverReviewSessions(request)).map(({ source, id }) => ({ source, id }))
-      : await runManualReview(request);
+      : await runManualReview(request, reviewDependencies);
     return success(value, json, parsed.positionals);
   } catch (error) {
     const syntax = error instanceof SyntaxError;
