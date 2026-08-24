@@ -64,7 +64,7 @@ test('discovers repository-scoped sessions and reviews the deterministic latest 
   assert.deepEqual(JSON.parse(discovered.stdout).map(({ id }: { id: string }) => id), ['newer.jsonl', 'older.jsonl'].sort());
   const latest = await runCliAsync(['review', 'session', '--source', 'codex', '--root', root, '--session', 'latest', '--json']);
   const output = JSON.parse(latest.stdout);
-  assert.equal(output.selectedSession, 'newer.jsonl');
+  assert.match(output.selectedSession, /^\[REDACTED:opaque-id:[a-f0-9]{64}\]$/);
   assert.match(output.candidates[0].statement, /failed-tool:git/);
 });
 

@@ -36,7 +36,9 @@ export async function runCliAsync(args: string[]): Promise<CliResult> {
   try {
     const parsed = parseArguments(args); const json = parsed.options.has('json');
     const request = parseReviewRequest(parsed);
-    const value = request.kind === 'discover' ? await discoverReviewSessions(request) : await runManualReview(request);
+    const value = request.kind === 'discover'
+      ? (await discoverReviewSessions(request)).map(({ source, id }) => ({ source, id }))
+      : await runManualReview(request);
     return success(value, json, parsed.positionals);
   } catch (error) {
     const syntax = error instanceof SyntaxError;

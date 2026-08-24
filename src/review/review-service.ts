@@ -44,7 +44,7 @@ export async function runManualReview(input: ManualReviewInput) {
       proposal: { category: 'workflow' as const, title: recommendation(group.recommendation) }
     }))
   });
-  return { source: input.source, selectedSession, profile: run.profile, skippedReviewerIds: run.skippedReviewerIds, findings: groups, ...intelligence };
+  return { source: input.source, selectedSession: artifact.session.sessionId, profile: run.profile, skippedReviewerIds: run.skippedReviewerIds, findings: groups, ...intelligence };
 }
 
 export async function discoverReviewSessions(input: Pick<ManualReviewInput, 'source' | 'root' | 'project'>): Promise<readonly ReviewSessionDescriptor[]> {
