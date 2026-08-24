@@ -127,6 +127,7 @@ export function validateImport(record: ExperienceImport): ValidationResult {
   if (record.candidates.some((candidate) => !lessonKinds.includes(candidate.kind))) return invalid('INVALID_SHAPE', 'Lesson kind is unsupported.');
   if (record.evidence.some((item) => !evidencePolarities.includes(item.polarity))) return invalid('INVALID_SHAPE', 'Evidence polarity is unsupported.');
   if (record.evidence.some((item) => item.revalidatesTo !== undefined && !['observed', 'confirmed', 'verified'].includes(item.revalidatesTo))) return invalid('INVALID_SHAPE', 'Evidence revalidation target is unsupported.');
+  if (record.evidence.some((item) => item.polarity === 'contradicts' && item.revalidatesTo !== undefined)) return invalid('INVALID_SHAPE', 'Contradictory evidence cannot revalidate knowledge.');
   if (record.knowledge.some((entry) => !states.includes(entry.state))) return invalid('INVALID_SHAPE', 'Knowledge state is unsupported.');
 
   const sessionIds = identifiers(record.sessions);

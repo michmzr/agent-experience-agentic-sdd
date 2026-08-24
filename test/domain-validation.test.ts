@@ -205,3 +205,28 @@ test('rejects unsupported event outcomes', () => {
 
   assert.equal(validateImport(record).ok, false);
 });
+
+test('does not allow an explicit target to override an active contradiction dispute', () => {
+  const result = applyTransition(verifiedKnowledge(), contradictionEvidence(), [], 'expired');
+
+  assert.equal(result.entry.state, 'verified');
+  assert.deepEqual(result.entry.evidenceIds, ['evidence-1']);
+  assert.deepEqual(result.history, []);
+});
+
+test('rejects contradictory evidence as disputed-state revalidation', () => {
+  const evidence: Evidence = {
+    ...contradictionEvidence(),
+    id: 'evidence-revalidation-contradiction' as Evidence['id'],
+    revalidatesTo: 'verified'
+  };
+  const record = validImport();
+  (record.evidence[0] as { polarity: Evidence['polarity']; revalidatesTo?: Evidence['revalidatesTo'] }).polarity = 'contradicts';
+  (record.evidence[0] as { revalidatesTo?: Evidence['revalidatesTo'] }).revalidatesTo = 'verified';
+  const result = applyTransition(disputedKnowledge(), evidence);
+
+  assert.equal(validateImport(record).ok, false);
+  assert.equal(result.entry.state, 'disputed');
+  assert.deepEqual(result.entry.evidenceIds, ['evidence-1', 'evidence-contradiction']);
+  assert.deepEqual(result.history, []);
+});

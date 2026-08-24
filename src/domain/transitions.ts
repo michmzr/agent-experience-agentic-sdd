@@ -28,6 +28,9 @@ export function applyTransition(
   target?: KnowledgeState
 ): TransitionResult {
   if (evidence.candidateId !== entry.candidateId || entry.evidenceIds.includes(evidence.id)) return freezeResult(entry, history);
+  if (evidence.polarity === 'contradicts' && (evidence.revalidatesTo || (target !== undefined && target !== 'disputed'))) {
+    return freezeResult(entry, history);
+  }
 
   const nextState = target ?? automaticTarget(entry, evidence);
 
