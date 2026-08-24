@@ -28,7 +28,7 @@ Updated: 2026-08-24. This section is the live execution record; tasks are not tr
 
 Current full verification: `pnpm check` passed on 2026-08-24 with 53 tests, 0 failures.
 
-Task 6 review state: specification and repeated quality reviews accepted the implementation. The Task 3 persisted-lifecycle regression is corrected: a valid contradictory import cannot retain a caller-supplied active state, and its lifecycle history is written in the same transaction. Task 7 refresh is active.
+Task 6 review state: specification and repeated quality reviews accepted the implementation. The Task 3 persisted-lifecycle regression is corrected: a valid contradictory import cannot retain a caller-supplied active state, and its lifecycle history is written in the same transaction. Task 7 refresh is accepted in `acabfc0`; this local-core plan is complete.
 
 Milestone 1 work outside this local-core plan remains pending: the three source adapters, sanitizer, manual review runtime, reviewer orchestration, candidate-lesson and proposal generation, and the expanded benchmark fixtures.
 
