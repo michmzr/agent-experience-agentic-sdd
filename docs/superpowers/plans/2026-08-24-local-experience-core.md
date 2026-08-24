@@ -24,7 +24,7 @@ Updated: 2026-08-24. This section is the live execution record; tasks are not tr
 | 4. Retrieval and retention | Accepted | `59a55fc` through `bba542d`; specification and quality reviews passed. |
 | 5. Repository knowledge format | Accepted and merged into this branch | `10b5f9a` through `1605a49`; specification and quality reviews passed. |
 | 6. CLI and integration fixtures | Accepted | `fa01006`, `ffa9da4`, `5b31ac5`, `c11538c`; specification and quality reviews passed. Fresh `pnpm check` passed with 52 tests. |
-| 7. Verification evidence | In progress | Steps 1-3 completed 2026-08-24 16:16:41 CEST: acceptance matrix records a fresh offline-oriented `pnpm check` with 52 passing tests and a no-match network/LLM static scan; staged review found only the planned verification record and execution-plan update, with no whitespace errors or credentials. Commit gate remains. |
+| 7. Verification evidence | Accepted | Completed 2026-08-24 16:17:22 CEST: fresh offline-oriented `pnpm check` reported 52 passing tests and a no-match network/LLM static scan; staged review found only the verification record and execution-plan update, with no whitespace errors or credentials. Evidence commit: `7950fb1`. |
 
 Current full verification: `pnpm check` passed on 2026-08-24 with 52 tests, 0 failures.
 
@@ -420,11 +420,13 @@ Expected: no whitespace errors; no credentials; only the planned source, tests, 
 
 Completed: 2026-08-24 16:16:41 CEST. Verification: `git diff --check` and `git diff --staged --check` exited 0. The staged diff contained only `docs/verification/2026-08-24-local-experience-core.md` and this required execution-plan update. The credential-pattern scan matched only the literal search terms in this plan's documented command, not a credential value. Review state: scope and whitespace accepted; no credentials found. Commit SHA: pending Task 7 Step 4.
 
-- [ ] **Step 4: Commit verification evidence**
+- [x] **Step 4: Commit verification evidence**
 
 Run: `git commit -m "docs: record local experience core verification"`
 
 Expected: one documentation-only commit.
+
+Completed: 2026-08-24 16:17:22 CEST. Verification: `git commit -m "docs: record local experience core verification"` created `7950fb1`; the commit contains only the Task 7 verification evidence and execution-plan progress recorded through Step 3. Review state: Task 7 accepted. Commit SHA: `7950fb1`.
 
 ## Plan self-review
 
