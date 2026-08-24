@@ -158,3 +158,50 @@ test('rejects GitHub fine-grained personal access tokens', () => {
 
   assert.equal(validateImport(record).ok, false);
 });
+
+test('rejects cross-candidate contradiction evidence without changing knowledge', () => {
+  const evidence: Evidence = {
+    ...contradictionEvidence(),
+    candidateId: 'candidate-other' as CandidateLessonId
+  };
+  const result = applyTransition(verifiedKnowledge(), evidence);
+
+  assert.equal(result.entry.state, 'verified');
+  assert.deepEqual(result.entry.evidenceIds, ['evidence-1']);
+  assert.deepEqual(result.history, []);
+});
+
+test('records each explicit terminal transition through the canonical policy', () => {
+  for (const target of ['superseded', 'rejected', 'expired'] as const) {
+    const evidence: Evidence = {
+      id: `evidence-${target}` as Evidence['id'],
+      candidateId: 'candidate-1' as CandidateLessonId,
+      polarity: 'contextualizes',
+      summary: `Mark knowledge ${target}.`
+    };
+    const result = applyTransition(verifiedKnowledge(), evidence, [], target);
+
+    assert.equal(result.entry.state, target);
+    assert.equal(result.history.at(-1)?.to, target);
+  }
+});
+
+test('rejects duplicate and empty identifiers before reference checks', () => {
+  const duplicate = validImport();
+  duplicate.events.push({ ...duplicate.events[0] });
+  const empty = validImport();
+  empty.events[0].id = '' as EventId;
+
+  for (const record of [duplicate, empty]) {
+    const result = validateImport(record);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.code, 'INVALID_SHAPE');
+  }
+});
+
+test('rejects unsupported event outcomes', () => {
+  const record = validImport();
+  (record.events[0] as { outcome?: string }).outcome = 'partial';
+
+  assert.equal(validateImport(record).ok, false);
+});

@@ -23,6 +23,7 @@ const forbiddenText = [
 const states: readonly KnowledgeState[] = ['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired'];
 const lessonKinds: readonly LessonKind[] = ['failure', 'successful-workflow', 'project-fact', 'convention', 'tool-capability', 'environment-quirk', 'heuristic', 'preference'];
 const evidencePolarities: readonly EvidencePolarity[] = ['confirms', 'contradicts', 'contextualizes'];
+const eventOutcomes = ['passed', 'failed', 'unknown'] as const;
 const collectionKeys = ['sessions', 'events', 'observations', 'clusters', 'candidates', 'evidence', 'knowledge'] as const;
 const allowedEntityKeys: Record<typeof collectionKeys[number], readonly string[]> = {
   sessions: ['id', 'source', 'startedAt', 'repositoryId', 'workspaceId', 'userId'],
@@ -60,6 +61,10 @@ function hasForbiddenContent(value: unknown): ValidationResult | undefined {
 
 function identifiers(items: readonly { id: string }[]): Set<string> {
   return new Set(items.map(({ id }) => id));
+}
+
+function hasEmptyOrDuplicateIdentifiers(items: readonly { id: string }[]): boolean {
+  return items.some((item) => item.id.trim().length === 0) || identifiers(items).size !== items.length;
 }
 
 function hasOnlyAllowedKeys(value: unknown, allowedKeys: readonly string[]): boolean {
@@ -116,7 +121,9 @@ export function validateImport(record: ExperienceImport): ValidationResult {
   if (collectionKeys.some((name) => !Array.isArray(record[name]))) return invalid('INVALID_SHAPE', 'Import collections must be arrays.');
   if (collectionKeys.some((name) => record[name].some((item) => !hasOnlyAllowedKeys(item, allowedEntityKeys[name])))) return invalid('FORBIDDEN_FIELD', 'Import entity contains an unsupported field.');
   if (collectionKeys.some((name) => record[name].some((item) => !hasValidEntityShape(name, item)))) return invalid('INVALID_SHAPE', 'Import entity has an invalid shape.');
+  if (collectionKeys.some((name) => hasEmptyOrDuplicateIdentifiers(record[name]))) return invalid('INVALID_SHAPE', 'Entity identifiers must be unique and non-empty.');
   if (record.sessions.some((session) => !['codex', 'claude-code', 'cursor'].includes(session.source))) return invalid('INVALID_SHAPE', 'Session source is unsupported.');
+  if (record.events.some((event) => event.outcome !== undefined && !eventOutcomes.includes(event.outcome))) return invalid('INVALID_SHAPE', 'Event outcome is unsupported.');
   if (record.candidates.some((candidate) => !lessonKinds.includes(candidate.kind))) return invalid('INVALID_SHAPE', 'Lesson kind is unsupported.');
   if (record.evidence.some((item) => !evidencePolarities.includes(item.polarity))) return invalid('INVALID_SHAPE', 'Evidence polarity is unsupported.');
   if (record.evidence.some((item) => item.revalidatesTo !== undefined && !['observed', 'confirmed', 'verified'].includes(item.revalidatesTo))) return invalid('INVALID_SHAPE', 'Evidence revalidation target is unsupported.');

@@ -15,7 +15,8 @@ const normalNext: Partial<Record<KnowledgeState, KnowledgeState>> = {
 };
 
 export function canTransition(from: KnowledgeState, to: KnowledgeState): boolean {
-  if (terminalStates.includes(from) || from === to || from === 'disputed') return false;
+  if (terminalStates.includes(from) || from === to) return false;
+  if (from === 'disputed') return ['observed', 'confirmed', 'verified'].includes(to);
 
   return normalNext[from] === to || (activeStates.includes(from) && ['disputed', 'superseded', 'rejected', 'expired'].includes(to));
 }
@@ -23,24 +24,18 @@ export function canTransition(from: KnowledgeState, to: KnowledgeState): boolean
 export function applyTransition(
   entry: KnowledgeEntry,
   evidence: Evidence,
-  history: readonly TransitionHistoryEntry[] = []
+  history: readonly TransitionHistoryEntry[] = [],
+  target?: KnowledgeState
 ): TransitionResult {
-  if (entry.evidenceIds.includes(evidence.id)) return freezeResult(entry, history);
+  if (evidence.candidateId !== entry.candidateId || entry.evidenceIds.includes(evidence.id)) return freezeResult(entry, history);
 
-  const nextState = evidence.polarity === 'contradicts'
-    ? 'disputed'
-    : entry.state === 'disputed' && evidence.revalidatesTo
-      ? evidence.revalidatesTo
-      : evidence.polarity === 'confirms'
-        ? normalNext[entry.state]
-      : undefined;
+  const nextState = target ?? automaticTarget(entry, evidence);
 
-  if (!nextState || terminalStates.includes(entry.state)) {
+  if (!nextState || !canTransition(entry.state, nextState)) {
     return freezeResult({ ...entry, evidenceIds: [...entry.evidenceIds, evidence.id] }, history);
   }
 
-  const revalidation = entry.state === 'disputed' && Boolean(evidence.revalidatesTo);
-  if ((!revalidation && !canTransition(entry.state, nextState)) || (revalidation && evidence.polarity === 'contradicts')) {
+  if (entry.state === 'disputed' && evidence.revalidatesTo !== nextState) {
     return freezeResult({ ...entry, evidenceIds: [...entry.evidenceIds, evidence.id] }, history);
   }
 
@@ -48,6 +43,14 @@ export function applyTransition(
     { ...entry, state: nextState, evidenceIds: [...entry.evidenceIds, evidence.id] },
     [...history, { from: entry.state, to: nextState, evidenceId: evidence.id }]
   );
+}
+
+function automaticTarget(entry: KnowledgeEntry, evidence: Evidence): KnowledgeState | undefined {
+  if (evidence.polarity === 'contradicts') return 'disputed';
+  if (entry.state === 'disputed') return evidence.revalidatesTo;
+  if (evidence.polarity === 'confirms') return normalNext[entry.state];
+
+  return undefined;
 }
 
 function freezeResult(entry: KnowledgeEntry, history: readonly TransitionHistoryEntry[]): TransitionResult {
