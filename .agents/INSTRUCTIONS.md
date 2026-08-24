@@ -14,6 +14,8 @@
 - Treat disputed knowledge as advisory only. Never hard-block from disputed knowledge.
 - Propose revalidation when successful evidence contradicts an existing verified lesson.
 - Keep shared knowledge concise enough to be reviewed in Git.
+- When executing a written plan, update its checklist immediately after each verified action, task, or stage. Record the current status, verification command and outcome, and the relevant commit SHA in the plan's execution-status section.
+- Mark a plan item complete only after its required verification and review gates pass. Do not report an agent or task as running without a fresh status check.
 
 ## Never
 

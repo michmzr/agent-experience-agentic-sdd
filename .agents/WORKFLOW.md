@@ -16,6 +16,8 @@ For changes that alter behavior, architecture, developer workflow, tooling or sk
 
 For failures: reproduce, inspect evidence, identify root cause, state one hypothesis, run the smallest useful experiment, then fix the verified cause.
 
+For a written execution plan, update the plan file immediately after every verified action, task, and stage. Check completed items, preserve unchecked items, and record the timestamp, verification result, review state, and commit SHA. A plan item remains in progress until its required review gate passes.
+
 ## 5. Verify
 
 Use fresh verification evidence. A successful tool call is not sufficient if the change requires tests, build, lint, benchmark or review.

@@ -1,6 +1,6 @@
 # Local experience core Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Deliver the first usable Agent Experience Layer slice: a local TypeScript CLI that validates, persists, retrieves, and exports normalized experience knowledge.
 
@@ -23,10 +23,12 @@ Updated: 2026-08-24. This section is the live execution record; tasks are not tr
 | 3. Private SQLite store | Accepted | `c23f51f`, `293753b`; specification and quality reviews passed. |
 | 4. Retrieval and retention | Accepted | `59a55fc` through `bba542d`; specification and quality reviews passed. |
 | 5. Repository knowledge format | Accepted and merged into this branch | `10b5f9a` through `1605a49`; specification and quality reviews passed. |
-| 6. CLI and integration fixtures | Implemented, awaiting specification and quality reviews | `fa01006`; fresh `pnpm check` passed with 48 tests. |
+| 6. CLI and integration fixtures | Implemented; specification review requires correction before quality review | `fa01006`; fresh `pnpm check` passed with 48 tests. The CLI currently accepts `repository` where the approved contract requires `repo`. |
 | 7. Verification evidence | Pending | Starts after Task 6 is accepted. |
 
 Current full verification: `pnpm check` passed on 2026-08-24 with 48 tests, 0 failures.
+
+Task 6 review state: specification review found the incompatible `repository` scope spelling. The next action is a TDD correction to accept `global|repo`, followed by specification and quality re-reviews.
 
 Milestone 1 work outside this local-core plan remains pending: the three source adapters, sanitizer, manual review runtime, reviewer orchestration, candidate-lesson and proposal generation, and the expanded benchmark fixtures.
 
@@ -57,13 +59,13 @@ Milestone 1 work outside this local-core plan remains pending: the three source 
 - Create: `src/cli.ts`
 - Create: `test/cli.test.ts`
 
-- [ ] **Step 1: Initialize Git before creating the first source commit**
+- [x] **Step 1: Initialize Git before creating the first source commit**
 
 Run: `git init`
 
 Expected: a `.git/` directory is created at the workspace root. Do not stage unrelated existing documentation before reviewing it.
 
-- [ ] **Step 2: Write the failing CLI smoke test**
+- [x] **Step 2: Write the failing CLI smoke test**
 
 ```ts
 import assert from 'node:assert/strict';
@@ -77,13 +79,13 @@ test('reports usage for an unknown command', () => {
 });
 ```
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [x] **Step 3: Run the test to verify it fails**
 
 Run: `pnpm test`
 
 Expected: failure because the project and `runCli` do not yet exist.
 
-- [ ] **Step 4: Add the minimal executable foundation**
+- [x] **Step 4: Add the minimal executable foundation**
 
 Create `package.json` with `"type": "module"`, `"engines": { "node": ">=22.17.0" }`, scripts `build`, `test`, `check`, and development dependencies `typescript` and `@types/node`. Set `test` to `pnpm build && node --test dist/test/**/*.test.js`; set `check` to `pnpm build && pnpm test`.
 
@@ -106,13 +108,13 @@ export function runCli(args: string[]): CliResult {
 
 When invoked as the entrypoint, write `stdout` and `stderr`, then set `process.exitCode` without calling `process.exit()`.
 
-- [ ] **Step 5: Run the harness checks**
+- [x] **Step 5: Run the harness checks**
 
 Run: `pnpm check`
 
 Expected: TypeScript compilation and the smoke test pass.
 
-- [ ] **Step 6: Commit the bootstrap**
+- [x] **Step 6: Commit the bootstrap**
 
 Run: `git add package.json pnpm-lock.yaml tsconfig.json tsconfig.build.json .gitignore src/cli.ts test/cli.test.ts && git commit -m "chore: bootstrap local experience CLI"`
 
@@ -126,7 +128,7 @@ Expected: one commit containing only the harness files.
 - Create: `src/domain/validation.ts`
 - Create: `test/domain-validation.test.ts`
 
-- [ ] **Step 1: Write failing validation tests**
+- [x] **Step 1: Write failing validation tests**
 
 ```ts
 test('rejects an observation whose source event is missing', () => {
@@ -146,13 +148,13 @@ test('rejects raw transcript and credential-like text', () => {
 });
 ```
 
-- [ ] **Step 2: Run the domain tests to verify they fail**
+- [x] **Step 2: Run the domain tests to verify they fail**
 
 Run: `pnpm test -- --test-name-pattern="reference|disputed|transcript"`
 
 Expected: compilation failure because the domain modules do not exist.
 
-- [ ] **Step 3: Implement types and validation**
+- [x] **Step 3: Implement types and validation**
 
 Define opaque string IDs for session, event, observation, cluster, candidate lesson, evidence, knowledge, repository, workspace, and user. Define agent sources `codex`, `claude-code`, `cursor`; the eight lesson kinds; the eight lifecycle states; and evidence polarities `confirms`, `contradicts`, `contextualizes`.
 
@@ -169,13 +171,13 @@ Require resolvable references, at least one event per observation, at least one 
 
 Reject `rawTranscript`, arbitrary `payload`, PEM private-key headers, AWS access-key identifiers, GitHub personal-access tokens, OpenAI API keys, and bearer-token assignments in all persisted text fields.
 
-- [ ] **Step 4: Run the domain tests to verify they pass**
+- [x] **Step 4: Run the domain tests to verify they pass**
 
 Run: `pnpm test -- --test-name-pattern="reference|disputed|transcript"`
 
 Expected: all selected tests pass.
 
-- [ ] **Step 5: Commit the domain contract**
+- [x] **Step 5: Commit the domain contract**
 
 Run: `git add src/domain test/domain-validation.test.ts && git commit -m "feat: add validated experience domain model"`
 
@@ -188,7 +190,7 @@ Expected: one commit with only the model, transitions, and their tests.
 - Create: `src/storage/experience-store.ts`
 - Create: `test/experience-store.test.ts`
 
-- [ ] **Step 1: Write failing store tests**
+- [x] **Step 1: Write failing store tests**
 
 ```ts
 test('persists a valid import and retrieves it after reopening the database', () => {
@@ -204,13 +206,13 @@ test('does not partially write an invalid import', () => {
 });
 ```
 
-- [ ] **Step 2: Run the store tests to verify they fail**
+- [x] **Step 2: Run the store tests to verify they fail**
 
 Run: `pnpm test -- --test-name-pattern="reopening|partially write"`
 
 Expected: failure because the store modules do not exist.
 
-- [ ] **Step 3: Implement SQLite connection, migration, and store**
+- [x] **Step 3: Implement SQLite connection, migration, and store**
 
 Use `DatabaseSync` from `node:sqlite` with `enableForeignKeyConstraints: true` and a finite lock timeout. Resolve private data directories from `AEL_DATA_DIR` when set, otherwise `~/Library/Application Support/AgentExperience` on macOS and `${XDG_DATA_HOME:-~/.local/share}/agent-experience` on Linux. Create the directory with owner-only permissions.
 
@@ -228,13 +230,13 @@ export interface ExperienceStore {
 }
 ```
 
-- [ ] **Step 4: Run store tests to verify they pass**
+- [x] **Step 4: Run store tests to verify they pass**
 
 Run: `pnpm test -- --test-name-pattern="reopening|partially write"`
 
 Expected: both store tests pass.
 
-- [ ] **Step 5: Commit private storage**
+- [x] **Step 5: Commit private storage**
 
 Run: `git add src/storage/database.ts src/storage/experience-store.ts test/experience-store.test.ts && git commit -m "feat: persist private experience records atomically"`
 
@@ -246,7 +248,7 @@ Expected: one commit containing private storage and tests.
 - Modify: `src/storage/experience-store.ts`
 - Create: `test/retrieval-and-retention.test.ts`
 
-- [ ] **Step 1: Write failing retrieval and retention tests**
+- [x] **Step 1: Write failing retrieval and retention tests**
 
 ```ts
 test('orders exact retrieval by matched filters, recency, then identifier', () => {
@@ -265,25 +267,25 @@ test('does not return unapproved global knowledge as authoritative', () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `pnpm test -- --test-name-pattern="orders exact|does not expire|unapproved global"`
 
 Expected: failure because filtering, authority, and retention are incomplete.
 
-- [ ] **Step 3: Implement retrieval, authority, and retention closure**
+- [x] **Step 3: Implement retrieval, authority, and retention closure**
 
 Filter only by requested scope, repository ID, normalized path, tool, tag, and lifecycle state. Score each result by the number of supplied matching filters, sort descending by score then descending creation time then ascending ID, and return no cross-repository records.
 
 Set global authority only when `approvalKind = 'user'` and `approvedAt` is non-null. Set repository team authority only when `activation = 'merged-team-active'` and merged provenance is recorded. Traverse retained knowledge, disputed evidence, and lifecycle history before expiring records. Tombstone first; purge only tombstones with no protected inbound reference.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm test -- --test-name-pattern="orders exact|does not expire|unapproved global"`
 
 Expected: all selected tests pass.
 
-- [ ] **Step 5: Commit lifecycle operations**
+- [x] **Step 5: Commit lifecycle operations**
 
 Run: `git add src/storage/experience-store.ts test/retrieval-and-retention.test.ts && git commit -m "feat: add exact retrieval and safe retention"`
 
@@ -295,7 +297,7 @@ Expected: one commit containing retrieval, promotion controls, and retention.
 - Create: `src/storage/repository-knowledge.ts`
 - Create: `test/repository-knowledge.test.ts`
 
-- [ ] **Step 1: Write failing repository-format tests**
+- [x] **Step 1: Write failing repository-format tests**
 
 ```ts
 test('writes a deterministically ordered repository index and entry Markdown', () => {
@@ -309,23 +311,23 @@ test('rejects team activation without merged provenance', () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `pnpm test -- --test-name-pattern="repository index|merged provenance"`
 
 Expected: failure because repository persistence is absent.
 
-- [ ] **Step 3: Implement the Git-reviewable format**
+- [x] **Step 3: Implement the Git-reviewable format**
 
 Write `agent-experience/index.json` and `agent-experience/knowledge/<knowledge-id>.md` beneath the selected repository root. Serialize index entries with identity, kind, state, sorted tags, applicability, last verification metadata, approval metadata, and merged provenance. Serialize Markdown with context, statement, recommended behavior, and a non-raw evidence summary. Sort index entries and object keys deterministically. Reject `merged-team-active` entries that lack merged provenance.
 
-- [ ] **Step 4: Run repository-format tests to verify they pass**
+- [x] **Step 4: Run repository-format tests to verify they pass**
 
 Run: `pnpm test -- --test-name-pattern="repository index|merged provenance"`
 
 Expected: both tests pass with byte-stable fixture output.
 
-- [ ] **Step 5: Commit repository knowledge persistence**
+- [x] **Step 5: Commit repository knowledge persistence**
 
 Run: `git add src/storage/repository-knowledge.ts test/repository-knowledge.test.ts && git commit -m "feat: add reviewable repository knowledge format"`
 
@@ -343,7 +345,7 @@ Expected: one commit containing only the repository format.
 - Create: `test/cli-integration.test.ts`
 - Create: `README.md`
 
-- [ ] **Step 1: Write failing CLI integration tests**
+- [x] **Step 1: Write failing CLI integration tests**
 
 ```ts
 test('imports, validates, lists, inspects, retrieves, and exports a fixture', () => {
@@ -359,25 +361,25 @@ test('returns JSON diagnostics and leaves data unchanged for corrupt input', () 
 });
 ```
 
-- [ ] **Step 2: Run integration tests to verify they fail**
+- [x] **Step 2: Run integration tests to verify they fail**
 
 Run: `pnpm test -- --test-name-pattern="imports, validates|JSON diagnostics"`
 
 Expected: failure because the CLI has no command routing.
 
-- [ ] **Step 3: Implement the complete CLI surface**
+- [x] **Step 3: Implement the complete CLI surface**
 
 Route `init`, `experience add`, `validate`, `inspect`, `lessons list`, `retrieve`, and `export` through `ExperienceService`. Support `--data-dir` for tests and explicit local use. Support `--json` for structured success and error output. Return exit code `0` for success, `1` for domain or storage errors, and `2` for invalid command syntax. Keep human-readable diagnostics on stderr and JSON diagnostics on stdout when `--json` is selected.
 
 Add fixtures that demonstrate a successful workflow, non-durable failure, contradiction and dispute, unapproved global entry, retention protection, scope isolation, deterministic ordering, and corrupt reference. Document installation, data-directory override, commands, privacy limits, and the absence of network or LLM requirements in `README.md`.
 
-- [ ] **Step 4: Run the full verification suite**
+- [x] **Step 4: Run the full verification suite**
 
 Run: `pnpm check`
 
 Expected: strict compilation plus every unit and integration test pass without network access.
 
-- [ ] **Step 5: Commit the complete vertical slice**
+- [x] **Step 5: Commit the complete vertical slice**
 
 Run: `git add src/cli.ts src/application/experience-service.ts test/fixtures test/cli-integration.test.ts README.md && git commit -m "feat: deliver local experience core CLI"`
 
