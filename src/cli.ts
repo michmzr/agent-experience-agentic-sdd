@@ -86,11 +86,13 @@ function parseReviewRequest(parsed: ParsedArguments) {
     parsed.options,
     subcommand === 'sessions'
       ? ['json', 'source', 'root', 'project']
-      : ['json', 'source', 'session', 'root', 'project', 'allow-expensive-checks']
+      : ['json', 'source', 'session', 'root', 'project', 'profile', 'allow-expensive-checks']
   );
   const source = requiredReviewSource(parsed.options); const root = requiredString(parsed.options, 'root'); const project = optionalString(parsed.options, 'project');
   if (subcommand === 'sessions') return { kind: 'discover' as const, source, root, project };
-  return { kind: 'review' as const, source, session: requiredString(parsed.options, 'session'), root, project, allowExpensiveChecks: parsed.options.has('allow-expensive-checks') };
+  const session = requiredString(parsed.options, 'session');
+  if (session === 'latest') throw new SyntaxError('Session selector latest is not supported.');
+  return { kind: 'review' as const, source, session, root, project, profile: optionalReviewProfile(parsed.options), allowExpensiveChecks: parsed.options.has('allow-expensive-checks') };
 }
 
 function parseArguments(args: readonly string[]): ParsedArguments {
@@ -123,6 +125,13 @@ function requiredReviewSource(options: Map<string, string | true>): typeof revie
     throw new SyntaxError('Source must be codex, claude-code, or cursor.');
   }
   return source as typeof reviewSources extends Set<infer Value> ? Value : never;
+}
+function optionalReviewProfile(options: Map<string, string | true>): { id: string; version: string } | undefined {
+  const value = optionalString(options, 'profile');
+  if (value === undefined) return undefined;
+  const [id, version, ...extra] = value.split('@');
+  if (!id || !version || extra.length !== 0) throw new SyntaxError('Profile must be specified as id@version.');
+  return { id, version };
 }
 function optionalScope(options: Map<string, string | true>): KnowledgeScope | undefined {
   const scope = optionalString(options, 'scope'); if (scope === undefined) return undefined; if (!scopes.has(scope as typeof scopes extends Set<infer Value> ? Value : never)) throw new SyntaxError('Scope must be global or repo.'); return scope === 'repo' ? 'repository' : 'global';

@@ -1,4 +1,3 @@
-import { stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 
 import type { AgentSource, LessonKind } from '../domain/types.js';
@@ -8,7 +7,7 @@ import { discoverCursorExports, readCursorMarkdownExport } from './adapters/curs
 import type { NormalizedSession } from './contracts.js';
 import { groupReviewFindings, type ReviewFinding as OrchestratorFinding } from './orchestrator.js';
 import { createReviewProposals } from './proposals.js';
-import { ReviewRuntime, type Reviewer } from './runtime.js';
+import { ReviewRuntime, type Reviewer, type ReviewProfile } from './runtime.js';
 import { sanitizeForReview } from './sanitizer.js';
 
 export interface ManualReviewInput {
@@ -17,17 +16,20 @@ export interface ManualReviewInput {
   readonly session: string;
   readonly project?: string;
   readonly allowExpensiveChecks: boolean;
+  readonly profile?: Pick<ReviewProfile, 'id' | 'version'>;
+}
+
+export interface ManualReviewDependencies {
+  readonly runtime?: Pick<ReviewRuntime, 'run'>;
 }
 
 export interface ReviewSessionDescriptor { readonly source: AgentSource; readonly id: string; readonly location: string; }
 
-export async function runManualReview(input: ManualReviewInput) {
-  const selectedSession = input.session === 'latest' ? await selectLatestSession(input) : input.session;
-  const normalized = await loadSession({ ...input, session: selectedSession });
+export async function runManualReview(input: ManualReviewInput, dependencies: ManualReviewDependencies = {}) {
+  const normalized = await loadSession(input);
   const artifact = sanitizeForReview(normalized);
-  const reviewers: Reviewer[] = [reviewer('workflow', false), reviewer('privacy', false), reviewer('diagnostics', true)];
-  const runtime = new ReviewRuntime({ profiles: [{ id: 'default', version: '1', reviewerIds: reviewers.map(({ id }) => id) }], reviewers });
-  const run = await runtime.run({ artifact, profile: { id: 'default', version: '1' }, allowExpensiveChecks: input.allowExpensiveChecks });
+  const runtime = dependencies.runtime ?? createDefaultReviewRuntime();
+  const run = await runtime.run({ artifact, profile: input.profile ?? defaultReviewProfile, allowExpensiveChecks: input.allowExpensiveChecks });
   const findings = run.results.flatMap((result) => result.findings.map((finding) => ({
     reviewerId: result.reviewerId,
     findingId: finding.findingId,
@@ -47,6 +49,13 @@ export async function runManualReview(input: ManualReviewInput) {
   return { source: input.source, selectedSession: artifact.session.sessionId, profile: run.profile, skippedReviewerIds: run.skippedReviewerIds, findings: groups, ...intelligence };
 }
 
+export const defaultReviewProfile: Pick<ReviewProfile, 'id' | 'version'> = Object.freeze({ id: 'default', version: '1' });
+
+export function createDefaultReviewRuntime(): ReviewRuntime {
+  const reviewers: Reviewer[] = [reviewer('workflow', false), reviewer('privacy', false), reviewer('diagnostics', true)];
+  return new ReviewRuntime({ profiles: [{ ...defaultReviewProfile, reviewerIds: reviewers.map(({ id }) => id) }], reviewers });
+}
+
 export async function discoverReviewSessions(input: Pick<ManualReviewInput, 'source' | 'root' | 'project'>): Promise<readonly ReviewSessionDescriptor[]> {
   if (input.source === 'codex') return (await new CodexSessionAdapter(input.root).discover()).map(({ id, location }) => ({ source: input.source, id, location }));
   if (input.source === 'claude-code') {
@@ -54,14 +63,6 @@ export async function discoverReviewSessions(input: Pick<ManualReviewInput, 'sou
     return (await discoverClaudeCodeArtifacts({ configDir: input.root, project: input.project })).map(({ id, location }) => ({ source: input.source, id, location }));
   }
   return discoverCursorExports(input.root).map(({ id, location }) => ({ source: input.source, id: `${id}.md`, location }));
-}
-
-async function selectLatestSession(input: ManualReviewInput): Promise<string> {
-  const sessions = await discoverReviewSessions(input);
-  if (sessions.length === 0) throw new Error('No repository-scoped sessions were found.');
-  const withTimes = await Promise.all(sessions.map(async (session) => ({ session, mtimeMs: (await stat(session.location)).mtimeMs })));
-  withTimes.sort((left, right) => right.mtimeMs - left.mtimeMs || left.session.id.localeCompare(right.session.id));
-  return withTimes[0].session.id;
 }
 
 async function loadSession(input: ManualReviewInput): Promise<NormalizedSession> {
