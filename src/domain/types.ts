@@ -88,6 +88,19 @@ export interface KnowledgeEntry {
   statement: string;
 }
 
+export interface KnowledgeMetadata {
+  readonly scope?: 'global' | 'repository';
+  readonly repositoryId?: RepositoryId;
+  readonly path?: string;
+  readonly tool?: string;
+  readonly tags?: readonly string[];
+  readonly createdAt: string;
+  readonly approvalKind?: 'user' | 'system';
+  readonly approvedAt?: string;
+  readonly activation?: 'merged-team-active' | 'local';
+  readonly mergedProvenance?: string;
+}
+
 export interface ExperienceImport {
   sessions: Session[];
   events: Event[];
@@ -96,6 +109,7 @@ export interface ExperienceImport {
   candidates: CandidateLesson[];
   evidence: readonly Evidence[];
   knowledge: KnowledgeEntry[];
+  knowledgeMetadata?: Record<string, KnowledgeMetadata>;
 }
 
 export interface TransitionHistoryEntry {

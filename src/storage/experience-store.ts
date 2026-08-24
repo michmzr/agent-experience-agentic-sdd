@@ -2,7 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { posix } from 'node:path';
 
-import type { ExperienceImport, KnowledgeEntry, KnowledgeId, KnowledgeState } from '../domain/types.js';
+import type { ExperienceImport, KnowledgeEntry, KnowledgeId, KnowledgeMetadata, KnowledgeState } from '../domain/types.js';
 import { validateImport } from '../domain/validation.js';
 import { openExperienceDatabase } from './database.js';
 
@@ -41,23 +41,6 @@ export interface RetrievalFilter {
 export interface RetrievedKnowledgeEntry extends KnowledgeEntry {
   readonly authoritative: boolean;
 }
-
-interface KnowledgeMetadataInput {
-  scope: KnowledgeScope;
-  repositoryId?: string;
-  path?: string;
-  tool?: string;
-  tags?: readonly string[];
-  createdAt: string;
-  approvalKind?: 'user' | 'system';
-  approvedAt?: string;
-  activation?: 'merged-team-active' | 'local';
-  mergedProvenance?: string;
-}
-
-type StoreImport = ExperienceImport & {
-  knowledgeMetadata?: Record<string, KnowledgeMetadataInput>;
-};
 
 const schemaMigration = `
   CREATE TABLE IF NOT EXISTS sessions (
@@ -131,43 +114,41 @@ export class ExperienceStore {
   }
 
   import(record: ExperienceImport): void {
-    const extended = record as StoreImport;
-    const { knowledgeMetadata, ...normalizedRecord } = extended;
-    const validation = validateImport(normalizedRecord);
+    const validation = validateImport(record);
     if (!validation.ok) throw new Error(`${validation.code}: ${validation.message}`);
-    this.validateMetadata(normalizedRecord, knowledgeMetadata);
+    this.validateMetadata(record);
 
     this.database.exec('BEGIN IMMEDIATE');
     try {
       const sessions = this.database.prepare('INSERT INTO sessions (id, source, started_at, repository_id, workspace_id, user_id) VALUES (?, ?, ?, ?, ?, ?)');
-      for (const item of normalizedRecord.sessions) sessions.run(item.id, item.source, item.startedAt, item.repositoryId ?? null, item.workspaceId ?? null, item.userId ?? null);
+      for (const item of record.sessions) sessions.run(item.id, item.source, item.startedAt, item.repositoryId ?? null, item.workspaceId ?? null, item.userId ?? null);
       const events = this.database.prepare('INSERT INTO events (id, session_id, kind, occurred_at, tool, path, outcome, exit_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-      for (const item of normalizedRecord.events) events.run(item.id, item.sessionId, item.kind, item.occurredAt, item.tool ?? null, item.path ?? null, item.outcome ?? null, item.exitStatus ?? null);
+      for (const item of record.events) events.run(item.id, item.sessionId, item.kind, item.occurredAt, item.tool ?? null, item.path ?? null, item.outcome ?? null, item.exitStatus ?? null);
       const observations = this.database.prepare('INSERT INTO observations (id, statement) VALUES (?, ?)');
       const observationEvents = this.database.prepare('INSERT INTO observation_events (observation_id, event_id, position) VALUES (?, ?, ?)');
-      for (const item of normalizedRecord.observations) {
+      for (const item of record.observations) {
         observations.run(item.id, item.statement);
         item.eventIds.forEach((eventId, position) => observationEvents.run(item.id, eventId, position));
       }
       const clusters = this.database.prepare('INSERT INTO clusters (id) VALUES (?)');
       const clusterObservations = this.database.prepare('INSERT INTO cluster_observations (cluster_id, observation_id, position) VALUES (?, ?, ?)');
-      for (const item of normalizedRecord.clusters) {
+      for (const item of record.clusters) {
         clusters.run(item.id);
         item.observationIds.forEach((observationId, position) => clusterObservations.run(item.id, observationId, position));
       }
       const candidates = this.database.prepare('INSERT INTO candidates (id, cluster_id, kind, statement) VALUES (?, ?, ?, ?)');
-      for (const item of normalizedRecord.candidates) candidates.run(item.id, item.clusterId, item.kind, item.statement);
+      for (const item of record.candidates) candidates.run(item.id, item.clusterId, item.kind, item.statement);
       const evidence = this.database.prepare('INSERT INTO evidence (id, candidate_id, polarity, summary, revalidates_to) VALUES (?, ?, ?, ?, ?)');
-      for (const item of normalizedRecord.evidence) evidence.run(item.id, item.candidateId, item.polarity, item.summary, item.revalidatesTo ?? null);
+      for (const item of record.evidence) evidence.run(item.id, item.candidateId, item.polarity, item.summary, item.revalidatesTo ?? null);
       const knowledge = this.database.prepare('INSERT INTO knowledge (id, candidate_id, state, statement) VALUES (?, ?, ?, ?)');
       const knowledgeEvidence = this.database.prepare('INSERT INTO knowledge_evidence (knowledge_id, evidence_id, position) VALUES (?, ?, ?)');
-      for (const item of normalizedRecord.knowledge) {
+      for (const item of record.knowledge) {
         knowledge.run(item.id, item.candidateId, item.state, item.statement);
         item.evidenceIds.forEach((evidenceId, position) => knowledgeEvidence.run(item.id, evidenceId, position));
       }
       const metadata = this.database.prepare('INSERT INTO knowledge_metadata (knowledge_id, scope, repository_id, path, tool, tags_json, created_at, approval_kind, approved_at, activation, merged_provenance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
-      for (const item of normalizedRecord.knowledge) {
-        const value = knowledgeMetadata?.[item.id] ?? this.defaultMetadata(item.id, normalizedRecord);
+      for (const item of record.knowledge) {
+        const value = this.resolveMetadata(item.id, record, record.knowledgeMetadata?.[item.id]);
         metadata.run(item.id, value.scope, value.repositoryId ?? null, value.path ? normalizePath(value.path) : null, value.tool ?? null, JSON.stringify([...new Set(value.tags ?? [])].sort()), value.createdAt, value.approvalKind ?? null, value.approvedAt ?? null, value.activation ?? null, value.mergedProvenance ?? null);
       }
       this.database.exec('COMMIT');
@@ -234,8 +215,45 @@ export class ExperienceStore {
       `).all() as Array<{ id: string }>;
       const tombstone = this.database.prepare('INSERT INTO observation_tombstones (observation_id, tombstoned_at) VALUES (?, ?)');
       for (const observation of candidates) tombstone.run(observation.id, now);
+      const expired = this.database.prepare(`
+        SELECT t.observation_id AS id
+        FROM observation_tombstones t
+        WHERE t.tombstoned_at < ?
+          AND NOT EXISTS (
+            SELECT 1
+            FROM cluster_observations co
+            JOIN candidates c ON c.cluster_id = co.cluster_id
+            JOIN knowledge k ON k.candidate_id = c.id
+            WHERE co.observation_id = t.observation_id
+              AND k.state IN ('candidate', 'observed', 'confirmed', 'verified', 'disputed')
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM cluster_observations co
+            JOIN candidates c ON c.cluster_id = co.cluster_id
+            JOIN knowledge_transition_history h ON h.knowledge_id IN (
+              SELECT k.id FROM knowledge k WHERE k.candidate_id = c.id
+            )
+            WHERE co.observation_id = t.observation_id
+          )
+      `).all(now) as Array<{ id: string }>;
+      const removeClusterReference = this.database.prepare('DELETE FROM cluster_observations WHERE observation_id = ?');
+      const removeEventReference = this.database.prepare('DELETE FROM observation_events WHERE observation_id = ?');
+      const removeTombstone = this.database.prepare('DELETE FROM observation_tombstones WHERE observation_id = ?');
+      const removeObservation = this.database.prepare('DELETE FROM observations WHERE id = ?');
+      for (const observation of expired) {
+        removeClusterReference.run(observation.id);
+        removeEventReference.run(observation.id);
+        removeTombstone.run(observation.id);
+        removeObservation.run(observation.id);
+      }
+      const removeEvents = this.database.prepare(`
+        DELETE FROM events
+        WHERE NOT EXISTS (SELECT 1 FROM observation_events WHERE observation_events.event_id = events.id)
+      `);
+      removeEvents.run();
       this.database.exec('COMMIT');
-      return candidates.length;
+      return candidates.length + expired.length;
     } catch (error) {
       this.database.exec('ROLLBACK');
       throw error;
@@ -273,7 +291,7 @@ export class ExperienceStore {
     };
   }
 
-  private defaultMetadata(knowledgeId: string, record: ExperienceImport): KnowledgeMetadataInput {
+  private defaultMetadata(knowledgeId: string, record: ExperienceImport): Required<Pick<KnowledgeMetadata, 'scope' | 'createdAt'>> & KnowledgeMetadata {
     const candidate = record.knowledge.find((item) => item.id === knowledgeId);
     const cluster = record.candidates.find((item) => item.id === candidate?.candidateId)?.clusterId;
     const observationId = record.clusters.find((item) => item.id === cluster)?.observationIds[0];
@@ -289,15 +307,19 @@ export class ExperienceStore {
     };
   }
 
-  private validateMetadata(record: ExperienceImport, metadata: StoreImport['knowledgeMetadata']): void {
-    if (!metadata) return;
-    const knownIds = new Set<string>(record.knowledge.map((item) => item.id));
-    for (const [knowledgeId, value] of Object.entries(metadata)) {
-      if (!knownIds.has(knowledgeId) || !value || !['global', 'repository'].includes(value.scope) || typeof value.createdAt !== 'string') throw new Error('INVALID_METADATA: Knowledge metadata is invalid.');
-      if (value.scope === 'repository' && !value.repositoryId) throw new Error('INVALID_METADATA: Repository metadata requires a repository ID.');
-      if (value.scope === 'global' && value.repositoryId) throw new Error('INVALID_METADATA: Global metadata cannot have a repository ID.');
-      if (value.tags?.some((tag) => typeof tag !== 'string')) throw new Error('INVALID_METADATA: Tags must be strings.');
+  private validateMetadata(record: ExperienceImport): void {
+    for (const item of record.knowledge) this.resolveMetadata(item.id, record, record.knowledgeMetadata?.[item.id]);
+  }
+
+  private resolveMetadata(knowledgeId: string, record: ExperienceImport, input: KnowledgeMetadata | undefined): Required<Pick<KnowledgeMetadata, 'scope' | 'createdAt'>> & KnowledgeMetadata {
+    const provenance = this.defaultMetadata(knowledgeId, record);
+    if (!input) return provenance;
+    if (input.scope !== undefined && input.scope !== provenance.scope) throw new Error('INVALID_METADATA: Knowledge scope must match source provenance.');
+    if (input.repositoryId !== undefined && input.repositoryId !== provenance.repositoryId) throw new Error('INVALID_METADATA: Repository ID must match source provenance.');
+    if (input.activation === 'merged-team-active' && (!provenance.repositoryId || !input.mergedProvenance?.startsWith(`${provenance.repositoryId}:`))) {
+      throw new Error('INVALID_METADATA: Team activation requires matching merged provenance.');
     }
+    return { ...provenance, ...input, scope: provenance.scope, repositoryId: provenance.repositoryId };
   }
 
   private matchesFilter(row: KnowledgeMetadataRow & KnowledgeRow, filter: RetrievalFilter, normalizedPath: string | undefined): boolean {

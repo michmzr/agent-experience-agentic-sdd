@@ -1,4 +1,4 @@
-import type { EvidencePolarity, ExperienceImport, KnowledgeState, LessonKind } from './types.js';
+import type { EvidencePolarity, ExperienceImport, KnowledgeMetadata, KnowledgeState, LessonKind } from './types.js';
 
 export type ValidationCode =
   | 'INVALID_SHAPE'
@@ -25,6 +25,7 @@ const lessonKinds: readonly LessonKind[] = ['failure', 'successful-workflow', 'p
 const evidencePolarities: readonly EvidencePolarity[] = ['confirms', 'contradicts', 'contextualizes'];
 const eventOutcomes = ['passed', 'failed', 'unknown'] as const;
 const collectionKeys = ['sessions', 'events', 'observations', 'clusters', 'candidates', 'evidence', 'knowledge'] as const;
+const metadataKeys = ['scope', 'repositoryId', 'path', 'tool', 'tags', 'createdAt', 'approvalKind', 'approvedAt', 'activation', 'mergedProvenance'] as const;
 const allowedEntityKeys: Record<typeof collectionKeys[number], readonly string[]> = {
   sessions: ['id', 'source', 'startedAt', 'repositoryId', 'workspaceId', 'userId'],
   events: ['id', 'sessionId', 'kind', 'occurredAt', 'tool', 'path', 'outcome', 'exitStatus'],
@@ -111,16 +112,37 @@ function hasValidEntityShape(collection: typeof collectionKeys[number], value: u
   }
 }
 
+function isValidTimestamp(value: unknown): value is string {
+  return typeof value === 'string' && !Number.isNaN(Date.parse(value));
+}
+
+function hasValidMetadataShape(value: unknown): value is KnowledgeMetadata {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const metadata = value as Record<string, unknown>;
+  return Object.keys(metadata).every((key) => metadataKeys.includes(key as typeof metadataKeys[number]))
+    && isValidTimestamp(metadata.createdAt)
+    && (metadata.scope === undefined || metadata.scope === 'global' || metadata.scope === 'repository')
+    && (metadata.repositoryId === undefined || typeof metadata.repositoryId === 'string')
+    && (metadata.path === undefined || typeof metadata.path === 'string')
+    && (metadata.tool === undefined || typeof metadata.tool === 'string')
+    && (metadata.tags === undefined || isStringArray(metadata.tags))
+    && (metadata.approvalKind === undefined || metadata.approvalKind === 'user' || metadata.approvalKind === 'system')
+    && (metadata.approvedAt === undefined || isValidTimestamp(metadata.approvedAt))
+    && (metadata.activation === undefined || metadata.activation === 'merged-team-active' || metadata.activation === 'local')
+    && (metadata.mergedProvenance === undefined || typeof metadata.mergedProvenance === 'string');
+}
+
 export function validateImport(record: ExperienceImport): ValidationResult {
   if (!record || typeof record !== 'object') return invalid('INVALID_SHAPE', 'Import must be an object.');
 
   const sensitive = hasForbiddenContent(record);
   if (sensitive) return sensitive;
 
-  if (Object.keys(record).some((key) => !collectionKeys.includes(key as typeof collectionKeys[number]))) return invalid('FORBIDDEN_FIELD', 'Import contains an unsupported field.');
+  if (Object.keys(record).some((key) => !collectionKeys.includes(key as typeof collectionKeys[number]) && key !== 'knowledgeMetadata')) return invalid('FORBIDDEN_FIELD', 'Import contains an unsupported field.');
   if (collectionKeys.some((name) => !Array.isArray(record[name]))) return invalid('INVALID_SHAPE', 'Import collections must be arrays.');
   if (collectionKeys.some((name) => record[name].some((item) => !hasOnlyAllowedKeys(item, allowedEntityKeys[name])))) return invalid('FORBIDDEN_FIELD', 'Import entity contains an unsupported field.');
   if (collectionKeys.some((name) => record[name].some((item) => !hasValidEntityShape(name, item)))) return invalid('INVALID_SHAPE', 'Import entity has an invalid shape.');
+  if (record.knowledgeMetadata !== undefined && (!record.knowledgeMetadata || typeof record.knowledgeMetadata !== 'object' || Array.isArray(record.knowledgeMetadata) || Object.values(record.knowledgeMetadata).some((item) => !hasValidMetadataShape(item)))) return invalid('INVALID_SHAPE', 'Knowledge metadata has an invalid shape.');
   if (collectionKeys.some((name) => hasEmptyOrDuplicateIdentifiers(record[name]))) return invalid('INVALID_SHAPE', 'Entity identifiers must be unique and non-empty.');
   if (record.sessions.some((session) => !['codex', 'claude-code', 'cursor'].includes(session.source))) return invalid('INVALID_SHAPE', 'Session source is unsupported.');
   if (record.events.some((event) => event.outcome !== undefined && !eventOutcomes.includes(event.outcome))) return invalid('INVALID_SHAPE', 'Event outcome is unsupported.');
@@ -150,6 +172,7 @@ export function validateImport(record: ExperienceImport): ValidationResult {
   if (record.knowledge.some((entry) => entry.evidenceIds.some((id) => record.evidence.find((item) => item.id === id)?.candidateId !== entry.candidateId))) {
     return invalid('INVALID_RELATIONSHIP', 'Knowledge evidence must support its candidate.');
   }
+  if (record.knowledgeMetadata && Object.keys(record.knowledgeMetadata).some((id) => !record.knowledge.some((entry) => entry.id === id))) return invalid('MISSING_REFERENCE', 'Knowledge metadata references missing knowledge.');
 
   return { ok: true };
 }

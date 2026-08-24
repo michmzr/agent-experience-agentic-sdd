@@ -7,22 +7,7 @@ import test from 'node:test';
 import type { ExperienceImport, KnowledgeEntry } from '../src/domain/types.js';
 import { ExperienceStore, type RetrievalFilter } from '../src/storage/experience-store.js';
 
-type ImportWithMetadata = ExperienceImport & {
-  knowledgeMetadata: Record<string, {
-    scope: 'global' | 'repository';
-    repositoryId?: string;
-    path?: string;
-    tool?: string;
-    tags?: string[];
-    createdAt: string;
-    approvalKind?: 'user' | 'system';
-    approvedAt?: string;
-    activation?: 'merged-team-active' | 'local';
-    mergedProvenance?: string;
-  }>;
-};
-
-function fixture(): ImportWithMetadata {
+function fixture(): ExperienceImport & { knowledgeMetadata: NonNullable<ExperienceImport['knowledgeMetadata']> } {
   return {
     sessions: [
       { id: 'session-repo-a' as ExperienceImport['sessions'][number]['id'], source: 'codex', startedAt: '2026-08-20T10:00:00.000Z', repositoryId: 'repo-a' as ExperienceImport['sessions'][number]['repositoryId'] },
@@ -65,10 +50,10 @@ function fixture(): ImportWithMetadata {
       { id: 'knowledge-disputed' as KnowledgeEntry['id'], candidateId: 'candidate-disputed' as ExperienceImport['candidates'][number]['id'], evidenceIds: ['evidence-disputed' as ExperienceImport['evidence'][number]['id']], state: 'disputed', statement: 'Disputed failure.' }
     ],
     knowledgeMetadata: {
-      'knowledge-old': { scope: 'repository', repositoryId: 'repo-a', path: 'src/a.ts', tool: 'git', tags: ['safety'], createdAt: '2026-08-20T10:00:00.000Z', activation: 'merged-team-active', mergedProvenance: 'merge-old' },
-      'knowledge-new': { scope: 'repository', repositoryId: 'repo-a', path: 'src/a.ts', tool: 'git', tags: ['safety'], createdAt: '2026-08-21T10:00:00.000Z', activation: 'merged-team-active', mergedProvenance: 'merge-new' },
-      'knowledge-other-repo': { scope: 'repository', repositoryId: 'repo-b', path: 'src/a.ts', tool: 'git', tags: ['safety'], createdAt: '2026-08-22T10:00:00.000Z', activation: 'merged-team-active', mergedProvenance: 'merge-other' },
-      'knowledge-disputed': { scope: 'repository', repositoryId: 'repo-a', path: 'src/disputed.ts', tool: 'node', tags: ['retention'], createdAt: '2026-08-23T10:00:00.000Z', activation: 'merged-team-active', mergedProvenance: 'merge-disputed' }
+      'knowledge-old': { path: 'src/a.ts', tool: 'git', tags: ['safety'], createdAt: '2026-08-20T10:00:00.000Z', activation: 'merged-team-active', mergedProvenance: 'repo-a:merge-old' },
+      'knowledge-new': { path: 'src/a.ts', tool: 'git', tags: ['safety'], createdAt: '2026-08-21T10:00:00.000Z', activation: 'merged-team-active', mergedProvenance: 'repo-a:merge-new' },
+      'knowledge-other-repo': { path: 'src/a.ts', tool: 'git', tags: ['safety'], createdAt: '2026-08-22T10:00:00.000Z', activation: 'merged-team-active', mergedProvenance: 'repo-b:merge-other' },
+      'knowledge-disputed': { path: 'src/disputed.ts', tool: 'node', tags: ['retention'], createdAt: '2026-08-23T10:00:00.000Z', activation: 'merged-team-active', mergedProvenance: 'repo-a:merge-disputed' }
     }
   };
 }
@@ -79,7 +64,7 @@ function createStore(): ExperienceStore {
 
 test('orders exact retrieval by matched filters, recency, then identifier', () => {
   const store = createStore();
-  store.import(fixture() as ExperienceImport);
+  store.import(fixture());
   const filter: RetrievalFilter = { scope: 'repository', repositoryId: 'repo-a', path: './src/a.ts', tool: 'git', tags: ['safety'] };
 
   assert.deepEqual(store.retrieve(filter).map(({ id }) => id), ['knowledge-new', 'knowledge-old']);
@@ -88,7 +73,7 @@ test('orders exact retrieval by matched filters, recency, then identifier', () =
 
 test('does not return cross-repository knowledge', () => {
   const store = createStore();
-  store.import(fixture() as ExperienceImport);
+  store.import(fixture());
 
   assert.deepEqual(store.retrieve({ scope: 'repository', repositoryId: 'repo-a' }).map(({ id }) => id), ['knowledge-disputed', 'knowledge-new', 'knowledge-old']);
   store.close();
@@ -96,7 +81,7 @@ test('does not return cross-repository knowledge', () => {
 
 test('does not expire an observation referenced by disputed knowledge', () => {
   const store = createStore();
-  store.import(fixture() as ExperienceImport);
+  store.import(fixture());
 
   assert.equal(store.expireUnprotected('2030-01-01T00:00:00.000Z'), 0);
   store.close();
@@ -105,25 +90,27 @@ test('does not expire an observation referenced by disputed knowledge', () => {
 test('does not return unapproved global knowledge as authoritative', () => {
   const store = createStore();
   const record = fixture();
-  record.knowledgeMetadata['knowledge-new'] = { scope: 'global', tags: ['safety'], createdAt: '2026-08-21T10:00:00.000Z' };
-  store.import(record as ExperienceImport);
+  for (const id of ['knowledge-old', 'knowledge-new', 'knowledge-disputed']) {
+    record.knowledgeMetadata[id] = { ...record.knowledgeMetadata[id], activation: 'local', mergedProvenance: undefined };
+  }
+  record.knowledgeMetadata['knowledge-new'] = { tags: ['safety'], createdAt: '2026-08-21T10:00:00.000Z' };
+  record.sessions[0] = { ...record.sessions[0], repositoryId: undefined };
+  store.import(record);
 
   const entry = store.retrieve({ scope: 'global' }).find(({ id }) => id === 'knowledge-new');
   assert.equal(entry?.authoritative, false);
   store.close();
 });
 
-test('requires merged provenance before repository knowledge is authoritative', () => {
+test('rejects repository team activation without matching merged provenance', () => {
   const store = createStore();
   const record = fixture();
   record.knowledgeMetadata['knowledge-new'] = {
-    scope: 'repository', repositoryId: 'repo-a', path: 'src/a.ts', tool: 'git', tags: ['safety'],
+    path: 'src/a.ts', tool: 'git', tags: ['safety'],
     createdAt: '2026-08-21T10:00:00.000Z', activation: 'merged-team-active'
   };
-  store.import(record as ExperienceImport);
-
-  const entry = store.retrieve({ scope: 'repository', repositoryId: 'repo-a' }).find(({ id }) => id === 'knowledge-new');
-  assert.equal(entry?.authoritative, false);
+  assert.throws(() => store.import(record), /INVALID_METADATA/);
+  assert.deepEqual(store.listKnowledge(), []);
   store.close();
 });
 
@@ -131,10 +118,50 @@ test('tombstones terminal knowledge observations without purging referenced reco
   const store = createStore();
   const record = fixture();
   record.knowledge[0] = { ...record.knowledge[0], state: 'superseded' };
-  store.import(record as ExperienceImport);
+  store.import(record);
 
   assert.equal(store.expireUnprotected('2030-01-01T00:00:00.000Z'), 1);
-  assert.equal(store.expireUnprotected('2030-01-02T00:00:00.000Z'), 0);
+  assert.equal(store.expireUnprotected('2030-01-02T00:00:00.000Z'), 1);
   assert.equal(store.inspect('knowledge-old' as KnowledgeEntry['id'])?.statement, 'Old convention.');
+  store.close();
+});
+
+test('rejects secret-bearing metadata atomically', () => {
+  const store = createStore();
+  const record = fixture();
+  record.knowledgeMetadata['knowledge-new'] = {
+    ...record.knowledgeMetadata['knowledge-new'],
+    mergedProvenance: 'repo-a:bearer_token: secret-value'
+  };
+
+  assert.throws(() => store.import(record), /SENSITIVE_TEXT/);
+  assert.deepEqual(store.listKnowledge(), []);
+  store.close();
+});
+
+test('rejects malformed metadata fields atomically', () => {
+  const store = createStore();
+  const record = fixture();
+  record.knowledgeMetadata['knowledge-new'] = {
+    ...record.knowledgeMetadata['knowledge-new'],
+    tags: [123] as unknown as string[],
+    approvedAt: 'not-a-timestamp'
+  };
+
+  assert.throws(() => store.import(record), /INVALID_SHAPE/);
+  assert.deepEqual(store.listKnowledge(), []);
+  store.close();
+});
+
+test('rejects repository metadata that contradicts source provenance', () => {
+  const store = createStore();
+  const record = fixture();
+  record.knowledgeMetadata['knowledge-new'] = {
+    ...record.knowledgeMetadata['knowledge-new'],
+    scope: 'global', repositoryId: 'repo-b' as ExperienceImport['sessions'][number]['repositoryId']
+  };
+
+  assert.throws(() => store.import(record), /INVALID_METADATA/);
+  assert.deepEqual(store.listKnowledge(), []);
   store.close();
 });
