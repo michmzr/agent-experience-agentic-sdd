@@ -7,7 +7,8 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 | Task | State | Verification / commit |
 | --- | --- | --- |
 | 1. Delivery design and executable contracts | completed | Design and source boundaries verified; `9ce0d20` adds contracts, `pnpm check` 56 passed. |
-| 2. Source adapters and deterministic fixtures | in progress | Codex, Claude Code and Cursor adapters dispatched. |
+| 2. Source adapters and deterministic fixtures | completed | `4a6c90a`, `8181a54`, `a8eebf2`, `522175a`; full `pnpm check` 67 passed. |
+| 3. Privacy scrubber and artifact boundary | in progress | Implementation started after adapter verification. |
 | 3. Privacy scrubber and artifact boundary | pending | Not started. |
 | 4. Manual review CLI and profile runtime | pending | Not started. |
 | 5. Parallel orchestration, candidates and proposals | pending | Not started. |
@@ -22,12 +23,12 @@ Last updated: 2026-08-24. Every checkbox is updated immediately after its verifi
 
 ### Task 2: Source adapters and deterministic fixtures
 
-- [ ] Implement injected-root, artifact-led adapter contract.
-- [ ] Implement Codex observed-JSONL adapter with unknown-record rejection.
-- [ ] Implement Claude Code adapter from verified supported local/export format.
-- [ ] Implement Cursor adapter from verified supported local/export format.
-- [ ] Add equivalent three-source fixtures and selection tests.
-- [ ] Run `pnpm check` and record the commit SHA.
+- [x] Implement injected-root, artifact-led adapter contract.
+- [x] Implement Codex observed-JSONL adapter with unknown-record rejection: `4a6c90a`.
+- [x] Implement Claude Code adapter from verified supported local/export format: `8181a54`.
+- [x] Implement Cursor adapter from verified supported local/export format: `a8eebf2`.
+- [x] Add equivalent three-source fixtures and selection tests: `522175a`.
+- [x] Run `pnpm check` and record the commit SHA: `522175a`, 67 passed, 0 failed.
 
 ### Task 3: Privacy scrubber and artifact boundary
 
