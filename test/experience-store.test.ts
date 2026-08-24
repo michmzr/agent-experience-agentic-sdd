@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -31,6 +31,14 @@ test('persists a valid import and reopens it for knowledge inspection', () => {
   assert.deepEqual(reopened.inspect('knowledge-1' as KnowledgeEntry['id']), record.knowledge[0]);
   assert.deepEqual(reopened.listKnowledge(), record.knowledge);
   reopened.close();
+});
+
+test('creates a local SQLite database file with owner-only permissions', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-store-')), 'experience.sqlite');
+  const store = new ExperienceStore(databasePath);
+
+  assert.equal(statSync(databasePath).mode & 0o777, 0o600);
+  store.close();
 });
 
 test('rejects an invalid import before it can mutate stored knowledge', () => {

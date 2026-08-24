@@ -22,8 +22,11 @@ export function openExperienceDatabase(databasePath = defaultDatabasePath()): Da
   mkdirSync(directory, { recursive: true, mode: DIRECTORY_MODE });
   chmodSync(directory, DIRECTORY_MODE);
 
-  return new DatabaseSync(databasePath, {
+  const database = new DatabaseSync(databasePath, {
     enableForeignKeyConstraints: true,
     timeout: DATABASE_TIMEOUT_MS
   });
+  if (databasePath !== ':memory:') chmodSync(databasePath, 0o600);
+
+  return database;
 }
