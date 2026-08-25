@@ -4,6 +4,11 @@ import { randomUUID } from 'node:crypto';
 
 import type { KnowledgeEntry, KnowledgeState, LessonKind } from '../domain/types.js';
 
+// Keep the version 1 writer available while exposing the strict version 2 boundary
+// from the historical repository-knowledge module.
+export { readSharedKnowledge, writeSharedKnowledge } from '../shared-knowledge/repository.js';
+export type { SharedKnowledgeDocument } from '../shared-knowledge/repository.js';
+
 export interface RepositoryKnowledgeDocument {
   readonly entry: KnowledgeEntry;
   readonly kind: LessonKind;
