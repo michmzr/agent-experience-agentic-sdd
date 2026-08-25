@@ -8,6 +8,7 @@ export type RuntimeProfileId = string;
 
 export interface RuntimeProfileRegistry {
   readonly version: 1;
+  readonly definitions: readonly CustomRuntimeProfileDefinition[];
   readonly profiles: Readonly<Record<string, RuntimeProfile>>;
   readonly learningProfileIds: readonly string[];
 }
@@ -67,6 +68,7 @@ export const BUILT_IN_RUNTIME_PROFILES: Readonly<Record<string, RuntimeProfile>>
 
 export const BUILT_IN_RUNTIME_PROFILE_REGISTRY: RuntimeProfileRegistry = freezeRegistry(
   BUILT_IN_RUNTIME_PROFILES,
+  [],
   ['learning']
 );
 
@@ -138,7 +140,7 @@ export function defineRuntimeProfiles(
 
   const profiles = nullPrototypeRecord(resolved.entries());
   const learningProfileIds = [...resolved.keys()].filter((id) => learningLineage.get(id) === true);
-  return freezeRegistry(profiles, learningProfileIds);
+  return freezeRegistry(profiles, validated, learningProfileIds);
 }
 
 /** Returns validated inheritance lineage without inferring semantics from mutable fields. */
@@ -153,24 +155,25 @@ export function hasLearningLineage(
 export function validateRuntimeProfileRegistry(value: unknown): RuntimeProfileRegistry {
   if (!isRecord(value)) throw new RuntimeProfileConfigurationError('Runtime profile registry must be an object.');
   const fields = Object.keys(value);
-  if (fields.length !== 3 || fields.some((field) => !['version', 'profiles', 'learningProfileIds'].includes(field))) {
+  if (fields.length !== 4 || fields.some((field) => !['version', 'definitions', 'profiles', 'learningProfileIds'].includes(field))) {
     throw new RuntimeProfileConfigurationError('Runtime profile registry fields are invalid.');
   }
-  if (value.version !== 1 || !isRecord(value.profiles) || !Array.isArray(value.learningProfileIds)) {
+  if (
+    value.version !== 1
+    || !Array.isArray(value.definitions)
+    || !isRecord(value.profiles)
+    || !Array.isArray(value.learningProfileIds)
+  ) {
     throw new RuntimeProfileConfigurationError('Runtime profile registry structure is invalid.');
   }
 
   const serializedProfiles = value.profiles;
+  for (const id of Object.keys(serializedProfiles)) {
+    if (!isNonEmptyString(id)) throw new RuntimeProfileConfigurationError('Runtime profile registry key is invalid.');
+  }
   const profiles = nullPrototypeRecord(
     Object.keys(serializedProfiles).map((id) => [id, validateCompleteProfile(serializedProfiles[id], id)] as const)
   );
-  for (const builtIn of Object.values(BUILT_IN_RUNTIME_PROFILES)) {
-    const actual = ownProfile(profiles, builtIn.id);
-    if (actual === undefined || !sameProfile(actual, builtIn)) {
-      throw new RuntimeProfileConfigurationError('Runtime profile registry built-ins are invalid.');
-    }
-  }
-
   const learningProfileIds: string[] = [];
   const seen = new Set<string>();
   for (const id of value.learningProfileIds) {
@@ -180,16 +183,18 @@ export function validateRuntimeProfileRegistry(value: unknown): RuntimeProfileRe
     seen.add(id);
     learningProfileIds.push(id);
   }
-  if (!seen.has('learning') || seen.has('normal') || seen.has('observe-only')) {
-    throw new RuntimeProfileConfigurationError('Runtime profile learning lineage is invalid.');
+  const reconstructed = defineRuntimeProfiles(value.definitions);
+  if (!sameProfileRecords(profiles, reconstructed.profiles)) {
+    throw new RuntimeProfileConfigurationError('Runtime profile registry derived profiles do not match definitions.');
   }
-  for (const id of learningProfileIds) {
-    if (!ownProfile(profiles, id)!.captureEnabled) {
-      throw new RuntimeProfileConfigurationError('Learning profiles must keep capture enabled.');
-    }
+  if (
+    learningProfileIds.length !== reconstructed.learningProfileIds.length
+    || learningProfileIds.some((id, index) => id !== reconstructed.learningProfileIds[index])
+  ) {
+    throw new RuntimeProfileConfigurationError('Runtime profile registry learning lineage does not match definitions.');
   }
 
-  return freezeRegistry(profiles, learningProfileIds);
+  return reconstructed;
 }
 
 function validateDefinition(value: unknown): CustomRuntimeProfileDefinition {
@@ -199,18 +204,20 @@ function validateDefinition(value: unknown): CustomRuntimeProfileDefinition {
       throw new RuntimeProfileConfigurationError(`Unknown runtime profile field: ${field}`);
     }
   }
-  if (!isNonEmptyString(value.id)) throw new RuntimeProfileConfigurationError('Runtime profile id must be a non-empty string.');
-  if (!isNonEmptyString(value.extends)) {
+  if (!Object.hasOwn(value, 'id') || !isNonEmptyString(value.id)) {
+    throw new RuntimeProfileConfigurationError('Runtime profile id must be a non-empty string.');
+  }
+  if (!Object.hasOwn(value, 'extends') || !isNonEmptyString(value.extends)) {
     throw new RuntimeProfileConfigurationError(`Runtime profile ${value.id} must extend exactly one profile.`);
   }
   for (const field of booleanFields) {
-    if (value[field] !== undefined && typeof value[field] !== 'boolean') {
+    if (Object.hasOwn(value, field) && typeof value[field] !== 'boolean') {
       throw new RuntimeProfileConfigurationError(`Runtime profile field ${field} must be boolean.`);
     }
   }
-  if (value.degradedOutcomes !== undefined) validateDegradedOutcomes(value.degradedOutcomes);
+  if (Object.hasOwn(value, 'degradedOutcomes')) validateDegradedOutcomes(value.degradedOutcomes);
 
-  return value as unknown as CustomRuntimeProfileDefinition;
+  return freezeDefinition(value as unknown as CustomRuntimeProfileDefinition);
 }
 
 function validateDegradedOutcomes(value: unknown): asserts value is Readonly<Record<OperationClass, DecisionOutcome>> {
@@ -249,6 +256,7 @@ function freezeProfile(profile: RuntimeProfile): RuntimeProfile {
 
 function freezeRegistry(
   profiles: Readonly<Record<string, RuntimeProfile>>,
+  definitions: readonly CustomRuntimeProfileDefinition[],
   learningProfileIds: readonly string[]
 ): RuntimeProfileRegistry {
   const frozenProfiles = nullPrototypeRecord(
@@ -257,8 +265,23 @@ function freezeRegistry(
   Object.freeze(frozenProfiles);
   return Object.freeze({
     version: 1 as const,
+    definitions: Object.freeze(definitions.map(freezeDefinition)),
     profiles: frozenProfiles,
     learningProfileIds: Object.freeze([...learningProfileIds])
+  });
+}
+
+function freezeDefinition(definition: CustomRuntimeProfileDefinition): CustomRuntimeProfileDefinition {
+  return Object.freeze({
+    id: definition.id,
+    extends: definition.extends,
+    ...(definition.hardBlocking === undefined ? {} : { hardBlocking: definition.hardBlocking }),
+    ...(definition.warningsEnabled === undefined ? {} : { warningsEnabled: definition.warningsEnabled }),
+    ...(definition.captureEnabled === undefined ? {} : { captureEnabled: definition.captureEnabled }),
+    ...(definition.retrievalEnabled === undefined ? {} : { retrievalEnabled: definition.retrievalEnabled }),
+    ...(definition.degradedOutcomes === undefined ? {} : {
+      degradedOutcomes: Object.freeze({ ...definition.degradedOutcomes })
+    })
   });
 }
 
@@ -299,6 +322,16 @@ function sameProfile(left: RuntimeProfile, right: RuntimeProfile): boolean {
     && operationClasses.every(
       (operationClass) => left.degradedOutcomes[operationClass] === right.degradedOutcomes[operationClass]
     );
+}
+
+function sameProfileRecords(
+  left: Readonly<Record<string, RuntimeProfile>>,
+  right: Readonly<Record<string, RuntimeProfile>>
+): boolean {
+  const leftIds = Object.keys(left);
+  const rightIds = Object.keys(right);
+  return leftIds.length === rightIds.length
+    && leftIds.every((id) => Object.hasOwn(right, id) && sameProfile(left[id]!, right[id]!));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

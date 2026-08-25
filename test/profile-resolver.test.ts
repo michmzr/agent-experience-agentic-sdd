@@ -171,6 +171,7 @@ test('rejects a transitive learning descendant with blocking restored when captu
 test('preserves learning lineage through object spread and JSON serialization', () => {
   const cloned: RuntimeProfileRegistry = {
     ...profiles,
+    definitions: profiles.definitions.map((definition) => ({ ...definition })),
     profiles: { ...profiles.profiles },
     learningProfileIds: [...profiles.learningProfileIds]
   };
@@ -182,6 +183,42 @@ test('preserves learning lineage through object spread and JSON serialization', 
       profiles: registry,
       sessionOverride: { profile: 'safe-learning', captureEnabled: false }
     }), /learning.*capture/i);
+  }
+});
+
+test('rejects serialized registries whose derived data does not match definitions', () => {
+  const adversarialRegistries: unknown[] = [];
+
+  const omittedLineage = serializedRegistry();
+  omittedLineage.learningProfileIds = omittedLineage.learningProfileIds.filter((id: string) => id !== 'safe-learning');
+  adversarialRegistries.push(omittedLineage);
+
+  const falseLineage = serializedRegistry();
+  falseLineage.learningProfileIds.push('quiet');
+  adversarialRegistries.push(falseLineage);
+
+  const flattenedProfile = serializedRegistry();
+  flattenedProfile.profiles['flattened'] = { ...flattenedProfile.profiles.normal, id: 'flattened' };
+  adversarialRegistries.push(flattenedProfile);
+
+  const mutatedProfile = serializedRegistry();
+  mutatedProfile.profiles['safe-learning'].warningsEnabled = true;
+  adversarialRegistries.push(mutatedProfile);
+
+  const emptyKey = serializedRegistry();
+  emptyKey.profiles[' '] = { ...emptyKey.profiles.normal, id: ' ' };
+  adversarialRegistries.push(emptyKey);
+
+  const emptyDefinitionId = serializedRegistry();
+  emptyDefinitionId.definitions.push({ id: ' ', extends: 'normal' });
+  adversarialRegistries.push(emptyDefinitionId);
+
+  for (const registry of adversarialRegistries) {
+    assert.throws(() => resolveProfileTarget({
+      facts,
+      profiles: registry as RuntimeProfileRegistry,
+      sessionOverride: 'normal'
+    }), Error);
   }
 });
 
@@ -313,4 +350,24 @@ function selector(
   profile: ProfileTargetSelector['profile']
 ): ProfileTargetSelector {
   return { target, pattern, profile };
+}
+
+interface MutableSerializedProfile {
+  id: string;
+  hardBlocking: boolean;
+  warningsEnabled: boolean;
+  captureEnabled: boolean;
+  retrievalEnabled: boolean;
+  degradedOutcomes: Record<string, string>;
+}
+
+interface MutableSerializedRegistry {
+  version: number;
+  definitions: Array<Record<string, unknown>>;
+  profiles: Record<string, MutableSerializedProfile>;
+  learningProfileIds: string[];
+}
+
+function serializedRegistry(): MutableSerializedRegistry {
+  return JSON.parse(JSON.stringify(profiles)) as MutableSerializedRegistry;
 }

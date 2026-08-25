@@ -73,6 +73,14 @@ test('custom profiles inherit transitively and override declared runtime fields'
   ]);
 
   assert.equal(registry.version, 1);
+  assert.deepEqual(registry.definitions, [
+    { id: 'team-learning', extends: 'learning', warningsEnabled: false },
+    {
+      id: 'team-protected',
+      extends: 'team-learning',
+      degradedOutcomes: { normal: 'ALLOW', caution: 'WARN', protected: 'WARN' }
+    }
+  ]);
   assert.deepEqual(registry.profiles['team-protected'], {
     id: 'team-protected',
     hardBlocking: false,
@@ -84,6 +92,11 @@ test('custom profiles inherit transitively and override declared runtime fields'
   assert.deepEqual(registry.learningProfileIds, ['learning', 'team-learning', 'team-protected']);
   assert.equal(Object.isFrozen(registry), true);
   assert.equal(Object.isFrozen(registry.profiles), true);
+  assert.equal(Object.isFrozen(registry.definitions), true);
+  for (const definition of registry.definitions) {
+    assert.equal(Object.isFrozen(definition), true);
+    if (definition.degradedOutcomes !== undefined) assert.equal(Object.isFrozen(definition.degradedOutcomes), true);
+  }
   assert.equal(Object.isFrozen(registry.learningProfileIds), true);
   assert.equal(Object.isFrozen(registry.profiles['team-protected']), true);
   assert.equal(Object.isFrozen(registry.profiles['team-protected']?.degradedOutcomes), true);
@@ -123,6 +136,7 @@ test('profile identifiers with Object prototype names are explicit own propertie
 test('custom profile validation rejects invalid configuration', () => {
   const invalidDefinitions: readonly unknown[][] = [
     [{ id: 'missing', extends: 'unknown' }],
+    [{ id: ' ', extends: 'normal' }],
     [{ id: 'normal', extends: 'learning' }],
     [{ id: 'duplicate', extends: 'normal' }, { id: 'duplicate', extends: 'learning' }],
     [{ id: 'a', extends: 'b' }, { id: 'b', extends: 'a' }],
