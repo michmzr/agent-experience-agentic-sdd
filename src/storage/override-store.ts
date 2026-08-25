@@ -2,7 +2,6 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import type { DecisionReference } from '../runtime/contracts.js';
 import {
-  OverrideLearningEvidenceAccumulator,
   parseRuntimeOverride,
   validateOverrideAuditEntry,
   type OverrideAuditEntry,
@@ -12,6 +11,7 @@ import {
 import { openExperienceDatabase } from './database.js';
 
 export const MAX_OVERRIDE_AUDIT_PAGE_SIZE = 100;
+export const MAX_OVERRIDE_EVIDENCE_PAGE_SIZE = 50;
 export const OVERRIDE_AUDIT_MIGRATION_BATCH_SIZE = 64;
 
 export interface OverrideAuditPageRequest {
@@ -27,6 +27,13 @@ export interface OverrideAuditPage {
 
 export interface OverrideEvidenceRequest {
   readonly overrideId?: string;
+  readonly afterRuleId?: string;
+  readonly limit?: number;
+}
+
+export interface OverrideEvidencePage {
+  readonly entries: readonly OverrideLearningEvidence[];
+  readonly nextCursor?: string;
 }
 
 export const overrideAuditMigration = `
@@ -83,6 +90,11 @@ interface OverrideAuditRow {
   recorded_at: string;
   decision_references_json: string;
   post_action_outcome: PostActionOutcome | null;
+}
+
+interface QualifyingRuleRow {
+  rule_id: string;
+  successful_use_count: number;
 }
 
 export class OverrideStore {
@@ -154,31 +166,30 @@ export class OverrideStore {
     return Object.freeze({ entries, ...(nextCursor === undefined ? {} : { nextCursor }) });
   }
 
-  deriveLearningEvidence(request: OverrideEvidenceRequest = {}): readonly OverrideLearningEvidence[] {
-    const accumulator = new OverrideLearningEvidenceAccumulator();
-    let afterSequence = 0;
-    while (true) {
-      const completionRows = (request.overrideId === undefined
-        ? this.#database.prepare(`SELECT * FROM runtime_override_audit
-            WHERE sequence > ? AND phase = 'completed' AND post_action_outcome = 'succeeded'
-            ORDER BY sequence LIMIT ?`).all(afterSequence, MAX_OVERRIDE_AUDIT_PAGE_SIZE)
-        : this.#database.prepare(`SELECT * FROM runtime_override_audit
-            WHERE sequence > ? AND override_id = ? AND phase = 'completed' AND post_action_outcome = 'succeeded'
-            ORDER BY sequence LIMIT ?`).all(afterSequence, request.overrideId, MAX_OVERRIDE_AUDIT_PAGE_SIZE)) as unknown as OverrideAuditRow[];
-      if (completionRows.length === 0) return accumulator.finish();
-      for (const row of completionRows) {
-        const completion = auditEntryFromRow(row, checkedUseId(row.use_id));
-        const authorizationRows = this.#database.prepare(`SELECT * FROM runtime_override_audit
-          WHERE override_id = ? AND use_id = ? AND phase = 'authorized' AND sequence < ?
-          ORDER BY sequence DESC LIMIT 2`).all(completion.override.id, completion.useId, row.sequence) as unknown as OverrideAuditRow[];
-        if (authorizationRows.length !== 1) throw new TypeError('Successful completion audit requires exactly one prior authorization row.');
-        accumulator.recordSuccessfulUse(
-          auditEntryFromRow(authorizationRows[0]!, completion.useId),
-          completion
-        );
-      }
-      afterSequence = completionRows.at(-1)!.sequence;
+  deriveLearningEvidencePage(request: OverrideEvidenceRequest = {}): OverrideEvidencePage {
+    const limit = request.limit ?? MAX_OVERRIDE_EVIDENCE_PAGE_SIZE;
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_OVERRIDE_EVIDENCE_PAGE_SIZE) {
+      throw new RangeError(`Override evidence page size must be between 1 and ${MAX_OVERRIDE_EVIDENCE_PAGE_SIZE}.`);
     }
+    const afterRuleId = request.afterRuleId ?? '';
+    if (afterRuleId !== '' && !/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,511}$/.test(afterRuleId)) {
+      throw new RangeError('Override evidence cursor is invalid.');
+    }
+    const groups = qualifyingRuleGroups(this.#database, request.overrideId, afterRuleId, limit + 1);
+    const visible = groups.slice(0, limit);
+    const entries = Object.freeze(visible.map(({ rule_id: ruleId, successful_use_count: successfulUseCount }) => {
+      const supports = supportingSuccessfulUses(this.#database, ruleId, request.overrideId);
+      return Object.freeze({
+        ruleId,
+        polarity: 'contradicts' as const,
+        successfulOverrideIds: Object.freeze(supports.map(({ completion }) => completion.override.id)),
+        successfulUseIds: Object.freeze(supports.map(({ completion }) => completion.useId)),
+        successfulUseCount,
+        revalidationRequired: true as const
+      });
+    }));
+    const nextCursor = groups.length > limit ? visible.at(-1)!.rule_id : undefined;
+    return Object.freeze({ entries, ...(nextCursor === undefined ? {} : { nextCursor }) });
   }
 
   close(): void {
@@ -192,6 +203,115 @@ function sameAuthorization(row: OverrideAuditRow, completion: OverrideAuditEntry
     && row.created_at === completion.override.createdAt
     && row.expires_at === (completion.override.expiresAt ?? null)
     && row.decision_references_json === JSON.stringify(completion.decisionReferences);
+}
+
+function qualifyingRuleGroups(
+  database: DatabaseSync,
+  overrideId: string | undefined,
+  afterRuleId: string,
+  limit: number
+): QualifyingRuleRow[] {
+  const overrideClause = overrideId === undefined ? '' : 'AND completed.override_id = ?';
+  const sql = `
+    WITH paired_successes AS (
+      SELECT completed.*
+      FROM runtime_override_audit completed
+      JOIN runtime_override_audit authorized
+        ON authorized.override_id = completed.override_id
+        AND authorized.use_id = completed.use_id
+        AND authorized.phase = 'authorized'
+        AND authorized.sequence < completed.sequence
+        AND authorized.scope_json = completed.scope_json
+        AND authorized.reason = completed.reason
+        AND authorized.created_at = completed.created_at
+        AND authorized.expires_at IS completed.expires_at
+        AND authorized.decision_references_json = completed.decision_references_json
+      WHERE completed.phase = 'completed'
+        AND completed.post_action_outcome = 'succeeded'
+        ${overrideClause}
+    ), distinct_rule_uses AS (
+      SELECT
+        json_extract(reference.value, '$.ruleId') AS rule_id,
+        success.override_id,
+        success.use_id
+      FROM paired_successes success
+      JOIN json_each(success.decision_references_json) reference
+      WHERE json_type(reference.value, '$.ruleId') = 'text'
+        AND (
+          json_extract(success.scope_json, '$.kind') <> 'rule'
+          OR json_extract(success.scope_json, '$.ruleId') = json_extract(reference.value, '$.ruleId')
+        )
+      GROUP BY rule_id, success.override_id, success.use_id
+    )
+    SELECT rule_id, COUNT(*) AS successful_use_count
+    FROM distinct_rule_uses
+    WHERE rule_id > ?
+    GROUP BY rule_id
+    HAVING COUNT(*) >= 2
+    ORDER BY rule_id
+    LIMIT ?
+  `;
+  const rows = (overrideId === undefined
+    ? database.prepare(sql).all(afterRuleId, limit)
+    : database.prepare(sql).all(overrideId, afterRuleId, limit)) as unknown as QualifyingRuleRow[];
+  for (const row of rows) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,511}$/.test(row.rule_id)
+      || !Number.isSafeInteger(row.successful_use_count) || row.successful_use_count < 2) {
+      throw new TypeError('Stored override evidence grouping is invalid.');
+    }
+  }
+  return rows;
+}
+
+function supportingSuccessfulUses(
+  database: DatabaseSync,
+  ruleId: string,
+  overrideId: string | undefined
+): Array<{ readonly authorization: OverrideAuditEntry; readonly completion: OverrideAuditEntry }> {
+  const overrideClause = overrideId === undefined ? '' : 'AND completed.override_id = ?';
+  const sql = `
+    SELECT completed.*
+    FROM runtime_override_audit completed
+    JOIN runtime_override_audit authorized
+      ON authorized.override_id = completed.override_id
+      AND authorized.use_id = completed.use_id
+      AND authorized.phase = 'authorized'
+      AND authorized.sequence < completed.sequence
+      AND authorized.scope_json = completed.scope_json
+      AND authorized.reason = completed.reason
+      AND authorized.created_at = completed.created_at
+      AND authorized.expires_at IS completed.expires_at
+      AND authorized.decision_references_json = completed.decision_references_json
+    WHERE completed.phase = 'completed'
+      AND completed.post_action_outcome = 'succeeded'
+      ${overrideClause}
+      AND EXISTS (
+        SELECT 1 FROM json_each(completed.decision_references_json) reference
+        WHERE json_extract(reference.value, '$.ruleId') = ?
+      )
+      AND (
+        json_extract(completed.scope_json, '$.kind') <> 'rule'
+        OR json_extract(completed.scope_json, '$.ruleId') = ?
+      )
+    ORDER BY completed.sequence
+    LIMIT 2
+  `;
+  const completionRows = (overrideId === undefined
+    ? database.prepare(sql).all(ruleId, ruleId)
+    : database.prepare(sql).all(overrideId, ruleId, ruleId)) as unknown as OverrideAuditRow[];
+  if (completionRows.length !== 2) throw new TypeError('Qualifying override evidence is missing supporting uses.');
+  return completionRows.map((row) => {
+    const completion = auditEntryFromRow(row, checkedUseId(row.use_id));
+    const authorizationRows = database.prepare(`SELECT * FROM runtime_override_audit
+      WHERE override_id = ? AND use_id = ? AND phase = 'authorized' AND sequence < ?
+      ORDER BY sequence DESC LIMIT 2`).all(completion.override.id, completion.useId, row.sequence) as unknown as OverrideAuditRow[];
+    if (authorizationRows.length !== 1) throw new TypeError('Successful completion audit requires exactly one prior authorization row.');
+    const authorization = auditEntryFromRow(authorizationRows[0]!, completion.useId);
+    if (!sameAuthorization(authorizationRows[0]!, completion) || completion.recordedAt < authorization.recordedAt) {
+      throw new TypeError('Successful completion audit does not match its authorization.');
+    }
+    return Object.freeze({ authorization, completion });
+  });
 }
 
 function migrateOverrideAudit(database: DatabaseSync): void {

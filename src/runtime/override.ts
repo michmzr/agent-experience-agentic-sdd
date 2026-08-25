@@ -149,50 +149,6 @@ export function applyRuntimeOverride(input: ApplyRuntimeOverrideInput): Override
   return Object.freeze({ accepted: true, decision });
 }
 
-interface RuleSuccessState {
-  count: number;
-  readonly supportingUses: Array<{ readonly overrideId: string; readonly useId: string }>;
-}
-
-/** Incrementally derives bounded supporting evidence without accepting a whole audit history. */
-export class OverrideLearningEvidenceAccumulator {
-  readonly #rules = new Map<string, RuleSuccessState>();
-
-  recordSuccessfulUse(authorizationInput: OverrideAuditEntry, completionInput: OverrideAuditEntry): void {
-    const authorization = validateOverrideAuditEntry(authorizationInput);
-    const completion = validateOverrideAuditEntry(completionInput);
-    if (authorization.phase !== 'authorized' || completion.phase !== 'completed' || completion.postActionOutcome !== 'succeeded'
-      || overrideUseKey(authorization) !== overrideUseKey(completion) || auditBinding(authorization) !== auditBinding(completion)
-      || completion.recordedAt < authorization.recordedAt) {
-      throw new TypeError('Successful override evidence requires a matching ordered authorization pair.');
-    }
-    const scopedRuleId = completion.override.scope.kind === 'rule' ? completion.override.scope.ruleId : undefined;
-    const references = scopedRuleId === undefined
-      ? completion.decisionReferences
-      : completion.decisionReferences.filter(({ ruleId }) => ruleId === scopedRuleId);
-    for (const reference of references) {
-      const state = this.#rules.get(reference.ruleId) ?? { count: 0, supportingUses: [] };
-      state.count += 1;
-      if (state.supportingUses.length < 2) state.supportingUses.push({ overrideId: completion.override.id, useId: completion.useId });
-      this.#rules.set(reference.ruleId, state);
-    }
-  }
-
-  finish(): readonly OverrideLearningEvidence[] {
-    return Object.freeze([...this.#rules.entries()]
-      .filter(([, state]) => state.count >= 2)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([ruleId, state]) => Object.freeze({
-        ruleId,
-        polarity: 'contradicts' as const,
-        successfulOverrideIds: Object.freeze(state.supportingUses.map(({ overrideId }) => overrideId)),
-        successfulUseIds: Object.freeze(state.supportingUses.map(({ useId }) => useId)),
-        successfulUseCount: state.count,
-        revalidationRequired: true as const
-      })));
-  }
-}
-
 export function validateOverrideAuditEntry(value: OverrideAuditEntry): OverrideAuditEntry {
   if (!isRecord(value) || !onlyKeys(value, ['decisionReferences', 'id', 'override', 'phase', 'postActionOutcome', 'recordedAt', 'useId'])
     || typeof value.id !== 'string' || (value.phase !== 'authorized' && value.phase !== 'completed')
@@ -211,6 +167,9 @@ export function validateOverrideAuditEntry(value: OverrideAuditEntry): OverrideA
   }
   const references = value.decisionReferences.map(parseReference);
   if (references.length > MAX_REFERENCES) throw new TypeError('Override decision reference limit exceeded.');
+  if (new Set(references.map(({ ruleId }) => ruleId)).size !== references.length) {
+    throw new TypeError('Override audit contains a duplicate decision reference.');
+  }
   return Object.freeze({
     id,
     useId,
@@ -308,14 +267,6 @@ function validateActionSignatureResources(signature: RuntimeInput['signature']):
     for (const argument of signature.arguments ?? []) assertBounded(argument, 'action argument', MAX_TEXT_LENGTH);
   }
   if (signature.path !== undefined) assertBounded(signature.path, 'action path', MAX_TEXT_LENGTH);
-}
-
-function auditBinding(entry: OverrideAuditEntry): string {
-  return JSON.stringify({ override: entry.override, decisionReferences: entry.decisionReferences });
-}
-
-function overrideUseKey(entry: OverrideAuditEntry): string {
-  return `${entry.override.id}\0${entry.useId}`;
 }
 
 function isPostActionOutcome(value: unknown): value is PostActionOutcome {

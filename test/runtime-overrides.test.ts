@@ -19,6 +19,7 @@ import { ExperienceStore } from '../src/storage/experience-store.js';
 import {
   ensureOverrideAuditUseMigration,
   MAX_OVERRIDE_AUDIT_PAGE_SIZE,
+  MAX_OVERRIDE_EVIDENCE_PAGE_SIZE,
   OVERRIDE_AUDIT_MIGRATION_BATCH_SIZE,
   overrideAuditMigration,
   OverrideStore
@@ -144,6 +145,20 @@ function allAudit(store: OverrideStore, overrideId?: string): readonly OverrideA
   return entries;
 }
 
+function allEvidence(store: OverrideStore, overrideId?: string): ReturnType<OverrideStore['deriveLearningEvidencePage']>['entries'] {
+  const entries: Array<ReturnType<OverrideStore['deriveLearningEvidencePage']>['entries'][number]> = [];
+  let afterRuleId: string | undefined;
+  do {
+    const page = store.deriveLearningEvidencePage({
+      ...(overrideId === undefined ? {} : { overrideId }),
+      ...(afterRuleId === undefined ? {} : { afterRuleId })
+    });
+    entries.push(...page.entries);
+    afterRuleId = page.nextCursor;
+  } while (afterRuleId !== undefined);
+  return entries;
+}
+
 test('persists deterministic append-only authorization and post-action audit rows', () => {
   const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-override-')), 'experience.sqlite');
   const store = new OverrideStore(databasePath);
@@ -196,7 +211,7 @@ test('repeated successful overrides retain history and derive contradiction and 
     { ...audit('completed-2', 'override-reused', 'completed', 'succeeded', 'use-2'), override: reusedGrant }
   ];
   for (const entry of history) store.append(entry);
-  const evidence = store.deriveLearningEvidence({ overrideId: 'override-reused' });
+  const evidence = allEvidence(store, 'override-reused');
   assert.deepEqual(evidence, [{
     ruleId: 'rule-a', polarity: 'contradicts',
     successfulOverrideIds: ['override-reused', 'override-reused'],
@@ -205,7 +220,7 @@ test('repeated successful overrides retain history and derive contradiction and 
     revalidationRequired: true
   }]);
   assert.equal(history.length, 4);
-  assert.equal(Object.isFrozen(evidence), true);
+  assert.equal(Object.isFrozen(store.deriveLearningEvidencePage({ overrideId: 'override-reused' }).entries), true);
   store.close();
 });
 
@@ -222,7 +237,7 @@ test('persists two complete uses of the same reusable grant without overwriting 
   assert.deepEqual(rows.map(({ useId, phase }) => [useId, phase]), [
     ['use-1', 'authorized'], ['use-1', 'completed'], ['use-2', 'authorized'], ['use-2', 'completed']
   ]);
-  assert.equal(store.deriveLearningEvidence({ overrideId: 'override-reused' })[0]?.revalidationRequired, true);
+  assert.equal(allEvidence(store, 'override-reused')[0]?.revalidationRequired, true);
   store.close();
 });
 
@@ -417,13 +432,74 @@ test('derives exact evidence across more than 1000 paginated audit rows', () => 
     });
   }
   assert.equal(allAudit(store, grant.id).length, 1_004);
-  assert.deepEqual(store.deriveLearningEvidence({ overrideId: grant.id }), [{
+  assert.deepEqual(allEvidence(store, grant.id), [{
     ruleId: 'rule-a', polarity: 'contradicts',
     successfulOverrideIds: ['long-history', 'long-history'],
     successfulUseIds: ['long-use-000', 'long-use-001'],
     successfulUseCount: 502,
     revalidationRequired: true
   }]);
+  store.close();
+});
+
+test('rejects duplicate rule references and one successful use cannot trigger revalidation', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-override-')), 'experience.sqlite');
+  const store = new OverrideStore(databasePath);
+  const duplicateReferences = [decision.references[0]!, decision.references[0]!];
+  assert.throws(() => store.append({
+    ...audit('duplicate-ref', 'duplicate-ref-override', 'authorized'),
+    decisionReferences: duplicateReferences
+  }), /duplicate decision reference/i);
+
+  store.append(audit('single-auth', 'single-override', 'authorized'));
+  store.append(audit('single-done', 'single-override', 'completed', 'succeeded'));
+  assert.deepEqual(allEvidence(store), []);
+  store.close();
+
+  const database = openExperienceDatabase(databasePath);
+  database.prepare('UPDATE runtime_override_audit SET decision_references_json = ?')
+    .run(JSON.stringify(duplicateReferences));
+  database.close();
+  const reopened = new OverrideStore(databasePath);
+  assert.deepEqual(allEvidence(reopened), []);
+  reopened.close();
+});
+
+test('paginates qualifying rules with stable order while excluding many singleton rules', () => {
+  const store = new OverrideStore(join(mkdtempSync(join(tmpdir(), 'ael-override-')), 'experience.sqlite'));
+  const grant = createRuntimeOverride({
+    id: 'many-rules', scope: { kind: 'action', signature: action.signature }, reason: 'Many-rule evidence.', createdAt: now
+  });
+  const qualifyingCount = MAX_OVERRIDE_EVIDENCE_PAGE_SIZE + 3;
+  const referenceFor = (ruleId: string) => ({
+    ruleId, knowledgeId: `knowledge-${ruleId}`, evidenceIds: [`evidence-${ruleId}`]
+  });
+  for (let index = 0; index < qualifyingCount; index += 1) {
+    const ruleId = `qualifying-${String(index).padStart(3, '0')}`;
+    for (const suffix of ['a', 'b']) {
+      const useId = `${ruleId}-${suffix}`;
+      const refs = [referenceFor(ruleId)];
+      store.append({ ...audit(`auth-${useId}`, grant.id, 'authorized', undefined, useId), override: grant, decisionReferences: refs });
+      store.append({ ...audit(`done-${useId}`, grant.id, 'completed', 'succeeded', useId), override: grant, decisionReferences: refs });
+    }
+  }
+  for (let index = 0; index < 25; index += 1) {
+    const ruleId = `singleton-${String(index).padStart(3, '0')}`;
+    const refs = [referenceFor(ruleId)];
+    store.append({ ...audit(`auth-${ruleId}`, grant.id, 'authorized', undefined, ruleId), override: grant, decisionReferences: refs });
+    store.append({ ...audit(`done-${ruleId}`, grant.id, 'completed', 'succeeded', ruleId), override: grant, decisionReferences: refs });
+  }
+
+  const first = store.deriveLearningEvidencePage({ overrideId: grant.id, limit: MAX_OVERRIDE_EVIDENCE_PAGE_SIZE });
+  const second = store.deriveLearningEvidencePage({ overrideId: grant.id, limit: MAX_OVERRIDE_EVIDENCE_PAGE_SIZE, afterRuleId: first.nextCursor });
+  const combined = [...first.entries, ...second.entries];
+  assert.equal(first.entries.length, MAX_OVERRIDE_EVIDENCE_PAGE_SIZE);
+  assert.equal(second.entries.length, 3);
+  assert.equal(second.nextCursor, undefined);
+  assert.equal(new Set(combined.map(({ ruleId }) => ruleId)).size, qualifyingCount);
+  assert.deepEqual(combined.map(({ ruleId }) => ruleId), Array.from({ length: qualifyingCount }, (_, index) => `qualifying-${String(index).padStart(3, '0')}`));
+  assert.equal(combined.every(({ successfulUseCount }) => successfulUseCount === 2), true);
+  assert.throws(() => store.deriveLearningEvidencePage({ limit: MAX_OVERRIDE_EVIDENCE_PAGE_SIZE + 1 }), /page size/i);
   store.close();
 });
 
