@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -107,6 +108,53 @@ test('rejects raw, private, local identifiers, credentials, and unsanitized evid
   assert.throws(() => writeSharedKnowledge(root(), [{ ...document(), privateReview: 'hidden' } as SharedKnowledgeDocument]), /private review/i);
 });
 
+test('rejects content-hash-valid private or unsanitized Markdown when reading', () => {
+  for (const unsafe of ['Raw transcript: private exchange', 'Private review: hidden notes', 'localDatabaseId: row-17', 'credential sk-abcdefghijklmnopqrstuvwxyz1234']) {
+    const repository = root();
+    writeSharedKnowledge(repository, [document()]);
+    const base = join(repository, 'agent-experience');
+    const markdownPath = join(base, 'knowledge', 'safe-reset.md');
+    const indexPath = join(base, 'index.json');
+    const markdown = readFileSync(markdownPath, 'utf8').replace('A deterministic repository diff showed unrelated edits.', unsafe);
+    writeFileSync(markdownPath, markdown);
+    const index = JSON.parse(readFileSync(indexPath, 'utf8')) as { entries: Array<{ contentHash: string }> };
+    index.entries[0]!.contentHash = createHash('sha256').update(markdown).digest('hex');
+    writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`);
+    assert.throws(() => readSharedKnowledge(repository), /raw|private|local|credential|sanitized/i);
+  }
+
+  const legacy = root();
+  const base = join(legacy, 'agent-experience');
+  mkdirSync(join(base, 'knowledge'), { recursive: true });
+  writeFileSync(join(base, 'index.json'), JSON.stringify({ version: 1, entries: [{ identity: 'legacy', kind: 'convention', state: 'verified', applicability: { tags: [] } }] }));
+  writeFileSync(join(base, 'knowledge', 'legacy.md'), '# Legacy\n\n## Context\n\nRaw transcript: private exchange\n\n## Recommended behavior\n\nKeep compatibility.\n\n## Evidence summary\n\nReviewed evidence.\n');
+  assert.throws(() => readSharedKnowledge(legacy), /raw|sanitized/i);
+});
+
+test('rejects extra, missing, duplicate, out-of-order, unknown, and oversized Markdown sections', () => {
+  const mutations = [
+    (text: string) => `outside\n${text}`,
+    (text: string) => text.replace('## Lesson\n\nDestructive reset can discard unrelated work.\n\n', ''),
+    (text: string) => text.replace('## Lesson', '## Context'),
+    (text: string) => text.replace('## Context', '## Lesson').replace('## Lesson\n\nDestructive', '## Context\n\nDestructive'),
+    (text: string) => text.replace('## Lesson', '## Unknown'),
+    (text: string) => text.replace('A working tree contains unrelated edits.', 'x'.repeat(8193))
+  ];
+  for (const mutate of mutations) {
+    const repository = root();
+    writeSharedKnowledge(repository, [document()]);
+    const base = join(repository, 'agent-experience');
+    const markdownPath = join(base, 'knowledge', 'safe-reset.md');
+    const indexPath = join(base, 'index.json');
+    const markdown = mutate(readFileSync(markdownPath, 'utf8'));
+    writeFileSync(markdownPath, markdown);
+    const index = JSON.parse(readFileSync(indexPath, 'utf8')) as { entries: Array<{ contentHash: string }> };
+    index.entries[0]!.contentHash = createHash('sha256').update(markdown).digest('hex');
+    writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`);
+    assert.throws(() => readSharedKnowledge(repository), /Markdown|content|section/i);
+  }
+});
+
 test('rejects symlinked repository paths without changing their targets', () => {
   const repository = root();
   const external = join(repository, 'external');
@@ -127,6 +175,39 @@ test('keeps the prior complete generation when a replacement is rejected', () =>
 
   assert.deepEqual([readFileSync(index, 'utf8'), readFileSync(markdown, 'utf8')], before);
   assert.deepEqual(readSharedKnowledge(repository), [document()]);
+});
+
+test('serves the prior complete generation during the directory swap and restores it on publication failure', () => {
+  const repository = root();
+  writeSharedKnowledge(repository, [document()]);
+  let duringSwap: SharedKnowledgeDocument[] | undefined;
+
+  assert.throws(() => writeSharedKnowledge(repository, [{ ...document(), lesson: 'replacement' }], {
+    afterCurrentMovedToBackup: () => {
+      duringSwap = readSharedKnowledge(repository);
+      throw new Error('injected publication failure');
+    }
+  }), /injected publication failure/);
+
+  assert.equal(duringSwap?.[0]?.lesson, document().lesson);
+  assert.equal(readSharedKnowledge(repository)[0]?.lesson, document().lesson);
+});
+
+test('recovers an interrupted stable backup and safely cleans a leftover stage before publishing', () => {
+  const repository = root();
+  writeSharedKnowledge(repository, [document()]);
+  const primary = join(repository, 'agent-experience');
+  const backup = join(repository, '.agent-experience-backup');
+  const stage = join(repository, '.agent-experience-stage');
+  renameSync(primary, backup);
+  cpSync(backup, stage, { recursive: true });
+
+  assert.equal(readSharedKnowledge(repository)[0]?.lesson, document().lesson);
+  writeSharedKnowledge(repository, [{ ...document(), lesson: 'recovered replacement' }]);
+
+  assert.equal(readSharedKnowledge(repository)[0]?.lesson, 'recovered replacement');
+  assert.equal(existsSync(backup), false);
+  assert.equal(existsSync(stage), false);
 });
 
 test('keeps superseded knowledge and its replacement linked and inspectable', () => {
