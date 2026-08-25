@@ -81,6 +81,31 @@ test('rejects credentials split across otherwise allowlisted action arguments', 
   if (valid.signature.kind === 'action') assert.deepEqual(valid.signature.arguments, ['--force-with-lease', 'main']);
 });
 
+test('classifies credential-bearing options contextually without leaking their values', () => {
+  const marker = 'classified-secret-value';
+  const base = { event_id: 'event-context-secret', session_id: 'session-1', event_kind: 'pre_action', occurred_at: timestamp, summary: 'Run action.' };
+  const cases = [
+    { tool: 'redis-cli', action: 'connect', arguments: ['-a', marker] },
+    { tool: 'redis-cli', action: 'connect', arguments: [`-a${marker}`] },
+    { tool: 'docker', action: 'login', arguments: ['-p', marker] },
+    { tool: 'docker', action: 'login', arguments: [`-p${marker}`] },
+    { tool: 'gh', action: 'auth', arguments: ['login', '--with-token'] },
+    { tool: 'curl', action: 'request', arguments: ['--cookie', marker] },
+    { tool: 'curl', action: 'request', arguments: [`--cookie=${marker}`] },
+    { tool: 'curl', action: 'request', arguments: [`--CoOkIe=${marker}`] },
+    { tool: 'curl', action: 'request', arguments: ['-b', marker] },
+    { tool: 'curl', action: 'request', arguments: [`-c${marker}`] },
+    { tool: 'curl', action: 'request', arguments: ['-H', `X-API-Key:${marker}`] },
+    { tool: 'git', action: 'config', arguments: [`SESSION_CREDENTIAL=${marker}`] }
+  ];
+  for (const item of cases) {
+    assert.throws(
+      () => adaptCodexCapture({ ...base, ...item }),
+      (error: unknown) => error instanceof Error && /credential|private/i.test(error.message) && !error.message.includes(marker)
+    );
+  }
+});
+
 test('rejects duplicate source-event identities before persistence', () => {
   const event = adaptCodexCapture({ event_id: 'event-1', session_id: 'session-1', event_kind: 'pre_action', occurred_at: timestamp, tool: 'git', action: 'status', summary: 'Inspect status.' });
   assert.throws(() => normalizeCaptureBatch([event, event]), /duplicate source-event/i);

@@ -97,6 +97,34 @@ test('reconciles the complete duplicate event bundle and rejects conflicting sid
   target.close();
 });
 
+test('rejects mixed incremental effect forms before new or duplicate event mutation', () => {
+  const target = store();
+  const session = { id: 'session-1' as SessionId, source: 'codex' as const, startedAt: now };
+  target.appendIncremental({ session, event: preEvent() });
+  const post = event('post-grammar');
+  const candidate = {
+    observation: { id: 'observation-grammar', statement: 'Git push failed.' }, cluster: { id: 'cluster-grammar' },
+    candidate: { id: 'candidate-grammar', kind: 'failure' as const, statement: 'Git push failed.' },
+    evidence: { id: 'candidate-evidence-grammar', polarity: 'confirms' as const, summary: 'Git push failed.' }
+  };
+  const evidence = { id: 'evidence-grammar', candidateId: 'candidate-grammar', polarity: 'confirms' as const, summary: 'Git push failed.' };
+  const evidenceUpdates = [{ evidence, transition: { knowledgeId: 'knowledge-grammar', occurredAt: now } }];
+
+  assert.throws(() => target.appendIncremental({ event: post, candidate, evidence }), /mixed|exclusive|effect form/i);
+  assert.deepEqual(target.listCapturedEventsPage().entries.map(({ sourceEventId }) => sourceEventId), ['pre-1']);
+  assert.equal(target.appendIncremental({ event: post }).inserted, true);
+  for (const mixed of [
+    { candidate, evidenceUpdates },
+    { evidence, evidenceUpdates }
+  ]) {
+    assert.throws(() => target.appendIncremental({ event: post, ...mixed } as never), /mixed|exclusive|effect form/i);
+  }
+  assert.deepEqual(target.listCapturedEventsPage().entries.map(({ sourceEventId }) => sourceEventId), ['pre-1', 'post-grammar']);
+  assert.deepEqual(target.listCandidatesPage().entries, []);
+  assert.deepEqual(target.listEvidencePage().entries, []);
+  target.close();
+});
+
 test('rejects lifecycle side effects for an unknown post-result and rolls back the event', () => {
   const target = store();
   const session = { id: 'session-1' as SessionId, source: 'codex' as const, startedAt: now };

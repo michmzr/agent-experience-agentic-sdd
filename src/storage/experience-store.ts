@@ -322,6 +322,7 @@ export class ExperienceStore {
   appendIncremental(input: IncrementalCaptureAppend): IncrementalAppendResult {
     if (!input || typeof input !== 'object') throw new TypeError('Incremental append must be an object.');
     assertOnlyIncrementalKeys(input as unknown as Record<string, unknown>, ['session', 'event', 'enforcementSnapshot', 'candidate', 'evidence', 'transition', 'evidenceUpdates']);
+    assertIncrementalEffectGrammar(input);
     if (input.session !== undefined) assertIncrementalSession(input.session);
     if (input.candidate !== undefined) assertIncrementalCandidateResources(input.candidate);
     if (input.evidence !== undefined) assertIncrementalEvidenceResources(input.evidence);
@@ -336,8 +337,6 @@ export class ExperienceStore {
     }
     if (input.candidate !== undefined && input.event === undefined) throw new TypeError('Candidate capture requires its source event.');
     if (input.enforcementSnapshot !== undefined && input.event?.phase !== 'pre-action') throw new TypeError('Enforcement snapshot requires its pre-action event.');
-    if (input.transition !== undefined && input.evidence === undefined) throw new TypeError('Knowledge transition requires evidence.');
-    if (input.evidenceUpdates !== undefined && (input.evidence !== undefined || input.transition !== undefined)) throw new TypeError('Incremental evidence forms cannot be mixed.');
 
     this.database.exec('BEGIN IMMEDIATE');
     try {
@@ -1115,6 +1114,18 @@ function assertIncrementalEvidenceResources(evidence: NonNullable<IncrementalCap
 function assertOnlyIncrementalKeys(value: Record<string, unknown>, allowed: readonly string[]): void {
   const unexpected = Object.keys(value).find((key) => !allowed.includes(key));
   if (unexpected !== undefined) throw new TypeError(`Unsupported incremental field: ${unexpected}.`);
+}
+
+function assertIncrementalEffectGrammar(input: IncrementalCaptureAppend): void {
+  const hasCandidate = input.candidate !== undefined;
+  const hasEvidence = input.evidence !== undefined;
+  const hasTransition = input.transition !== undefined;
+  const hasUpdates = input.evidenceUpdates !== undefined;
+  if (hasCandidate && (hasEvidence || hasTransition || hasUpdates)) {
+    throw new TypeError('Incremental candidate effect form is exclusive.');
+  }
+  if (hasUpdates && (hasEvidence || hasTransition)) throw new TypeError('Incremental evidence effect forms cannot be mixed.');
+  if (hasTransition && !hasEvidence) throw new TypeError('Knowledge transition requires its evidence effect form.');
 }
 
 const canonicalIncrementalIdentifier = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,511}$/;

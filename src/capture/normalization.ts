@@ -189,30 +189,55 @@ function stringArray(value: unknown, tool: string, action: string): string[] {
   });
   const joined = arguments_.join(' ');
   assertNoCredentialMaterial(joined, 'arguments');
-  const sensitiveValueFlag = /^--(?:password|passwd|token|access[-_]?token|refresh[-_]?token|oauth2[-_]?bearer|api[-_]?key|access[-_]?key|private[-_]?key|secret|client[-_]?secret|authorization|auth|credential|credentials)(?:[-_](?:file|stdin))?$/i;
-  const sensitiveKey = /^(?:[A-Z][A-Z0-9_]*_)?(?:PASSWORD|PASSWD|TOKEN|KEY|API_KEY|APIKEY|SECRET|CLIENT_SECRET|AUTHORIZATION)$/i;
-  const shortPasswordTool = /^(?:mysql|mariadb)$/.test(tool === 'shell' ? action : tool);
-  const curlTool = (tool === 'shell' ? action : tool) === 'curl';
-  const credentialAssignment = /^(?:[A-Z][A-Z0-9_]*_)?(?:TOKEN|KEY|SECRET|PASSWORD)=.*$/i;
-  if (shortPasswordTool && arguments_.some((argument) => /^-p.+/.test(argument))) {
-    throw new TypeError('Capture arguments contain credential-like or private material.');
-  }
-  if (arguments_.some((argument) => credentialAssignment.test(argument)
-    || /authorization(?::|=)/i.test(argument)
-    || /^(?:-H|--header=?)authorization:/i.test(argument)
-    || (curlTool && (/^-u.+/.test(argument) || /^--(?:user|proxy-user)=.+/i.test(argument))))) {
-    throw new TypeError('Capture arguments contain credential-like or private material.');
-  }
-  for (let index = 0; index < arguments_.length - 1; index += 1) {
+  assertArgumentsClassifiedSafe(arguments_, tool, action);
+  return arguments_;
+}
+
+const sensitiveNameFragments = [
+  'authorization', 'credential', 'password', 'userinfo', 'passwd', 'cookie', 'session', 'secret', 'token', 'auth', 'key'
+] as const;
+
+function assertArgumentsClassifiedSafe(arguments_: readonly string[], tool: string, action: string): void {
+  for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index]!;
-    if (sensitiveValueFlag.test(argument) || sensitiveKey.test(argument)
-      || (argument === '-p' && shortPasswordTool)
-      || (curlTool && /^(?:-u|--user|--proxy-user)$/i.test(argument))
-      || (/^(?:-H|--header)$/i.test(argument) && /^authorization(?::|=)/i.test(arguments_[index + 1]!))) {
-      throw new TypeError('Capture arguments contain credential-like or private material.');
+    if (argument.startsWith('--') && sensitiveName(argument.slice(2).split('=', 1)[0]!)) rejectClassifiedArguments();
+    if (/^[A-Za-z][A-Za-z0-9_]*$/.test(argument) && sensitiveName(argument) && arguments_[index + 1] !== undefined) rejectClassifiedArguments();
+    const equals = argument.indexOf('=');
+    if (equals > 0 && sensitiveName(argument.slice(0, equals).replace(/^-+/, ''))) rejectClassifiedArguments();
+    if (sensitiveHeaderName(argument)) rejectClassifiedArguments();
+    if (/^(?:-H|--header)$/i.test(argument) && arguments_[index + 1] !== undefined && sensitiveHeaderName(arguments_[index + 1]!)) {
+      rejectClassifiedArguments();
     }
   }
-  return arguments_;
+
+  const command = tool === 'shell' ? action : tool;
+  const subcommand = tool === 'shell' ? arguments_[0]?.toLowerCase() : action;
+  const sensitiveShortOptions = command === 'redis-cli' ? ['-a']
+    : command === 'curl' ? ['-u', '-b', '-c']
+      : /^(?:mysql|mariadb)$/.test(command) ? ['-p']
+        : command === 'docker' && subcommand === 'login' ? ['-p']
+          : [];
+  if (arguments_.some((argument) => sensitiveShortOptions.some((option) => argument === option || argument.startsWith(option)))) {
+    rejectClassifiedArguments();
+  }
+  if (command === 'curl' && arguments_.some((argument) => /^(?:--user|--proxy-user)(?:=|$)/i.test(argument))) rejectClassifiedArguments();
+}
+
+function sensitiveName(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  return sensitiveNameFragments.some((fragment) => normalized.includes(fragment));
+}
+
+function sensitiveHeaderName(value: string): boolean {
+  const colon = value.indexOf(':');
+  if (colon < 0) return false;
+  const prefix = value.slice(0, colon);
+  const name = prefix.slice(Math.max(prefix.lastIndexOf('='), prefix.lastIndexOf('/')) + 1).replace(/^(?:-H|--header=?)/i, '');
+  return sensitiveName(name);
+}
+
+function rejectClassifiedArguments(): never {
+  throw new TypeError('Capture arguments contain credential-like or private material.');
 }
 
 function optionalExitStatus(value: unknown): number | undefined {
