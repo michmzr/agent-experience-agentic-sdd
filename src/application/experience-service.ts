@@ -102,6 +102,10 @@ export class ExperienceService {
     return this.runtime.validateKnowledge(repository, trustedRef);
   }
 
+  knowledgeRefreshRuntime(repository: string, repositoryId: string, trustedRef: string) {
+    return this.runtime.refreshKnowledgeRuntime(repository, repositoryId, trustedRef);
+  }
+
   knowledgePromote(repository: string, inputPath: string) {
     return this.runtime.promoteKnowledge(repository, inputPath);
   }

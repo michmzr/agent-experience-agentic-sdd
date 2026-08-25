@@ -231,6 +231,48 @@ test('activates repository knowledge only from an explicit trusted local Git ref
   assert.equal(trusted.exitCode, 0);
 }));
 
+test('refreshes a durable repository runtime snapshot only from explicit structured trusted knowledge', () => withDirectory((directory) => {
+  const repository = join(directory, 'repository');
+  const input = join(directory, 'knowledge.json');
+  const runtimeInput = join(directory, 'runtime-input.json');
+  mkdirSync(repository);
+  writeFileSync(input, JSON.stringify({
+    identity: 'no-force-push', repositoryScope: 'repository:one', kind: 'project-fact', state: 'verified',
+    applicability: { paths: [], tags: [], tools: ['git'] }, instructionOrigin: 'code-tool-confirmed', supersedes: [],
+    title: 'Trusted Git safety rule', context: 'Force push is restricted.', lesson: 'Do not force push.',
+    recommendedBehavior: 'Stop force pushes.', evidenceSummary: 'Verified by repository tests.',
+    evidence: [{ kind: 'code-or-tool', summary: 'Repository tests passed.', deterministic: true }],
+    runtimeDirective: {
+      effect: 'conflict',
+      signature: { kind: 'action', tool: 'git', action: 'push', arguments: ['--force'] }
+    }
+  }));
+  writeFileSync(runtimeInput, JSON.stringify({ ...action, repositoryId: 'one' }));
+  assert.equal(runCli(['knowledge', 'promote', '--repository', repository, '--input', input, '--data-dir', directory]).exitCode, 0);
+  execFileSync('git', ['init'], { cwd: repository });
+  execFileSync('git', ['config', 'user.email', 'test@example.test'], { cwd: repository });
+  execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repository });
+  execFileSync('git', ['add', 'agent-experience'], { cwd: repository });
+  execFileSync('git', ['commit', '-m', 'add trusted runtime knowledge'], { cwd: repository });
+
+  const refreshed = runCli([
+    'knowledge', 'refresh-runtime', '--repository', repository, '--repository-id', 'one',
+    '--trusted-ref', 'HEAD', '--json', '--data-dir', directory
+  ]);
+  assert.equal(refreshed.exitCode, 0);
+  assert.equal(JSON.parse(refreshed.stdout).rules, 1);
+
+  const restarted = runCli(['runtime', 'evaluate', '--input', runtimeInput, '--json', '--data-dir', directory]);
+  assert.equal(restarted.exitCode, 1);
+  assert.equal(JSON.parse(restarted.stdout).outcome, 'BLOCK');
+  assert.deepEqual(JSON.parse(restarted.stdout).references, [{
+    ruleId: 'shared:no-force-push', knowledgeId: 'no-force-push', evidenceIds: []
+  }]);
+
+  writeFileSync(runtimeInput, JSON.stringify({ ...action, repositoryId: 'two' }));
+  assert.equal(JSON.parse(runCli(['runtime', 'evaluate', '--input', runtimeInput, '--json', '--data-dir', directory]).stdout).outcome, 'ALLOW');
+}));
+
 test('preflights trusted Git blob sizes and path counts before reading content', () => withDirectory((directory) => {
   const repository = join(directory, 'repository');
   mkdirSync(repository);

@@ -101,6 +101,14 @@ function execute(service: ExperienceService, parsed: ParsedArguments): unknown {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository', 'trusted-ref']);
     return service.knowledgeValidate(requiredString(parsed.options, 'repository'), optionalString(parsed.options, 'trusted-ref'));
   }
+  if (command === 'knowledge' && subcommand === 'refresh-runtime' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository', 'repository-id', 'trusted-ref']);
+    return service.knowledgeRefreshRuntime(
+      requiredString(parsed.options, 'repository'),
+      requiredString(parsed.options, 'repository-id'),
+      requiredString(parsed.options, 'trusted-ref')
+    );
+  }
   if (command === 'knowledge' && subcommand === 'promote' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'input', 'json', 'repository']);
     return service.knowledgePromote(requiredString(parsed.options, 'repository'), requiredString(parsed.options, 'input'));
@@ -213,6 +221,10 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
     const result = value as { entries: number; trustedRefActive: boolean };
     return `Validated ${countLabel(result.entries, 'knowledge entry')}; trusted-ref activation ${result.trustedRefActive ? 'active' : 'inactive'}.`;
   }
+  if (command === 'knowledge' && subcommand === 'refresh-runtime') {
+    const result = value as { rules: number; trustedCommit: string };
+    return `Refreshed ${countLabel(result.rules, 'runtime rule')} from trusted commit ${result.trustedCommit}.`;
+  }
   return JSON.stringify(value);
 }
 interface KnowledgeRecord { readonly id: string; readonly state: string; readonly statement: string; readonly evidenceIds: readonly string[]; readonly authoritative?: boolean; }
@@ -247,7 +259,7 @@ function invalidCommand(command: string | undefined): SyntaxError {
     ? `Unknown command form for ${command}.`
     : 'Unknown command.');
 }
-function usage(): string { return 'Usage: ael <init|experience add|validate|inspect|lessons list|retrieve|export|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge promote> [options]'; }
+function usage(): string { return 'Usage: ael <init|experience add|validate|inspect|lessons list|retrieve|export|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote> [options]'; }
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } {
   return error instanceof DomainError || error instanceof RuntimeServiceError
     ? { code: error.code, message: error.message }

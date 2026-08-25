@@ -57,6 +57,20 @@ test('promotion writes local review files and rejects asserted merge activation'
   assert.equal(promoted.activation, 'local');
 });
 
+test('promotion preserves a validated structured runtime directive without deriving one from prose', () => {
+  const repository = mkdtempSync(join(tmpdir(), 'ael-promotion-'));
+  const directive = {
+    effect: 'conflict' as const,
+    signature: { kind: 'action' as const, tool: 'git', action: 'push', arguments: ['--force'] }
+  };
+  promoteKnowledge(repository, candidate({ runtimeDirective: directive }));
+  promoteKnowledge(repository, candidate({ identity: 'prose-only', lesson: 'Never run git push --force.' }));
+
+  const entries = readSharedKnowledge(repository);
+  assert.deepEqual(entries.find(({ identity }) => identity === 'fact')?.runtimeDirective, directive);
+  assert.equal(entries.find(({ identity }) => identity === 'prose-only')?.runtimeDirective, undefined);
+});
+
 test('promotion upserts without removing existing branch-local review files', () => {
   const repository = mkdtempSync(join(tmpdir(), 'ael-promotion-'));
   promoteKnowledge(repository, candidate({ identity: 'first' }));

@@ -176,6 +176,7 @@ function parseV3Entry(value: unknown): KnowledgeIndexEntryV3 {
   }
   const base = parseV2Entry(Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'runtimeDirective')));
   const runtimeDirective = value.runtimeDirective === undefined ? undefined : parseRuntimeDirective(value.runtimeDirective);
+  assertCanonicalV3Applicability(base.applicability, runtimeDirective);
   return runtimeDirective === undefined ? base : { ...base, runtimeDirective };
 }
 
@@ -221,7 +222,8 @@ function parseDirectiveSignature(value: unknown): RuntimeSignature {
 }
 
 function canonicalDirectiveToken(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= MAX_INDEX_STRING_LENGTH && value === value.trim();
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_INDEX_STRING_LENGTH
+    && value === value.trim() && value === value.toLowerCase();
 }
 
 function canonicalDirectiveArgument(value: unknown): value is string {
@@ -232,6 +234,31 @@ function canonicalDirectivePath(value: unknown): value is string {
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_INDEX_STRING_LENGTH) return false;
   try { return normalizeRuntimePath(value) === value; }
   catch { return false; }
+}
+
+function assertCanonicalV3Applicability(applicability: KnowledgeApplicability, directive?: RuntimeDirective): void {
+  for (const values of [applicability.paths, applicability.tags, applicability.tools]) {
+    if (values.some((value) => typeof value !== 'string' || value.length === 0 || value.length > MAX_INDEX_STRING_LENGTH || value !== value.trim())) {
+      throw new Error('Version 3 applicability values must be canonical bounded strings.');
+    }
+    if (new Set(values).size !== values.length || !values.every((value, index) => index === 0 || compare(values[index - 1]!, value) < 0)) {
+      throw new Error('Version 3 applicability arrays must be unique and sorted.');
+    }
+  }
+  if (applicability.tags.some((value) => value !== value.toLowerCase())
+    || applicability.tools.some((value) => value !== value.toLowerCase())) {
+    throw new Error('Version 3 applicability tokens must be canonical lowercase values.');
+  }
+  if (directive === undefined) return;
+  const signatureTool = directive.signature.tool;
+  if (applicability.tools.length > 0
+    && (applicability.tools.length !== 1 || signatureTool === undefined || applicability.tools[0] !== signatureTool)) {
+    throw new Error('Runtime directive tool does not match structured applicability.');
+  }
+  if (applicability.paths.length > 0
+    && (applicability.paths.length !== 1 || directive.signature.path === undefined || applicability.paths[0] !== directive.signature.path)) {
+    throw new Error('Runtime directive path does not match structured applicability.');
+  }
 }
 
 function parseV1Entry(value: unknown): KnowledgeIndexEntryV1 {

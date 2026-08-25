@@ -22,7 +22,6 @@ import { applyRuntimeOverride, createRuntimeOverride, type OverrideAuditEntry } 
 import { ResilientRuntime, RuntimeSnapshotUnavailableError } from '../src/runtime/resilience.js';
 import { createRuleIndex } from '../src/runtime/rule-index.js';
 import { compileRuntimeSnapshot, serializeRuntimeSnapshot } from '../src/runtime/snapshot.js';
-import { activateGitKnowledge } from '../src/shared-knowledge/git-activation.js';
 import { evaluatePromotion } from '../src/shared-knowledge/promotion-policy.js';
 import { writeSharedKnowledge, type SharedKnowledgeDocument } from '../src/shared-knowledge/repository.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
@@ -154,10 +153,14 @@ test('rejects task-specific promotion and reuses trusted merged knowledge throug
   initializeGitRepository(repository);
   const document: SharedKnowledgeDocument = {
     identity: 'merged-invalid-command', repositoryScope: 'repository:repo-acceptance', kind: 'failure', state: 'verified',
-    applicability: { paths: [], tags: ['destructive'], tools: ['git'] },
+    applicability: { paths: [], tags: [], tools: ['git'] },
     instructionOrigin: 'code-tool-confirmed', supersedes: [], title: 'Avoid destructive reset', context: 'Repository command execution.',
     lesson: 'A destructive reset removed required work.', recommendedBehavior: 'Use a non-destructive inspection first.', evidenceSummary: 'Confirmed by local Git state.',
-    evidence: [{ kind: 'code-or-tool', summary: 'Local Git confirmed the loss.', deterministic: true }]
+    evidence: [{ kind: 'code-or-tool', summary: 'Local Git confirmed the loss.', deterministic: true }],
+    runtimeDirective: {
+      effect: 'conflict',
+      signature: { kind: 'action', tool: 'git', action: 'reset', arguments: ['--hard'] }
+    }
   };
   const taskSpecific = { ...document, identity: 'task-only', instructionOrigin: 'task-specific-constraint' as const };
   assert.equal(evaluatePromotion(taskSpecific).eligible, false);
@@ -165,27 +168,35 @@ test('rejects task-specific promotion and reuses trusted merged knowledge throug
   writeSharedKnowledge(repository, [document], { stateRoot: join(privateState, 'publication') });
   execFileSync('git', ['-C', repository, 'add', 'agent-experience']);
   execFileSync('git', ['-C', repository, 'commit', '--quiet', '-m', 'merge knowledge']);
-  const activated = activateGitKnowledge(repository, createLocalGitContentAdapter(repository), 'HEAD', {
-    stateRoot: join(privateState, 'activation')
-  });
-  assert.equal(activated.entries[0]?.authoritative, true);
 
   const records = [
-    adaptCodexCapture({ event_id: 'codex-merged', session_id: 'session-merged', event_kind: 'pre_action', occurred_at: now, tool: 'git', action: 'reset', arguments: ['--hard'], cwd: '/workspace/repo', summary: 'Run reset.' }),
-    adaptClaudeCodeCapture({ eventId: 'claude-merged', sessionId: 'session-merged', kind: 'PreToolUse', timestamp: now, toolName: 'git', actionName: 'reset', args: ['--hard'], workingDirectory: '/workspace/repo', summary: 'Run reset.' }),
-    adaptCursorCapture({ id: 'cursor-merged', session: 'session-merged', event: 'before-action', timestamp: now, tool: 'git', action: 'reset', arguments: ['--hard'], workspacePath: '/workspace/repo', summary: 'Run reset.' })
+    adaptCodexCapture({ event_id: 'codex-merged', session_id: 'session-merged', event_kind: 'pre_action', occurred_at: now, tool: 'git', action: 'reset', arguments: ['--hard'], summary: 'Run reset.' }),
+    adaptClaudeCodeCapture({ eventId: 'claude-merged', sessionId: 'session-merged', kind: 'PreToolUse', timestamp: now, toolName: 'git', actionName: 'reset', args: ['--hard'], summary: 'Run reset.' }),
+    adaptCursorCapture({ id: 'cursor-merged', session: 'session-merged', event: 'before-action', timestamp: now, tool: 'git', action: 'reset', arguments: ['--hard'], summary: 'Run reset.' })
   ];
-  const mergedRule: RuntimeRule = {
-    id: 'merged-invalid-command', state: activated.entries[0]!.document.state, authoritative: activated.entries[0]!.authoritative,
-    effect: 'conflict', signature: records[0]!.signature,
-    applicability: { scope: 'repository', repositoryId: 'repo-acceptance' },
-    reference: { knowledgeId: activated.entries[0]!.document.identity, evidenceIds: ['merged-evidence'] }
+  const dataDir = join(privateState, 'runtime');
+  const service = new RuntimeService({ dataDir, clock: () => new Date(now) });
+  const refreshed = service.refreshKnowledgeRuntime(repository, 'repo-acceptance', 'HEAD');
+  assert.equal(refreshed.rules, 1);
+
+  const localOnly: SharedKnowledgeDocument = {
+    ...document,
+    identity: 'untrusted-local-rule',
+    runtimeDirective: { effect: 'conflict', signature: { kind: 'action', tool: 'git', action: 'clean', arguments: ['-fd'] } }
   };
-  for (const record of records) {
-    const decision = gateDecision(inputForSignature(record.signature), [mergedRule]);
+  writeSharedKnowledge(repository, [document, localOnly], { stateRoot: join(privateState, 'local-change') });
+  assert.equal(service.refreshKnowledgeRuntime(repository, 'repo-acceptance', 'HEAD').rules, 1);
+
+  for (const [index, record] of records.entries()) {
+    const inputPath = writeInput(privateState, `adapter-${index}.json`, inputForSignature(record.signature));
+    const decision = new RuntimeService({ dataDir, clock: () => new Date(now) }).evaluate({ inputPath });
     assert.equal(decision.outcome, 'BLOCK');
     assert.deepEqual(decision.references.map(({ knowledgeId }) => knowledgeId), ['merged-invalid-command']);
   }
+  const otherRepositoryInput = writeInput(privateState, 'other-repository.json', {
+    ...inputForSignature(records[0]!.signature), repositoryId: 'other-repository'
+  });
+  assert.equal(new RuntimeService({ dataDir, clock: () => new Date(now) }).evaluate({ inputPath: otherRepositoryInput }).outcome, 'ALLOW');
 });
 
 test('retained services use memory while process restarts fall back to the last-known-good generation', () => {

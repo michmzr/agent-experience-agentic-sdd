@@ -17,6 +17,7 @@ import { compileRuntimeSnapshot, RuntimeSnapshotValidationError, type RuntimeSna
 import { activateGitKnowledge, type GitContentAdapter } from '../shared-knowledge/git-activation.js';
 import { promoteKnowledge } from '../shared-knowledge/promotion-policy.js';
 import type { SharedKnowledgeDocument } from '../shared-knowledge/repository.js';
+import { compileActivatedRuntimeRules } from '../shared-knowledge/runtime-compiler.js';
 import { RuntimeSnapshotStore, RuntimeSnapshotStorageError, type RuntimeSnapshotPaths } from '../storage/runtime-snapshot-store.js';
 
 const MAX_INPUT_BYTES = 1024 * 1024;
@@ -81,6 +82,13 @@ export interface KnowledgeValidationResult {
   readonly entries: number;
   readonly authoritativeEntries: number;
   readonly trustedRefActive: boolean;
+}
+
+export interface KnowledgeRuntimeRefreshResult {
+  readonly repositoryId: string;
+  readonly trustedCommit: string;
+  readonly rules: number;
+  readonly checksum: string;
 }
 
 export class RuntimeServiceError extends Error {
@@ -240,6 +248,50 @@ export class RuntimeService {
       };
     } catch {
       throw new RuntimeServiceError('KNOWLEDGE_VALIDATION_FAILED', 'Repository knowledge validation failed.');
+    }
+  }
+
+  refreshKnowledgeRuntime(repository: string, repositoryId: string, trustedRef: string): KnowledgeRuntimeRefreshResult {
+    try {
+      const activated = activateGitKnowledge(repository, this.#gitAdapter(repository), trustedRef, { stateRoot: this.#knowledgeStateRoot });
+      if (activated.trustedCommit === undefined) throw new TypeError('Trusted knowledge commit is required.');
+      const rules = compileActivatedRuntimeRules({
+        repositoryId,
+        trustedCommit: activated.trustedCommit,
+        entries: activated.entries
+      });
+      const snapshot = compileRuntimeSnapshot({
+        repositoryId,
+        generatedAt: this.#clock().toISOString(),
+        repositoryRules: rules.filter(({ effect }) => effect === 'conflict'),
+        contextRules: rules.filter(({ effect }) => effect === 'context')
+      });
+      const target = runtimeTarget(repositoryId);
+      this.#touchTarget(target);
+      const store = this.#storeFor(target);
+      this.#migrateLegacySnapshot(target, store);
+      const snapshotAbsent = !existsSync(store.paths.manifest);
+      const current = this.#optionalCurrent(store);
+      if (current !== undefined && current.repositoryId !== target.snapshotRepositoryId) {
+        throw new TypeError('Runtime snapshot target identity is invalid.');
+      }
+      const published = current === undefined && !snapshotAbsent && store.recover !== undefined
+        ? store.recover(snapshot, target.snapshotRepositoryId)
+        : store.publish(snapshot);
+      const profile = BUILT_IN_RUNTIME_PROFILES.normal;
+      this.#snapshotsByTarget.set(target.hash, published);
+      this.#replaceTargetRuntimes(target, profile, store, createRuleIndex(published), published.checksum);
+      this.#activeRuntimeKey = runtimeKey(profile.id, target.hash);
+      this.#activeTarget = target;
+      this.#recordActiveTarget(target);
+      return {
+        repositoryId,
+        trustedCommit: activated.trustedCommit,
+        rules: published.rules.length,
+        checksum: published.checksum
+      };
+    } catch {
+      throw new RuntimeServiceError('KNOWLEDGE_RUNTIME_REFRESH_FAILED', 'Repository runtime knowledge refresh failed.');
     }
   }
 
