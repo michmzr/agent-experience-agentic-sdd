@@ -18,11 +18,19 @@ function doc(identity: string, lesson: string): SharedKnowledgeDocument {
 function adapter(repository: string): GitContentAdapter {
   return {
     resolveCommit: (ref) => execFileSync('git', ['-C', repository, 'rev-parse', '--verify', `${ref}^{commit}`], { encoding: 'utf8' }).trim(),
-    readFile: (commit, path) => {
-      try { return execFileSync('git', ['-C', repository, 'show', `${commit}:${path}`], { encoding: 'utf8' }); }
+    readFile: (commit, path, maxBytes) => {
+      try {
+        const content = execFileSync('git', ['-C', repository, 'show', `${commit}:${path}`], { encoding: 'utf8' });
+        if (Buffer.byteLength(content, 'utf8') > maxBytes) throw new Error('Git content limit exceeded.');
+        return content;
+      }
       catch { return undefined; }
     },
-    listFiles: (commit, prefix) => execFileSync('git', ['-C', repository, 'ls-tree', '-r', '--name-only', commit, '--', prefix], { encoding: 'utf8' }).trim().split('\n').filter(Boolean)
+    listFiles: (commit, prefix, maxPaths) => {
+      const paths = execFileSync('git', ['-C', repository, 'ls-tree', '-r', '--name-only', commit, '--', prefix], { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+      if (paths.length > maxPaths) throw new Error('Git path limit exceeded.');
+      return paths;
+    }
   };
 }
 

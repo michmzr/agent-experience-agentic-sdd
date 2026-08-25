@@ -2,8 +2,8 @@ import { readSharedKnowledge, readSharedKnowledgeContent, type KnowledgeContentS
 
 export interface GitContentAdapter {
   readonly resolveCommit: (trustedRef: string) => string;
-  readonly readFile: (commit: string, path: string, maxBytes?: number) => string | undefined;
-  readonly listFiles: (commit: string, prefix: string) => readonly string[];
+  readonly readFile: (commit: string, path: string, maxBytes: number) => string | undefined;
+  readonly listFiles: (commit: string, prefix: string, maxPaths: number) => readonly string[];
 }
 
 export interface ActivatedKnowledgeEntry {
@@ -28,8 +28,8 @@ export function activateGitKnowledge(repositoryRoot: string, git: GitContentAdap
   const trustedCommit = git.resolveCommit(trustedRef);
   if (!/^[a-f0-9]{40,64}$/i.test(trustedCommit)) throw new Error('Trusted Git ref did not resolve to a commit identity.');
   const source: KnowledgeContentSource = {
-    readFile: (path, maxBytes) => git.readFile(trustedCommit, `agent-experience/${path}`, maxBytes),
-    listFiles: (prefix) => git.listFiles(trustedCommit, `agent-experience/${prefix}`)
+    readFile: (path, maxBytes) => git.readFile(trustedCommit, `agent-experience/${path}`, maxBytes ?? 1_048_576),
+    listFiles: (prefix) => git.listFiles(trustedCommit, `agent-experience/${prefix}`, 1_002)
       .map((path) => path.startsWith('agent-experience/') ? path.slice('agent-experience/'.length) : path)
   };
   const trusted = readSharedKnowledgeContent(source);

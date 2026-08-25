@@ -1,10 +1,16 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import type { ExperienceImport, KnowledgeEntry, KnowledgeState } from '../domain/types.js';
 import { validateImport } from '../domain/validation.js';
 import { defaultDatabasePath } from '../storage/database.js';
 import { ExperienceStore, type KnowledgeScope, type RetrievalFilter, type RetrievedKnowledgeEntry } from '../storage/experience-store.js';
+import {
+  RuntimeService,
+  type BuiltInRuntimeProfileId,
+  type KnowledgeValidationResult,
+  type PublicGateDecision
+} from './runtime-service.js';
 
 export interface LessonFilter {
   readonly scope?: KnowledgeScope;
@@ -19,9 +25,11 @@ export interface ExperienceServiceOptions {
 
 export class ExperienceService {
   private readonly databasePath: string;
+  private readonly runtime: RuntimeService;
 
   constructor(options: ExperienceServiceOptions = {}) {
     this.databasePath = options.dataDir ? join(options.dataDir, 'experience.sqlite') : defaultDatabasePath();
+    this.runtime = new RuntimeService({ dataDir: options.dataDir ?? dirname(this.databasePath) });
   }
 
   init(): { databasePath: string } {
@@ -78,6 +86,24 @@ export class ExperienceService {
 
   export(filter: LessonFilter = {}): { knowledge: RetrievedKnowledgeEntry[] } {
     return { knowledge: this.list(filter) };
+  }
+
+  runtimeEvaluate(inputPath: string, profileId?: BuiltInRuntimeProfileId, refresh = false): PublicGateDecision {
+    return this.runtime.evaluate({ inputPath, ...(profileId === undefined ? {} : { profileId }), refresh });
+  }
+
+  runtimeStatus() { return this.runtime.status(); }
+
+  runtimeConfigExplain(workspace: string, remote?: string) {
+    return this.runtime.explainConfiguration(workspace, remote);
+  }
+
+  knowledgeValidate(repository: string, trustedRef?: string): KnowledgeValidationResult {
+    return this.runtime.validateKnowledge(repository, trustedRef);
+  }
+
+  knowledgePromote(repository: string, inputPath: string) {
+    return this.runtime.promoteKnowledge(repository, inputPath);
   }
 
   private openStore(): ExperienceStore {

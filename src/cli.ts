@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { basename } from 'node:path';
 
 import { DomainError, errorMessage, ExperienceService } from './application/experience-service.js';
+import { isBuiltInRuntimeProfileId, RuntimeServiceError, type BuiltInRuntimeProfileId } from './application/runtime-service.js';
 import type { KnowledgeState } from './domain/types.js';
 import type { KnowledgeScope } from './storage/experience-store.js';
 import { discoverReviewSessions, runManualReview, type ManualReviewDependencies } from './review/review-service.js';
@@ -84,6 +85,25 @@ function execute(service: ExperienceService, parsed: ParsedArguments): unknown {
     const format = optionalString(parsed.options, 'format'); if (format && format !== 'json') throw new SyntaxError('Export format must be json.');
     return service.export(filterOptions(parsed.options));
   }
+  if (command === 'runtime' && subcommand === 'evaluate' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'input', 'json', 'profile', 'refresh']);
+    return service.runtimeEvaluate(requiredString(parsed.options, 'input'), optionalRuntimeProfile(parsed.options), parsed.options.has('refresh'));
+  }
+  if (command === 'runtime' && subcommand === 'status' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json']); return service.runtimeStatus();
+  }
+  if (command === 'runtime' && subcommand === 'config' && rest.length === 1 && rest[0] === 'explain') {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'remote', 'workspace']);
+    return service.runtimeConfigExplain(requiredString(parsed.options, 'workspace'), optionalString(parsed.options, 'remote'));
+  }
+  if (command === 'knowledge' && subcommand === 'validate' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository', 'trusted-ref']);
+    return service.knowledgeValidate(requiredString(parsed.options, 'repository'), optionalString(parsed.options, 'trusted-ref'));
+  }
+  if (command === 'knowledge' && subcommand === 'promote' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'input', 'json', 'repository']);
+    return service.knowledgePromote(requiredString(parsed.options, 'repository'), requiredString(parsed.options, 'input'));
+  }
   throw new SyntaxError(`Unknown command: ${[command, subcommand, ...rest].filter(Boolean).join(' ')}`);
 }
 
@@ -113,7 +133,7 @@ function parseArguments(args: readonly string[]): ParsedArguments {
     if (!value.startsWith('--')) { positionals.push(value); continue; }
     const name = value.slice(2); if (!name) throw new SyntaxError('Option name is required.');
     if (options.has(name)) throw new SyntaxError(`Option may be supplied once: --${name}.`);
-    if (name === 'json' || name === 'interactive' || name === 'allow-expensive-checks') { options.set(name, true); continue; }
+    if (name === 'json' || name === 'interactive' || name === 'allow-expensive-checks' || name === 'refresh') { options.set(name, true); continue; }
     const optionValue = args[index + 1]; if (!optionValue || optionValue.startsWith('--')) throw new SyntaxError(`Option requires a value: --${name}.`);
     options.set(name, optionValue); index += 1;
   }
@@ -143,6 +163,12 @@ function optionalReviewProfile(options: Map<string, string | true>): { id: strin
   if (!id || !version || extra.length !== 0) throw new SyntaxError('Profile must be specified as id@version.');
   return { id, version };
 }
+function optionalRuntimeProfile(options: Map<string, string | true>): BuiltInRuntimeProfileId | undefined {
+  const value = optionalString(options, 'profile');
+  if (value === undefined) return undefined;
+  if (!isBuiltInRuntimeProfileId(value)) throw new SyntaxError('Runtime profile must be normal, learning, or observe-only.');
+  return value;
+}
 function optionalScope(options: Map<string, string | true>): KnowledgeScope | undefined {
   const scope = optionalString(options, 'scope'); if (scope === undefined) return undefined; if (!scopes.has(scope as typeof scopes extends Set<infer Value> ? Value : never)) throw new SyntaxError('Scope must be global or repo.'); return scope === 'repo' ? 'repository' : 'global';
 }
@@ -152,7 +178,10 @@ function optionalState(options: Map<string, string | true>): KnowledgeState | un
 function filterOptions(options: Map<string, string | true>) {
   return { scope: optionalScope(options), repositoryId: optionalString(options, 'repository-id'), state: optionalState(options), tag: optionalString(options, 'tag') };
 }
-function success(value: unknown, json: boolean, positionals: readonly string[]): CliResult { return json ? { exitCode: 0, stdout: `${JSON.stringify(value)}\n`, stderr: '' } : { exitCode: 0, stdout: `${humanOutput(value, positionals)}\n`, stderr: '' }; }
+function success(value: unknown, json: boolean, positionals: readonly string[]): CliResult {
+  const exitCode = positionals[0] === 'runtime' && positionals[1] === 'evaluate' && (value as { outcome?: string }).outcome === 'BLOCK' ? 1 : 0;
+  return json ? { exitCode, stdout: `${JSON.stringify(value)}\n`, stderr: '' } : { exitCode, stdout: `${humanOutput(value, positionals)}\n`, stderr: '' };
+}
 function humanOutput(value: unknown, positionals: readonly string[]): string {
   const [command, subcommand] = positionals;
   if (command === 'init') return `Initialized local experience store at ${(value as { databasePath: string }).databasePath}.`;
@@ -169,14 +198,32 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
     return `Review completed: ${review.findings.length} finding groups, ${review.candidates.length} candidates, ${review.proposals.length} proposals.${review.skippedReviewerIds.length ? ` Skipped reviewers: ${review.skippedReviewerIds.join(', ')}.` : ''}`;
   }
   if (command === 'review' && subcommand === 'sessions') return (value as readonly { id: string }[]).map(({ id }) => id).join('\n') || 'No sessions found.';
+  if (command === 'runtime' && subcommand === 'evaluate') {
+    const decision = value as { outcome: string; explanations: readonly unknown[]; status: { health: string; fallbackSource: string } };
+    return `${decision.outcome}: ${countLabel(decision.explanations.length, 'matching rule')}. Runtime ${decision.status.health} (${decision.status.fallbackSource}).`;
+  }
+  if (command === 'runtime' && subcommand === 'status') {
+    const status = value as { health: string; profileId: string; fallbackSource: string; circuitState: string };
+    return `Runtime ${status.health}; profile ${status.profileId}; fallback ${status.fallbackSource}; circuit ${status.circuitState}.`;
+  }
+  if (command === 'runtime' && subcommand === 'config') return `Runtime profile ${(value as { profile: { id: string } }).profile.id}.`;
+  if (command === 'knowledge' && subcommand === 'promote') return `Promoted ${(value as { identity: string }).identity} as branch-local knowledge.`;
+  if (command === 'knowledge' && subcommand === 'validate') {
+    const result = value as { entries: number; trustedRefActive: boolean };
+    return `Validated ${countLabel(result.entries, 'knowledge entry')}; trusted-ref activation ${result.trustedRefActive ? 'active' : 'inactive'}.`;
+  }
   return JSON.stringify(value);
 }
 interface KnowledgeRecord { readonly id: string; readonly state: string; readonly statement: string; readonly evidenceIds: readonly string[]; readonly authoritative?: boolean; }
 function formatKnowledgeList(entries: readonly KnowledgeRecord[]): string { return entries.length ? entries.map((entry) => formatKnowledge(entry, false)).join('\n') : 'No knowledge entries found.'; }
 function formatKnowledge(entry: KnowledgeRecord, includeEvidence: boolean): string { return `${entry.id} [${entry.state}]${entry.authoritative ? ' [authoritative]' : ''}\n${entry.statement}${includeEvidence ? `\nEvidence: ${entry.evidenceIds.join(', ')}` : ''}`; }
 function countLabel(count: number, singular: string): string { return `${count} ${count === 1 ? singular : `${singular}s`}`; }
-function usage(): string { return 'Usage: ael <init|experience add|validate|inspect|lessons list|retrieve|export|review session> [options]'; }
-function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } { return error instanceof DomainError ? { code: error.code, message: error.message } : { code: fallbackCode, message: errorMessage(error) }; }
+function usage(): string { return 'Usage: ael <init|experience add|validate|inspect|lessons list|retrieve|export|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge promote> [options]'; }
+function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } {
+  return error instanceof DomainError || error instanceof RuntimeServiceError
+    ? { code: error.code, message: error.message }
+    : { code: fallbackCode, message: errorMessage(error) };
+}
 
 if (process.argv[1] && basename(process.argv[1]) === basename(fileURLToPath(import.meta.url))) {
   const result = await runCliAsync(process.argv.slice(2)); process.stdout.write(result.stdout); process.stderr.write(result.stderr); process.exitCode = result.exitCode;
