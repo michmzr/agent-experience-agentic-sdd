@@ -98,6 +98,12 @@ test('uses capture-equivalent structured argv credential classification for runt
     { tool: 'tool', action: 'run', arguments: ['--apikey=value'] },
     { tool: 'tool', action: 'run', arguments: ['OPENAI_API_KEY=value'] },
     { tool: 'tool', action: 'run', arguments: ['PREFIX_CLIENTSECRET=value'] },
+    { tool: 'tool', action: 'run', arguments: ['-token', 'value'] },
+    { tool: 'tool', action: 'run', arguments: ['-token=value'] },
+    { tool: 'tool', action: 'run', arguments: ['-tokenvalue'] },
+    { tool: 'tool', action: 'run', arguments: ['-apiKey', 'value'] },
+    { tool: 'tool', action: 'run', arguments: ['-apikey=value'] },
+    { tool: 'tool', action: 'run', arguments: ['-password=value'] },
     { tool: 'curl', action: 'request', arguments: ['-H', 'Authorization:Bearer value'] },
     { tool: 'redis-cli', action: 'connect', arguments: ['-avalue'] },
     { tool: 'redis-cli', action: 'connect', arguments: ['--passvalue'] },
@@ -120,6 +126,7 @@ test('uses capture-equivalent structured argv credential classification for runt
 test('round-trips benign structured argv controls without weakening credential classification', () => {
   const cases = [
     { identity: 'jq-key', tool: 'jq', action: 'query', arguments: ['key', 'value'] },
+    { identity: 'single-dash-controls', tool: 'tool', action: 'run', arguments: ['-verbose', '-key', 'value'] },
     { identity: 'sort-key', tool: 'sort', action: 'sort', arguments: ['--key=1', 'file.txt'] },
     { identity: 'ssh-control', tool: 'ssh', action: 'connect', arguments: ['-o', 'StrictHostKeyChecking=yes', 'host'] }
   ];
@@ -140,7 +147,7 @@ test('rejects credential-bearing structured argv when reading an existing versio
   }]);
   const indexPath = join(repository, 'agent-experience', 'index.json');
   const index = JSON.parse(readFileSync(indexPath, 'utf8')) as { entries: Array<{ runtimeDirective: { signature: { arguments: string[] } } }> };
-  index.entries[0]!.runtimeDirective.signature.arguments = ['--token', 'read-secret-marker'];
+  index.entries[0]!.runtimeDirective.signature.arguments = ['-apiKey', 'read-secret-marker'];
   writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`);
 
   assert.throws(

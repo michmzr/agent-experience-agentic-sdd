@@ -79,7 +79,7 @@ test('promotion rejects credential-bearing structured argv without leaking its v
       applicability: { paths: [], tags: [], tools: ['curl'] },
       runtimeDirective: {
         effect: 'conflict',
-        signature: { kind: 'action', tool: 'curl', action: 'request', arguments: ['--header', `Authorization:Bearer ${marker}`] }
+        signature: { kind: 'action', tool: 'curl', action: 'request', arguments: [`-password=${marker}`] }
       }
     })),
     (error: unknown) => error instanceof Error && /credential|private/i.test(error.message) && !error.message.includes(marker)

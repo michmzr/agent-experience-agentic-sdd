@@ -110,7 +110,13 @@ test('classifies credential-bearing options contextually without leaking their v
     { tool: 'tool', action: 'run', arguments: ['--access-key', marker] },
     { tool: 'tool', action: 'run', arguments: [`--oauth2Bearer=${marker}`] },
     { tool: 'tool', action: 'run', arguments: ['--refreshToken', marker] },
-    { tool: 'tool', action: 'run', arguments: ['--bearer', marker] }
+    { tool: 'tool', action: 'run', arguments: ['--bearer', marker] },
+    { tool: 'tool', action: 'run', arguments: ['-token', marker] },
+    { tool: 'tool', action: 'run', arguments: [`-token=${marker}`] },
+    { tool: 'tool', action: 'run', arguments: [`-token${marker}`] },
+    { tool: 'tool', action: 'run', arguments: ['-apiKey', marker] },
+    { tool: 'tool', action: 'run', arguments: [`-apikey=${marker}`] },
+    { tool: 'tool', action: 'run', arguments: [`-password=${marker}`] }
   ];
   for (const item of cases) {
     assert.throws(
@@ -126,7 +132,8 @@ test('retains benign key, author, monkey, and sessionize arguments', () => {
     { event_id: 'benign-sort', tool: 'sort', action: 'sort', arguments: ['--key=1', 'file.txt'] },
     { event_id: 'benign-ssh', tool: 'ssh', action: 'connect', arguments: ['-o', 'StrictHostKeyChecking=yes', 'host'] },
     { event_id: 'benign-jq', tool: 'jq', action: 'query', arguments: ['key', 'value'] },
-    { event_id: 'benign-substrings', tool: 'tool', action: 'run', arguments: ['--monkey=banana', '--author=alice', '--sessionize=yes'] }
+    { event_id: 'benign-substrings', tool: 'tool', action: 'run', arguments: ['--monkey=banana', '--author=alice', '--sessionize=yes'] },
+    { event_id: 'benign-single-dash', tool: 'tool', action: 'run', arguments: ['-verbose', '-key', 'value'] }
   ];
   for (const item of cases) {
     const captured = adaptCodexCapture({ ...base, ...item });

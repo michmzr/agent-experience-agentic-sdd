@@ -17,6 +17,8 @@ const sensitiveCollapsedTokens = new Set([
   'apikey', 'accesskey', 'secretkey', 'privatekey', 'clientsecret', 'sessiontoken',
   'accesstoken', 'refreshtoken', 'authtoken', 'oauth2bearer'
 ]);
+const sensitiveAttachedPrefixes = [...sensitiveNameTokens, ...sensitiveCollapsedTokens]
+  .filter((prefix) => prefix !== 'auth');
 
 export function containsCredentialMaterial(value: string): boolean {
   return credentialPatterns.some((pattern) => pattern.test(value));
@@ -27,9 +29,9 @@ export function assertStructuredArgumentsSafe(arguments_: readonly string[], too
   if (containsCredentialMaterial(arguments_.join(' '))) rejectArguments();
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index]!;
-    if (argument.startsWith('--')) {
-      const [name, attached] = argument.slice(2).split('=', 2);
-      if (sensitiveOptionName(name!)) rejectArguments();
+    if (argument.startsWith('-') && argument.length > 2) {
+      const [name, attached] = argument.replace(/^-{1,2}/, '').split('=', 2);
+      if (sensitiveOptionName(name!) || sensitiveAttachedOptionName(name!)) rejectArguments();
       if (userValueOption(name!) && ((attached?.length ?? 0) > 0
         || (arguments_[index + 1] !== undefined && !arguments_[index + 1]!.startsWith('-')))) rejectArguments();
     }
@@ -74,6 +76,11 @@ function sensitiveOptionName(value: string): boolean {
   if (tokens.some((token) => sensitiveNameTokens.has(token) || sensitiveCollapsedTokens.has(token))) return true;
   return hasAdjacent(tokens, 'api', 'key') || hasAdjacent(tokens, 'secret', 'key') || hasAdjacent(tokens, 'private', 'key')
     || hasAdjacent(tokens, 'access', 'key') || hasAdjacent(tokens, 'session', 'token') || hasAdjacent(tokens, 'user', 'info');
+}
+
+function sensitiveAttachedOptionName(value: string): boolean {
+  const collapsed = value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  return sensitiveAttachedPrefixes.some((prefix) => collapsed.length > prefix.length && collapsed.startsWith(prefix));
 }
 
 function userValueOption(value: string): boolean {
