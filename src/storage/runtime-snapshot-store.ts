@@ -4,6 +4,7 @@ import {
   openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync
 } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
+import { getSystemErrorName } from 'node:util';
 
 import {
   MAX_RUNTIME_SNAPSHOT_BYTES, parseSerializedRuntimeSnapshot, serializeRuntimeSnapshot,
@@ -45,7 +46,8 @@ export interface RuntimeSnapshotStoreOptions {
   readonly beforeStaleLockRename?: () => void;
   readonly beforeStaleCandidateRemoval?: () => void;
   readonly beforeLockRelease?: () => void;
-  readonly beforeReclaimClaimRelease?: () => void;
+  readonly beforeReclaimClaimRelease?: (claim: string) => void;
+  readonly beforeStaleReclaimClaimRemoval?: (claim: string) => void;
 }
 export interface RuntimeSnapshotPaths { readonly root: string; readonly manifest: string; readonly rollbackManifest: string }
 interface ManifestReference { readonly checksum: string; readonly file: string }
@@ -56,6 +58,10 @@ const generationPattern = /^generation-([a-f0-9]{64})\.json$/;
 const MAX_MANIFEST_BYTES = 16 * 1024;
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_STALE_LOCK_MS = 30_000;
+const reclaimClaimPattern = /^claim-(\d{12})-([a-f0-9-]+)$/;
+const reclaimChoosingPattern = /^choosing-([a-f0-9-]+)$/;
+const reclaimRecoveringPattern = /^(?:recovering|releasing)-([a-f0-9-]+)$/;
+const MAX_RECLAIM_CLAIMS = 128;
 
 export class RuntimeSnapshotStore {
   readonly paths: RuntimeSnapshotPaths;
@@ -69,7 +75,8 @@ export class RuntimeSnapshotStore {
   readonly #beforeStaleLockRename: () => void;
   readonly #beforeStaleCandidateRemoval: () => void;
   readonly #beforeLockRelease: () => void;
-  readonly #beforeReclaimClaimRelease: () => void;
+  readonly #beforeReclaimClaimRelease: (claim: string) => void;
+  readonly #beforeStaleReclaimClaimRemoval: (claim: string) => void;
 
   constructor(stateDirectory: string, options: RuntimeSnapshotStoreOptions) {
     if (typeof options?.clock !== 'function') throw new TypeError('Runtime snapshot store requires an injected clock.');
@@ -89,6 +96,7 @@ export class RuntimeSnapshotStore {
     this.#beforeStaleCandidateRemoval = options.beforeStaleCandidateRemoval ?? (() => undefined);
     this.#beforeLockRelease = options.beforeLockRelease ?? (() => undefined);
     this.#beforeReclaimClaimRelease = options.beforeReclaimClaimRelease ?? (() => undefined);
+    this.#beforeStaleReclaimClaimRemoval = options.beforeStaleReclaimClaimRemoval ?? (() => undefined);
   }
 
   generationPath(checksum: string): string {
@@ -199,8 +207,9 @@ export class RuntimeSnapshotStore {
   }
 
   #cleanupAfterCommit(manifest: RuntimeSnapshotManifestV1): void {
+    try { this.#injectFailure('cleanup'); }
+    catch (error) { if (error instanceof RuntimeSnapshotCleanupError) return; throw error; }
     try {
-      this.#injectFailure('cleanup');
       const retained = new Set([manifest.current.file, manifest.lastKnownGood?.file].filter((file): file is string => file !== undefined));
       const rollback = this.#readOptionalRollbackManifest();
       if (rollback !== undefined) {
@@ -212,7 +221,7 @@ export class RuntimeSnapshotStore {
       }
       this.#syncDirectory();
     } catch (error) {
-      if (error instanceof RuntimeSnapshotCleanupError || isExpectedCleanupFilesystemError(error)) return;
+      if (isExpectedNodeFilesystemError(error)) return;
       throw error;
     }
   }
@@ -304,7 +313,7 @@ export class RuntimeSnapshotStore {
 
   #withWriterLock<T>(action: () => T): T {
     const lock = resolve(this.paths.root, '.writer-lock');
-    const reclaimClaim = resolve(this.paths.root, '.writer-lock-reclaim');
+    const reclaimClaims = resolve(this.paths.root, '.writer-lock-reclaim');
     const token = randomUUID();
     const started = this.#clock();
     let acquiredIdentity: LockIdentity | undefined;
@@ -318,7 +327,7 @@ export class RuntimeSnapshotStore {
         fsyncFile(owner);
         fsyncDirectory(candidate);
         if (existsSync(lock)) throw occupiedLockError();
-        if (existsSync(reclaimClaim)) throw occupiedLockError();
+        if (this.#hasLiveReclaimClaim(reclaimClaims, this.#clock())) throw occupiedLockError();
         renameSync(candidate, lock);
         acquiredIdentity = lockIdentity(lock);
         this.#syncDirectory();
@@ -326,7 +335,7 @@ export class RuntimeSnapshotStore {
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== 'EEXIST' && code !== 'ENOTEMPTY') throw error;
-        this.#recoverStaleWriterLock(lock, reclaimClaim, this.#clock());
+        this.#recoverStaleWriterLock(lock, reclaimClaims, this.#clock());
         if (this.#clock() - started >= this.#lockTimeoutMs) throw new RuntimeSnapshotStorageError('Timed out waiting for runtime snapshot writer lock.');
         this.#onLockWait();
         this.#wait(Math.min(25, this.#lockTimeoutMs));
@@ -343,62 +352,173 @@ export class RuntimeSnapshotStore {
     }
   }
 
-  #recoverStaleWriterLock(lock: string, claim: string, now: number): void {
+  #recoverStaleWriterLock(lock: string, claims: string, now: number): void {
     let observed: LockObservation;
     try {
       observed = observeLock(lock);
       if (now - observed.owner.timestamp <= this.#staleLockMs || isPidAlive(observed.owner.pid)) return;
     } catch (error) {
-      if (isExpectedLockFilesystemError(error)) return;
+      if (isExpectedNodeFilesystemError(error)) return;
       throw error;
     }
 
-    try {
-      mkdirSync(claim, { mode: 0o700 });
-    } catch (error) {
-      if (isExpectedLockFilesystemError(error)) return;
-      throw error;
-    }
-
-    try {
-      fsyncDirectory(claim);
+    this.#withReclaimClaim(claims, now, () => {
       const confirmed = observeLock(lock);
       if (!sameLockObservation(observed, confirmed) || isPidAlive(confirmed.owner.pid)) return;
       this.#beforeStaleLockRename();
-      const final = observeLock(lock);
+      let final: LockObservation;
+      try { final = observeLock(lock); }
+      catch (error) { if (isExpectedNodeFilesystemError(error)) return; throw error; }
       if (!sameLockObservation(confirmed, final) || isPidAlive(final.owner.pid)) return;
       const stale = resolve(this.paths.root, `.writer-lock-stale-${randomUUID()}`);
-      renameSync(lock, stale);
-      rmSync(stale, { recursive: true, force: true });
-      this.#syncDirectory();
-    } catch (error) {
-      if (!isExpectedLockFilesystemError(error)) throw error;
+      try {
+        renameSync(lock, stale);
+        rmSync(stale, { recursive: true, force: true });
+        this.#syncDirectory();
+      } catch (error) { if (!isExpectedNodeFilesystemError(error)) throw error; }
+    });
+  }
+
+  #withReclaimClaim(claims: string, now: number, action: () => void): void {
+    this.#ensureReclaimClaimsDirectory(claims);
+    this.#cleanupStaleReclaimClaims(claims, now);
+    const token = randomUUID();
+    const candidate = resolve(this.paths.root, `.writer-reclaim-candidate-${token}`);
+    const choosing = resolve(claims, `choosing-${token}`);
+    let ownedPath = candidate;
+    let identity: LockIdentity | undefined;
+    try {
+      mkdirSync(candidate, { mode: 0o700 });
+      const owner = resolve(candidate, 'owner.json');
+      writeFileSync(owner, JSON.stringify({ pid: process.pid, timestamp: now, token }), { mode: 0o600, flag: 'wx' });
+      fsyncFile(owner);
+      fsyncDirectory(candidate);
+      renameSync(candidate, choosing);
+      ownedPath = choosing;
+      identity = lockIdentity(choosing);
+      fsyncDirectory(claims);
+      const ticket = this.#nextReclaimTicket(claims);
+      const claim = resolve(claims, `claim-${String(ticket).padStart(12, '0')}-${token}`);
+      renameSync(choosing, claim);
+      ownedPath = claim;
+      identity = lockIdentity(claim);
+      fsyncDirectory(claims);
+      if (!this.#hasEarlierLiveReclaimClaim(claims, claim, ticket, token, now)) action();
     } finally {
-      this.#releaseReclaimClaim(claim);
+      if (identity !== undefined) this.#releaseReclaimClaim(ownedPath, token, identity);
+      else removeLockArtifact(ownedPath);
     }
+  }
+
+  #ensureReclaimClaimsDirectory(claims: string): void {
+    try { mkdirSync(claims, { mode: 0o700 }); }
+    catch (error) { if (!isExpectedNodeFilesystemError(error) || (error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    const stat = lstatSync(claims);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) {
+      throw new RuntimeSnapshotStorageError('Runtime snapshot reclaim claim directory is unsafe.');
+    }
+  }
+
+  #nextReclaimTicket(claims: string): number {
+    const entries = this.#readReclaimClaimEntries(claims);
+    let maximum = 0;
+    for (const entry of entries) {
+      const match = reclaimClaimPattern.exec(entry);
+      if (match !== null) maximum = Math.max(maximum, Number(match[1]));
+    }
+    if (!Number.isSafeInteger(maximum) || maximum >= 999_999_999_999) throw new RuntimeSnapshotStorageError('Runtime snapshot reclaim ticket is invalid.');
+    return maximum + 1;
+  }
+
+  #hasEarlierLiveReclaimClaim(claims: string, claim: string, ticket: number, token: string, now: number): boolean {
+    for (const entry of this.#readReclaimClaimEntries(claims)) {
+      const path = resolve(claims, entry);
+      if (path === claim) continue;
+      const choosing = reclaimChoosingPattern.exec(entry);
+      const prepared = reclaimClaimPattern.exec(entry);
+      const recovering = reclaimRecoveringPattern.exec(entry);
+      if (choosing === null && prepared === null && recovering === null) continue;
+      const observed = this.#observeOptionalClaim(path);
+      if (observed === undefined || this.#isStaleOwner(observed.owner, now)) continue;
+      if (choosing !== null || recovering !== null) return true;
+      const otherTicket = Number(prepared?.[1]);
+      const otherToken = prepared?.[2] ?? '';
+      if (otherTicket < ticket || (otherTicket === ticket && otherToken < token)) return true;
+    }
+    return false;
+  }
+
+  #hasLiveReclaimClaim(claims: string, now: number): boolean {
+    let entries: string[];
+    try { entries = this.#readReclaimClaimEntries(claims); }
+    catch (error) {
+      if (isExpectedNodeFilesystemError(error) && (error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (!isReclaimClaimEntry(entry)) continue;
+      const observed = this.#observeOptionalClaim(resolve(claims, entry));
+      if (observed !== undefined && !this.#isStaleOwner(observed.owner, now)) return true;
+    }
+    return false;
+  }
+
+  #cleanupStaleReclaimClaims(claims: string, now: number): void {
+    const entries = this.#readReclaimClaimEntries(claims);
+    for (const entry of entries) {
+      if (!isReclaimClaimEntry(entry)) continue;
+      const claim = resolve(claims, entry);
+      const observed = this.#observeOptionalClaim(claim);
+      if (observed === undefined || !this.#isStaleOwner(observed.owner, now)) continue;
+      this.#beforeStaleReclaimClaimRemoval(claim);
+      const recovering = resolve(claims, `recovering-${randomUUID()}`);
+      try { renameSync(claim, recovering); }
+      catch (error) { if (isExpectedNodeFilesystemError(error)) continue; throw error; }
+      const moved = this.#observeOptionalClaim(recovering);
+      if (moved !== undefined && sameLockObservation(observed, moved) && this.#isStaleOwner(moved.owner, now)) {
+        removeLockArtifact(recovering);
+      }
+      fsyncDirectory(claims);
+    }
+  }
+
+  #observeOptionalClaim(claim: string): LockObservation | undefined {
+    try { return observeLock(claim); }
+    catch (error) { if (isExpectedNodeFilesystemError(error)) return undefined; throw error; }
+  }
+
+  #readReclaimClaimEntries(claims: string): string[] {
+    const entries = readdirSync(claims);
+    if (entries.length > MAX_RECLAIM_CLAIMS) throw new RuntimeSnapshotStorageError('Runtime snapshot reclaim claim limit exceeded.');
+    return entries;
+  }
+
+  #isStaleOwner(owner: LockOwner, now: number): boolean {
+    return now - owner.timestamp > this.#staleLockMs && !isPidAlive(owner.pid);
   }
 
   #cleanupAbandonedLockCandidates(now: number): void {
     for (const entry of readdirSync(this.paths.root, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !entry.name.startsWith('.writer-lock-candidate-')) continue;
+      if (!entry.isDirectory() || (!entry.name.startsWith('.writer-lock-candidate-') && !entry.name.startsWith('.writer-reclaim-candidate-'))) continue;
       const candidate = resolve(this.paths.root, entry.name);
-      try {
-        const observed = lockIdentity(candidate);
-        if (now - observed.mtimeMs <= this.#staleLockMs) continue;
-        const confirmed = lockIdentity(candidate);
-        if (!sameLockIdentity(observed, confirmed)) continue;
-        this.#beforeStaleCandidateRemoval();
-        rmSync(candidate, { recursive: true, force: true });
-      } catch (error) {
-        if (!isExpectedLockFilesystemError(error)) throw error;
-      }
+      let observed: LockIdentity;
+      try { observed = lockIdentity(candidate); }
+      catch (error) { if (isExpectedNodeFilesystemError(error)) continue; throw error; }
+      if (now - observed.mtimeMs <= this.#staleLockMs) continue;
+      this.#beforeStaleCandidateRemoval();
+      let confirmed: LockIdentity;
+      try { confirmed = lockIdentity(candidate); }
+      catch (error) { if (isExpectedNodeFilesystemError(error)) continue; throw error; }
+      if (!sameLockIdentity(observed, confirmed)) continue;
+      try { rmSync(candidate, { recursive: true }); }
+      catch (error) { if (!isExpectedNodeFilesystemError(error)) throw error; }
     }
   }
 
   #releaseWriterLock(lock: string, token: string, acquiredIdentity: LockIdentity | undefined): void {
     let programmingError: unknown;
     try { this.#beforeLockRelease(); }
-    catch (error) { if (!isExpectedLockFilesystemError(error)) programmingError = error; }
+    catch (error) { programmingError = error; }
     try {
       if (acquiredIdentity !== undefined) {
         const observed = observeLock(lock);
@@ -408,19 +528,25 @@ export class RuntimeSnapshotStore {
         }
       }
     } catch (error) {
-      if (!isExpectedLockFilesystemError(error) && programmingError === undefined) programmingError = error;
+      if (!isExpectedNodeFilesystemError(error) && programmingError === undefined) programmingError = error;
     }
     if (programmingError !== undefined) throw programmingError;
   }
 
-  #releaseReclaimClaim(claim: string): void {
+  #releaseReclaimClaim(claim: string, token: string, identity: LockIdentity): void {
     let programmingError: unknown;
-    try { this.#beforeReclaimClaimRelease(); }
-    catch (error) { if (!isExpectedLockFilesystemError(error)) programmingError = error; }
+    try { this.#beforeReclaimClaimRelease(claim); }
+    catch (error) { programmingError = error; }
     try {
-      if (removeLockArtifact(claim)) this.#syncDirectory();
+      const releasing = resolve(dirname(claim), `releasing-${randomUUID()}`);
+      renameSync(claim, releasing);
+      const observed = observeLock(releasing);
+      if (observed.owner.token === token && sameLockIdentity(observed.identity, identity)) {
+        removeLockArtifact(releasing);
+      }
+      fsyncDirectory(dirname(claim));
     } catch (error) {
-      if (!isExpectedLockFilesystemError(error) && programmingError === undefined) programmingError = error;
+      if (!isExpectedNodeFilesystemError(error) && programmingError === undefined) programmingError = error;
     }
     if (programmingError !== undefined) throw programmingError;
   }
@@ -431,7 +557,7 @@ export class RuntimeSnapshotStore {
   }
 
   #candidate(kind: string): string { return resolve(this.paths.root, `.${kind}-${randomUUID()}.tmp`); }
-  #removeCandidate(path: string): void { try { unlinkSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } }
+  #removeCandidate(path: string): void { try { unlinkSync(path); } catch (error) { if (!isExpectedNodeFilesystemError(error) || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } }
 }
 
 function occupiedLockError(): NodeJS.ErrnoException {
@@ -470,10 +596,14 @@ function sameLockIdentity(left: LockIdentity, right: LockIdentity): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.mtimeMs === right.mtimeMs;
 }
 
+function isReclaimClaimEntry(name: string): boolean {
+  return reclaimChoosingPattern.test(name) || reclaimClaimPattern.test(name) || reclaimRecoveringPattern.test(name);
+}
+
 function removeLockArtifact(path: string): boolean {
-  try { rmSync(path, { recursive: true, force: true }); return true; }
+  try { rmSync(path, { recursive: true }); return true; }
   catch (error) {
-    if (isExpectedLockFilesystemError(error)) return false;
+    if (isExpectedNodeFilesystemError(error)) return false;
     throw error;
   }
 }
@@ -543,25 +673,17 @@ function parseReference(value: unknown): ManifestReference {
 function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value) && typeof value === 'object' && !Array.isArray(value); }
 function onlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean { return Object.keys(value).every((key) => keys.includes(key)); }
 function isMissing(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException).code === 'ENOENT'
-    || (error instanceof RuntimeSnapshotStorageError && (error.cause as NodeJS.ErrnoException | undefined)?.code === 'ENOENT');
+  return isExpectedNodeFilesystemError(error) && error.code === 'ENOENT'
+    || (error instanceof RuntimeSnapshotStorageError && isExpectedNodeFilesystemError(error.cause) && error.cause.code === 'ENOENT');
 }
-function isExpectedCleanupFilesystemError(error: unknown): boolean {
-  let current: unknown = error;
-  while (current && typeof current === 'object') {
-    if (['ENOENT', 'EACCES', 'EPERM', 'EBUSY', 'EIO', 'ENOTEMPTY'].includes((current as NodeJS.ErrnoException).code ?? '')) return true;
-    current = (current as Error).cause;
+function isExpectedNodeFilesystemError(error: unknown): error is NodeJS.ErrnoException {
+  if (!(error instanceof Error) || error instanceof TypeError || error instanceof SyntaxError) return false;
+  const systemError = error as NodeJS.ErrnoException;
+  if (typeof systemError.errno !== 'number' || typeof systemError.syscall !== 'string') return false;
+  try {
+    return getSystemErrorName(systemError.errno) === systemError.code
+      && ['ENOENT', 'EEXIST', 'EACCES', 'EPERM', 'EBUSY', 'EIO', 'ENOTEMPTY'].includes(systemError.code ?? '');
+  } catch {
+    return false;
   }
-  return false;
-}
-
-function isExpectedLockFilesystemError(error: unknown): boolean {
-  let current: unknown = error;
-  while (current && typeof current === 'object') {
-    if (current instanceof TypeError || current instanceof SyntaxError) return false;
-    if (current instanceof Error
-      && ['ENOENT', 'EEXIST', 'EACCES', 'EPERM', 'EBUSY', 'EIO', 'ENOTEMPTY'].includes((current as NodeJS.ErrnoException).code ?? '')) return true;
-    current = (current as Error).cause;
-  }
-  return false;
 }

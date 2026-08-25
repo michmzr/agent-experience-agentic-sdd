@@ -9,13 +9,20 @@ import type { RuntimeRule } from '../src/runtime/contracts.js';
 import { createRuleIndex } from '../src/runtime/rule-index.js';
 import { compileRuntimeSnapshot, parseRuntimeSnapshot, serializeRuntimeSnapshot } from '../src/runtime/snapshot.js';
 import {
-  RuntimeSnapshotConflictError, RuntimeSnapshotStore,
+  RuntimeSnapshotCleanupError, RuntimeSnapshotConflictError, RuntimeSnapshotStore,
   type RuntimeSnapshotStoreOptions, type RuntimeSnapshotStoreStep
 } from '../src/storage/runtime-snapshot-store.js';
 
 const clock = (): number => 0;
 function store(root: string, options: Omit<RuntimeSnapshotStoreOptions, 'clock'> = {}): RuntimeSnapshotStore {
   return new RuntimeSnapshotStore(root, { clock, ...options });
+}
+
+function fakeFilesystemError(message: string): Error {
+  let source: NodeJS.ErrnoException;
+  try { readFileSync(join(tmpdir(), `ael-missing-${process.pid}-${Math.random()}`)); }
+  catch (error) { source = error as NodeJS.ErrnoException; }
+  return Object.assign(new Error(message), { code: source!.code, errno: source!.errno, syscall: source!.syscall });
 }
 
 function rule(id: string, scope: 'global' | 'repository' = 'repository', repositoryId = 'repo-a'): RuntimeRule {
@@ -162,22 +169,24 @@ test('cleanup failure after a committed manifest cannot change logical correctne
   const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
   const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
   store(root).publish(first);
-  const cleanupError = Object.assign(new Error('cleanup failed'), { code: 'EACCES' });
+  const cleanupError = new RuntimeSnapshotCleanupError('cleanup failed');
   const snapshotStore = store(root, { injectFailure: (step) => { if (step === 'cleanup') throw cleanupError; } });
   snapshotStore.publish(second);
   assert.equal(snapshotStore.loadCurrent().rules[0]?.id, 'second');
   assert.equal(snapshotStore.loadLastKnownGood().rules[0]?.id, 'first');
 });
 
-test('propagates cleanup programming errors after leaving the committed manifest valid', () => {
-  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
-  const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
-  const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
-  store(root).publish(first);
-  const snapshotStore = store(root, { injectFailure: (step) => { if (step === 'cleanup') throw new TypeError('cleanup bug'); } });
-  assert.throws(() => snapshotStore.publish(second), TypeError);
-  assert.equal(store(root).loadCurrent().rules[0]?.id, 'second');
-  assert.equal(store(root).loadLastKnownGood().rules[0]?.id, 'first');
+test('propagates cleanup TypeError and filesystem-shaped programming errors after commit', () => {
+  for (const programmingError of [new TypeError('cleanup type bug'), fakeFilesystemError('cleanup shaped bug')]) {
+    const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+    const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+    const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
+    store(root).publish(first);
+    const snapshotStore = store(root, { injectFailure: (step) => { if (step === 'cleanup') throw programmingError; } });
+    assert.throws(() => snapshotStore.publish(second), programmingError);
+    assert.equal(store(root).loadCurrent().rules[0]?.id, 'second');
+    assert.equal(store(root).loadLastKnownGood().rules[0]?.id, 'first');
+  }
 });
 
 test('detects a manifest CAS conflict under the writer lock without deleting generations', () => {
@@ -266,17 +275,97 @@ test('identity-safe stale reclaim never removes a replacement live lock', () => 
   rmSync(`${lock}.old`, { recursive: true });
 });
 
+test('recovers a durable orphaned reclaim claim after its owner crashes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const snapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const base = store(root);
+  const lock = join(base.paths.root, '.writer-lock');
+  mkdirSync(lock, { mode: 0o700 });
+  writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 999_999_999, timestamp: 0, token: 'stale-lock' }), { mode: 0o600 });
+  const claims = join(base.paths.root, '.writer-lock-reclaim');
+  const orphan = join(claims, 'claim-000000000001-deadbeef');
+  mkdirSync(orphan, { recursive: true, mode: 0o700 });
+  writeFileSync(join(orphan, 'owner.json'), JSON.stringify({ pid: 999_999_999, timestamp: 0, token: 'orphan' }), { mode: 0o600 });
+
+  new RuntimeSnapshotStore(root, { clock: () => 100_000, staleLockMs: 10 }).publish(snapshot);
+  assert.equal(existsSync(orphan), false);
+  assert.equal(base.loadCurrent().rules[0]?.id, 'first');
+});
+
+test('orphan reclaim cleanup preserves an interleaved replacement live claim', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const snapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const base = store(root);
+  const lock = join(base.paths.root, '.writer-lock');
+  mkdirSync(lock, { mode: 0o700 });
+  writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 999_999_999, timestamp: 0, token: 'stale-lock' }), { mode: 0o600 });
+  const claims = join(base.paths.root, '.writer-lock-reclaim');
+  const orphan = join(claims, 'claim-000000000001-deadbeef');
+  mkdirSync(orphan, { recursive: true, mode: 0o700 });
+  writeFileSync(join(orphan, 'owner.json'), JSON.stringify({ pid: 999_999_999, timestamp: 0, token: 'orphan' }), { mode: 0o600 });
+  let now = 100_000;
+  let replaced = false;
+  const publisher = new RuntimeSnapshotStore(root, {
+    clock: () => now, staleLockMs: 10, lockTimeoutMs: 20, wait: (milliseconds) => { now += milliseconds; },
+    beforeStaleReclaimClaimRemoval: (claim) => {
+      if (claim !== orphan || replaced) return;
+      replaced = true;
+      renameSync(orphan, `${orphan}.old`);
+      mkdirSync(orphan, { mode: 0o700 });
+      writeFileSync(join(orphan, 'owner.json'), JSON.stringify({ pid: process.pid, timestamp: now, token: 'replacement-live' }), { mode: 0o600 });
+    }
+  });
+  assert.throws(() => publisher.publish(snapshot), /Timed out/);
+  const liveClaims = readdirSync(claims).flatMap((entry) => {
+    try { return [JSON.parse(readFileSync(join(claims, entry, 'owner.json'), 'utf8')) as { token: string }]; }
+    catch { return []; }
+  });
+  assert.equal(liveClaims.some(({ token }) => token === 'replacement-live'), true);
+  assert.equal(existsSync(base.paths.manifest), false);
+  rmSync(claims, { recursive: true });
+  rmSync(`${orphan}.old`, { recursive: true, force: true });
+  rmSync(lock, { recursive: true });
+});
+
+test('suppresses real expected filesystem failures at cleanup and reclaim boundaries', () => {
+  const cleanupRoot = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
+  store(cleanupRoot).publish(first);
+  mkdirSync(join(cleanupRoot, `generation-${'0'.repeat(64)}.json`), { mode: 0o700 });
+  store(cleanupRoot).publish(second);
+  assert.equal(store(cleanupRoot).loadCurrent().rules[0]?.id, 'second');
+
+  const reclaimRoot = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const reclaimStore = store(reclaimRoot);
+  const lock = join(reclaimStore.paths.root, '.writer-lock');
+  mkdirSync(lock, { mode: 0o700 });
+  writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 999_999_999, timestamp: 0, token: 'stale' }), { mode: 0o600 });
+  let now = 100_000;
+  new RuntimeSnapshotStore(reclaimRoot, {
+    clock: () => now, staleLockMs: 10, lockTimeoutMs: 20, wait: (milliseconds) => { now += milliseconds; },
+    beforeStaleLockRename: () => { rmSync(lock, { recursive: true }); }
+  }).publish(first);
+  assert.equal(reclaimStore.loadCurrent().rules[0]?.id, 'first');
+});
+
 test('lock release suppresses expected filesystem errors but propagates programming errors', () => {
   const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
   const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
-  const expected = Object.assign(new Error('release busy'), { code: 'EBUSY' });
-  new RuntimeSnapshotStore(root, { clock, beforeLockRelease: () => { throw expected; } }).publish(first);
+  const lock = join(store(root).paths.root, '.writer-lock');
+  new RuntimeSnapshotStore(root, { clock, beforeLockRelease: () => { rmSync(lock, { recursive: true }); } }).publish(first);
   assert.equal(existsSync(join(store(root).paths.root, '.writer-lock')), false);
 
   const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
   assert.throws(() => new RuntimeSnapshotStore(root, {
-    clock, beforeLockRelease: () => { throw Object.assign(new TypeError('release bug'), { code: 'EBUSY' }); }
-  }).publish(second), TypeError);
+    clock, beforeLockRelease: () => { throw fakeFilesystemError('release bug'); }
+  }).publish(second), /release bug/);
+  assert.equal(existsSync(join(store(root).paths.root, '.writer-lock')), false);
+
+  const third = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:02:00.000Z', repositoryRules: [rule('third')] });
+  assert.throws(() => new RuntimeSnapshotStore(root, {
+    clock, beforeLockRelease: () => { throw new TypeError('release type bug'); }
+  }).publish(third), TypeError);
   assert.equal(existsSync(join(store(root).paths.root, '.writer-lock')), false);
 });
 
@@ -288,12 +377,11 @@ test('stale reclaim and abandoned-candidate housekeeping propagate only programm
   mkdirSync(lock, { mode: 0o700 });
   writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 999_999_999, timestamp: 0, token: 'stale' }), { mode: 0o600 });
   assert.throws(() => new RuntimeSnapshotStore(root, { clock: () => 100_000, staleLockMs: 10, beforeStaleLockRename: () => { throw new TypeError('reclaim bug'); } }).publish(snapshot), TypeError);
-  let now = 100_000;
-  const expectedReclaim = Object.assign(new Error('reclaim busy'), { code: 'EBUSY' });
+  const expectedReclaim = fakeFilesystemError('reclaim busy');
   assert.throws(() => new RuntimeSnapshotStore(root, {
-    clock: () => now, staleLockMs: 10, lockTimeoutMs: 20, wait: (milliseconds) => { now += milliseconds; },
+    clock: () => 100_000, staleLockMs: 10,
     beforeStaleLockRename: () => { throw expectedReclaim; }
-  }).publish(snapshot), /Timed out/);
+  }).publish(snapshot), /reclaim busy/);
   assert.equal((JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')) as { token: string }).token, 'stale');
   rmSync(lock, { recursive: true });
 
@@ -301,8 +389,8 @@ test('stale reclaim and abandoned-candidate housekeeping propagate only programm
   mkdirSync(abandoned, { mode: 0o700 });
   utimesSync(abandoned, 0, 0);
   assert.throws(() => new RuntimeSnapshotStore(root, { clock: () => 100_000, staleLockMs: 10, beforeStaleCandidateRemoval: () => { throw new TypeError('candidate bug'); } }).publish(snapshot), TypeError);
-  const expected = Object.assign(new Error('candidate busy'), { code: 'EBUSY' });
-  new RuntimeSnapshotStore(root, { clock: () => 100_000, staleLockMs: 10, beforeStaleCandidateRemoval: () => { throw expected; } }).publish(snapshot);
+  const expected = fakeFilesystemError('candidate bug');
+  assert.throws(() => new RuntimeSnapshotStore(root, { clock: () => 100_000, staleLockMs: 10, beforeStaleCandidateRemoval: () => { throw expected; } }).publish(snapshot), /candidate bug/);
 });
 
 test('stale reclaim claim release suppresses filesystem errors and propagates programming errors after cleanup', () => {
@@ -312,11 +400,9 @@ test('stale reclaim claim release suppresses filesystem errors and propagates pr
   const expectedLock = join(expectedBase.paths.root, '.writer-lock');
   mkdirSync(expectedLock, { mode: 0o700 });
   writeFileSync(join(expectedLock, 'owner.json'), JSON.stringify({ pid: 999_999_999, timestamp: 0, token: 'stale' }), { mode: 0o600 });
-  const expected = Object.assign(new Error('claim release busy'), { code: 'EBUSY' });
   new RuntimeSnapshotStore(expectedRoot, {
-    clock: () => 100_000, staleLockMs: 10, beforeReclaimClaimRelease: () => { throw expected; }
+    clock: () => 100_000, staleLockMs: 10, beforeReclaimClaimRelease: (claim) => { rmSync(claim, { recursive: true }); }
   }).publish(snapshot);
-  assert.equal(existsSync(join(expectedBase.paths.root, '.writer-lock-reclaim')), false);
 
   const programmingRoot = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
   const programmingBase = store(programmingRoot);
@@ -324,9 +410,17 @@ test('stale reclaim claim release suppresses filesystem errors and propagates pr
   mkdirSync(programmingLock, { mode: 0o700 });
   writeFileSync(join(programmingLock, 'owner.json'), JSON.stringify({ pid: 999_999_999, timestamp: 0, token: 'stale' }), { mode: 0o600 });
   assert.throws(() => new RuntimeSnapshotStore(programmingRoot, {
-    clock: () => 100_000, staleLockMs: 10, beforeReclaimClaimRelease: () => { throw new TypeError('claim release bug'); }
+    clock: () => 100_000, staleLockMs: 10, beforeReclaimClaimRelease: () => { throw fakeFilesystemError('claim release bug'); }
+  }).publish(snapshot), /claim release bug/);
+
+  const typeRoot = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const typeBase = store(typeRoot);
+  const typeLock = join(typeBase.paths.root, '.writer-lock');
+  mkdirSync(typeLock, { mode: 0o700 });
+  writeFileSync(join(typeLock, 'owner.json'), JSON.stringify({ pid: 999_999_999, timestamp: 0, token: 'stale' }), { mode: 0o600 });
+  assert.throws(() => new RuntimeSnapshotStore(typeRoot, {
+    clock: () => 100_000, staleLockMs: 10, beforeReclaimClaimRelease: () => { throw new TypeError('claim release type bug'); }
   }).publish(snapshot), TypeError);
-  assert.equal(existsSync(join(programmingBase.paths.root, '.writer-lock-reclaim')), false);
 });
 
 async function waitForFile(path: string): Promise<void> {
