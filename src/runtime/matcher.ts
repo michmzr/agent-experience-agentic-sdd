@@ -10,6 +10,7 @@ const strengthRank: Readonly<Record<MatchStrength, number>> = Object.freeze({ ex
 
 /** Performs deterministic matching only. Optional semantic enrichment is a separate boundary. */
 export function matchRules(input: RuntimeInput, rules: readonly RuntimeRule[]): readonly RuleMatch[] {
+  if (input.signature.path !== undefined) canonicalPath(input.signature.path);
   const matches: RuleMatch[] = [];
 
   for (const rule of rules) {
@@ -41,7 +42,7 @@ export function canonicalSignature(signature: RuntimeSignature): string {
       tool: canonicalToken(signature.tool),
       action: canonicalToken(signature.action),
       arguments: [...(signature.arguments ?? [])],
-      path: normalizeOptionalPath(signature.path)
+      path: canonicalOptionalPath(signature.path)
     });
   }
 
@@ -50,19 +51,62 @@ export function canonicalSignature(signature: RuntimeSignature): string {
     verb: canonicalToken(signature.verb),
     target: canonicalToken(signature.target),
     tool: canonicalToken(signature.tool ?? ''),
-    path: normalizeOptionalPath(signature.path)
+    path: canonicalOptionalPath(signature.path)
   });
 }
 
+/**
+ * Normalizes a supported lexical path without filesystem access. Forward-slash
+ * absolute and relative forms are POSIX; drive-rooted forms and a leading `\\`
+ * are Windows. Path flavor is omitted from this display value; enforcement
+ * comparisons use an internal flavor-aware identity.
+ */
 export function normalizeRuntimePath(path: string): string {
-  const slashPath = path.trim().replaceAll('\\', '/');
-  const driveMatch = /^([A-Za-z]):(?:\/|$)/.exec(slashPath);
-  const drive = driveMatch ? `${driveMatch[1]?.toLowerCase()}:` : '';
-  const remainder = driveMatch ? slashPath.slice(driveMatch[0].length) : slashPath;
-  const absolute = drive.length > 0 || remainder.startsWith('/');
+  return canonicalPath(path).normalized;
+}
+
+type RuntimePathFlavor = 'posix-absolute' | 'posix-relative' | 'windows-drive-absolute' | 'windows-unc';
+
+interface CanonicalPath {
+  readonly flavor: RuntimePathFlavor;
+  readonly normalized: string;
+}
+
+function canonicalPath(path: string): CanonicalPath {
+  const trimmed = path.trim();
+  if (/^[A-Za-z]:(?![\\/])/.test(trimmed)) {
+    throw new RangeError('Windows drive-relative paths are not supported.');
+  }
+
+  const driveMatch = /^([A-Za-z]):[\\/]/.exec(trimmed);
+  if (driveMatch) {
+    const drive = driveMatch[1]!.toLowerCase();
+    const remainder = trimmed.slice(driveMatch[0].length).replaceAll('\\', '/');
+    const segments = normalizeSegments(remainder, true, true);
+    return { flavor: 'windows-drive-absolute', normalized: `${drive}:/${segments.join('/')}` };
+  }
+
+  if (/^\\\\/.test(trimmed)) {
+    const remainder = trimmed.slice(2).replaceAll('\\', '/');
+    const segments = normalizeSegments(remainder, true, true);
+    return { flavor: 'windows-unc', normalized: `//${segments.join('/')}` };
+  }
+
+  if (trimmed.includes('\\')) throw new RangeError('Unsupported Windows-relative path.');
+  if (trimmed.startsWith('/')) {
+    const segments = normalizeSegments(trimmed, true, false);
+    return { flavor: 'posix-absolute', normalized: `/${segments.join('/')}` };
+  }
+
+  const segments = normalizeSegments(trimmed, false, false);
+  return { flavor: 'posix-relative', normalized: segments.join('/') };
+}
+
+function normalizeSegments(path: string, absolute: boolean, caseInsensitive: boolean): string[] {
   const segments: string[] = [];
 
-  for (const segment of remainder.split('/')) {
+  for (const rawSegment of path.split('/')) {
+    const segment = caseInsensitive ? rawSegment.toLowerCase() : rawSegment;
     if (segment.length === 0 || segment === '.') continue;
     if (segment === '..') {
       if (segments.length > 0 && segments.at(-1) !== '..') segments.pop();
@@ -72,9 +116,7 @@ export function normalizeRuntimePath(path: string): string {
     segments.push(segment);
   }
 
-  if (drive) return `${drive}/${segments.join('/')}`.replace(/\/$/, segments.length === 0 ? '/' : '');
-  if (absolute) return `/${segments.join('/')}`;
-  return segments.join('/');
+  return segments;
 }
 
 function matchStrength(input: RuntimeInput, rule: RuntimeRule): MatchStrength | undefined {
@@ -90,7 +132,7 @@ function matchStrength(input: RuntimeInput, rule: RuntimeRule): MatchStrength | 
 
 function scopeApplies(input: RuntimeInput, rule: RuntimeRule): boolean {
   const { applicability } = rule;
-  if (applicability.scope === 'global') return rule.authoritative;
+  if (applicability.scope === 'global') return true;
 
   return input.repositoryId !== undefined
     && applicability.repositoryId !== undefined
@@ -103,7 +145,9 @@ function declaredApplicabilityMatches(input: RuntimeInput, rule: RuntimeRule): b
   const signaturePath = input.signature.path;
 
   if (applicability.tool !== undefined && canonicalToken(applicability.tool) !== canonicalToken(signatureTool ?? '')) return false;
-  if (applicability.path !== undefined && normalizeRuntimePath(applicability.path) !== normalizeRuntimePath(signaturePath ?? '')) return false;
+  if (applicability.path !== undefined) {
+    if (signaturePath === undefined || canonicalPathIdentity(applicability.path) !== canonicalPathIdentity(signaturePath)) return false;
+  }
   if (applicability.tags !== undefined) {
     const inputTags = new Set((input.tags ?? []).map(canonicalToken));
     if (!applicability.tags.every((tag) => inputTags.has(canonicalToken(tag)))) return false;
@@ -116,8 +160,13 @@ function canonicalToken(value: string): string {
   return value.trim().toLowerCase();
 }
 
-function normalizeOptionalPath(path: string | undefined): string {
-  return path === undefined ? '' : normalizeRuntimePath(path);
+function canonicalOptionalPath(path: string | undefined): CanonicalPath | null {
+  return path === undefined ? null : canonicalPath(path);
+}
+
+function canonicalPathIdentity(path: string): string {
+  const canonical = canonicalPath(path);
+  return `${canonical.flavor}\u0000${canonical.normalized}`;
 }
 
 function freezeRule(rule: RuntimeRule): RuntimeRule {

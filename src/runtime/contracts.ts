@@ -32,13 +32,21 @@ export type RuntimeInput =
   | (RuntimeInputContext & { readonly signature: ActionSignature })
   | (RuntimeInputContext & { readonly signature: IntentSignature });
 
-export interface RuleApplicability {
-  readonly scope: 'global' | 'repository';
-  readonly repositoryId?: string;
+interface RuleApplicabilityConstraints {
   readonly tool?: string;
   readonly path?: string;
   readonly tags?: readonly string[];
 }
+
+export type RuleApplicability =
+  | (RuleApplicabilityConstraints & {
+      readonly scope: 'global';
+      readonly repositoryId?: never;
+    })
+  | (RuleApplicabilityConstraints & {
+      readonly scope: 'repository';
+      readonly repositoryId: string;
+    });
 
 export interface RuntimeReference {
   readonly knowledgeId: string;

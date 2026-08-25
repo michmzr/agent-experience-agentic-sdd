@@ -1,8 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import type { OperationClass, RuntimeInput, RuntimeRule, RuntimeSignature } from '../src/runtime/contracts.js';
+import type { OperationClass, RuntimeInput, RuntimeProfile, RuntimeRule, RuntimeSignature } from '../src/runtime/contracts.js';
 import { canonicalSignature, matchRules, normalizeRuntimePath } from '../src/runtime/matcher.js';
+import { evaluateRule } from '../src/runtime/policy.js';
+
+const normalProfile: RuntimeProfile = {
+  id: 'normal',
+  hardBlocking: true,
+  warningsEnabled: true,
+  captureEnabled: true,
+  retrievalEnabled: true,
+  degradedOutcomes: { normal: 'ALLOW', caution: 'WARN', protected: 'BLOCK' }
+};
 
 function actionInput(overrides: {
   readonly repositoryId?: string;
@@ -64,7 +74,7 @@ test('matches canonical exact action signatures', () => {
     tool: 'git',
     action: 'push',
     arguments: ['--force-with-lease', 'origin', 'main'],
-    path: '/workspace/project'
+    path: { flavor: 'posix-absolute', normalized: '/workspace/project' }
   }));
 });
 
@@ -110,7 +120,7 @@ test('does not match intent rules to actions through shared metadata', () => {
 
 test('normalizes POSIX and Windows paths deterministically', () => {
   assert.equal(normalizeRuntimePath('/workspace/project/src/../src/'), '/workspace/project/src');
-  assert.equal(normalizeRuntimePath('C:\\workspace\\project\\src\\..\\src\\'), 'c:/workspace/project/src');
+  assert.equal(normalizeRuntimePath('C:\\Workspace\\Project\\src\\..\\SRC\\'), 'c:/workspace/project/src');
 
   const windowsRule = actionRule('rule-windows', {
     signature: { kind: 'action', tool: 'git', action: 'status', path: 'C:\\workspace\\project\\' }
@@ -120,6 +130,50 @@ test('normalizes POSIX and Windows paths deterministically', () => {
   });
 
   assert.equal(matchRules(windowsInput, [windowsRule])[0]?.strength, 'exact');
+});
+
+test('keeps absent, relative, POSIX absolute, Windows drive, and UNC path identities distinct', () => {
+  const signature = (path?: string): RuntimeSignature => ({ kind: 'action', tool: 'git', action: 'status', ...(path === undefined ? {} : { path }) });
+
+  assert.equal(normalizeRuntimePath('.'), '');
+  assert.notEqual(canonicalSignature(signature()), canonicalSignature(signature('.')));
+  assert.notEqual(canonicalSignature(signature('/workspace/project')), canonicalSignature(signature('workspace/project')));
+  assert.notEqual(canonicalSignature(signature('/c:/workspace/project')), canonicalSignature(signature('C:\\workspace\\project')));
+  assert.notEqual(canonicalSignature(signature('//server/share/project')), canonicalSignature(signature('\\\\server\\share\\project')));
+});
+
+test('rejects Windows drive-relative paths instead of treating them as drive roots', () => {
+  for (const path of ['C:', 'C:project']) {
+    assert.throws(() => normalizeRuntimePath(path), { name: 'RangeError' });
+    assert.throws(() => matchRules(actionInput({
+      signature: { kind: 'action', tool: 'git', action: 'status', path }
+    }), []), { name: 'RangeError' });
+    assert.throws(() => matchRules(actionInput({
+      signature: { kind: 'action', tool: 'git', action: 'status', path }
+    }), [actionRule(`rule-${path}`)]), { name: 'RangeError' });
+  }
+
+  assert.equal(normalizeRuntimePath('C:\\'), 'c:/');
+});
+
+test('matches Windows metadata paths case-insensitively without crossing path flavors', () => {
+  const windowsMetadata = actionRule('rule-windows-metadata', {
+    signature: { kind: 'action', tool: 'git', action: 'fetch' },
+    applicability: {
+      scope: 'repository',
+      repositoryId: 'repository-1',
+      path: 'C:\\WORKSPACE\\PROJECT'
+    }
+  });
+  const windowsInput = actionInput({
+    signature: { kind: 'action', tool: 'git', action: 'push', path: 'c:\\workspace\\project\\' }
+  });
+  const posixInput = actionInput({
+    signature: { kind: 'action', tool: 'git', action: 'push', path: '/c:/workspace/project' }
+  });
+
+  assert.equal(matchRules(windowsInput, [windowsMetadata])[0]?.strength, 'metadata');
+  assert.deepEqual(matchRules(posixInput, [windowsMetadata]), []);
 });
 
 test('uses structured repository, tool, and path metadata after exact matching', () => {
@@ -155,14 +209,25 @@ test('uses tag subset matching only when every rule tag is present', () => {
 test('combines authoritative global rules with rules for the active repository', () => {
   const global = actionRule('rule-global', { applicability: { scope: 'global' } });
   const repository = actionRule('rule-repository');
+
+  const matches = matchRules(actionInput(), [repository, global]);
+
+  assert.deepEqual(matches.map(({ rule }) => rule.id), ['rule-global', 'rule-repository']);
+});
+
+test('returns non-authoritative global matches as context while policy keeps them non-enforcing', () => {
   const unapprovedGlobal = actionRule('rule-unapproved-global', {
     authoritative: false,
     applicability: { scope: 'global' }
   });
 
-  const matches = matchRules(actionInput(), [unapprovedGlobal, repository, global]);
+  const matches = matchRules(actionInput(), [unapprovedGlobal]);
+  assert.equal(matches.length, 1);
+  const decision = evaluateRule(matches[0]!, normalProfile);
 
-  assert.deepEqual(matches.map(({ rule }) => rule.id), ['rule-global', 'rule-repository']);
+  assert.equal(matches[0]?.strength, 'exact');
+  assert.equal(decision.outcome, 'ALLOW');
+  assert.equal(decision.explanation.code, 'CONTEXT_ONLY');
 });
 
 test('isolates rules belonging to other repositories', () => {
