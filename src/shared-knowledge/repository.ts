@@ -1,5 +1,6 @@
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 
 import type { KnowledgeState, LessonKind } from '../domain/types.js';
 import { assertIdentity, assertSafeExportValue, compare, contentHash, parseKnowledgeIndex, serializeKnowledgeIndex, type InstructionOrigin, type KnowledgeApplicability, type KnowledgeApproval, type KnowledgeIndexEntryV2, type KnowledgeIndexV2, type KnowledgeVerification } from './schema.js';
@@ -36,24 +37,28 @@ export interface KnowledgeContentSource {
 }
 
 export interface PublicationHooks {
-  /** Observes the portable swap window. Readers must resolve the stable backup here. */
+  /** Observes the portable swap window. Readers must resolve an immutable backup here. */
   readonly afterCurrentMovedToBackup?: () => void;
 }
 
+const backupPrefix = '.agent-experience-backup-';
+const stagePrefix = '.agent-experience-stage-';
+
 export function readSharedKnowledge(repositoryRoot: string): SharedKnowledgeDocument[] {
   const base = safeBase(repositoryRoot);
-  const backup = backupPath(repositoryRoot);
   assertNotSymlink(resolve(repositoryRoot));
-  if (!existsSync(base) && existsSync(backup)) return readGeneration(repositoryRoot, backup);
-  if (!existsSync(base)) return [];
-  try {
-    return readGeneration(repositoryRoot, base);
-  } catch (primaryError) {
-    if (existsSync(backup)) {
-      try { return readGeneration(repositoryRoot, backup); } catch { /* Report the primary generation error. */ }
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (existsSync(base)) {
+      try { return readGeneration(repositoryRoot, base); } catch (error) { lastError = error; }
     }
-    throw primaryError;
+    const backups = generationPaths(repositoryRoot, backupPrefix);
+    for (const backup of backups) {
+      try { return readGeneration(repositoryRoot, backup); } catch (error) { lastError = error; }
+    }
+    if (!existsSync(base) && backups.length === 0 && attempt === 2) return [];
   }
+  throw lastError ?? new Error('No valid repository knowledge generation is available.');
 }
 
 function readGeneration(repositoryRoot: string, base: string): SharedKnowledgeDocument[] {
@@ -124,10 +129,9 @@ export function writeSharedKnowledge(repositoryRoot: string, documents: readonly
   }
   const base = safeBase(repositoryRoot);
   mkdirSync(dirname(base), { recursive: true });
-  const stage = stagePath(repositoryRoot);
-  const backup = backupPath(repositoryRoot);
-  recoverInterruptedPublication(repositoryRoot, base, backup, stage);
-  let backedUp = false;
+  recoverInterruptedPublication(repositoryRoot, base);
+  const stage = uniqueGenerationPath(repositoryRoot, stagePrefix);
+  let backup: string | undefined;
   try {
     mkdirSync(join(stage, 'knowledge'), { recursive: true, mode: 0o755 });
     const entries: KnowledgeIndexEntryV2[] = normalized.map((document) => {
@@ -138,23 +142,17 @@ export function writeSharedKnowledge(repositoryRoot: string, documents: readonly
     const index: KnowledgeIndexV2 = { version: 2, entries };
     writeFileSync(join(stage, 'index.json'), serializeKnowledgeIndex(index), { encoding: 'utf8', flag: 'wx', mode: 0o644 });
     readGeneration(repositoryRoot, stage);
-    if (existsSync(base)) { renameSync(base, backup); backedUp = true; }
+    if (existsSync(base)) {
+      backup = uniqueBackupPath(repositoryRoot);
+      renameSync(base, backup);
+    }
     hooks.afterCurrentMovedToBackup?.();
     renameSync(stage, base);
-    if (backedUp) {
-      try { rmSync(backup, { recursive: true, force: true }); } catch { /* A complete prior backup is safe to retain. */ }
-      backedUp = false;
-    }
   } catch (error) {
-    if (backedUp && existsSync(backup)) {
-      if (existsSync(base)) rmSync(base, { recursive: true, force: true });
-      renameSync(backup, base);
-      backedUp = false;
-    }
+    if (backup && existsSync(backup) && !existsSync(base)) publishBackupCopy(repositoryRoot, base, backup);
     throw error;
   } finally {
     if (existsSync(stage)) rmSync(stage, { recursive: true, force: true });
-    if (backedUp && !existsSync(base)) renameSync(backup, base);
   }
 }
 
@@ -218,14 +216,6 @@ function safeBase(repositoryRoot: string): string {
   return base;
 }
 
-function backupPath(repositoryRoot: string): string {
-  return resolve(repositoryRoot, '.agent-experience-backup');
-}
-
-function stagePath(repositoryRoot: string): string {
-  return resolve(repositoryRoot, '.agent-experience-stage');
-}
-
 function safeChild(base: string, path: string): string {
   const target = resolve(base, path);
   if (relative(base, target).startsWith('..')) throw new Error('Knowledge document path escapes repository root.');
@@ -244,27 +234,71 @@ function assertNotSymlink(path: string): void {
 
 /**
  * Completes the portable publication protocol after an interrupted process.
- * Directory rename is not claimed as an atomic exchange. The stable backup lets
- * readers obtain the old complete generation while the primary name is absent.
+ * Directory rename is not claimed as an atomic exchange. Immutable uniquely
+ * named backups let readers finish against the selected old generation while
+ * the primary name is absent. Backup retention belongs to Task 4 and publication
+ * never renames or deletes a backup after it has been created.
  */
-function recoverInterruptedPublication(repositoryRoot: string, base: string, backup: string, stage: string): void {
+function recoverInterruptedPublication(repositoryRoot: string, base: string): void {
   assertNotSymlink(resolve(repositoryRoot));
-  for (const path of [base, backup, stage]) if (existsSync(path)) assertNotSymlink(path);
+  for (const stage of generationPaths(repositoryRoot, stagePrefix)) rmSync(stage, { recursive: true, force: true });
   if (existsSync(base)) {
-    try {
-      readGeneration(repositoryRoot, base);
-      if (existsSync(backup)) rmSync(backup, { recursive: true, force: true });
-    } catch (primaryError) {
-      if (!existsSync(backup)) throw primaryError;
-      readGeneration(repositoryRoot, backup);
+    try { readGeneration(repositoryRoot, base); return; }
+    catch (primaryError) {
+      const backup = newestValidBackup(repositoryRoot);
+      if (!backup) throw primaryError;
       rmSync(base, { recursive: true, force: true });
-      renameSync(backup, base);
+      publishBackupCopy(repositoryRoot, base, backup);
+      return;
     }
-  } else if (existsSync(backup)) {
-    readGeneration(repositoryRoot, backup);
-    renameSync(backup, base);
   }
-  if (existsSync(stage)) rmSync(stage, { recursive: true, force: true });
+  const backup = newestValidBackup(repositoryRoot);
+  if (backup) publishBackupCopy(repositoryRoot, base, backup);
+}
+
+function publishBackupCopy(repositoryRoot: string, base: string, backup: string): void {
+  readGeneration(repositoryRoot, backup);
+  const recoveryStage = uniqueGenerationPath(repositoryRoot, stagePrefix);
+  try {
+    cpSync(backup, recoveryStage, { recursive: true, errorOnExist: true });
+    readGeneration(repositoryRoot, recoveryStage);
+    renameSync(recoveryStage, base);
+  } finally {
+    if (existsSync(recoveryStage)) rmSync(recoveryStage, { recursive: true, force: true });
+  }
+}
+
+function newestValidBackup(repositoryRoot: string): string | undefined {
+  for (const backup of generationPaths(repositoryRoot, backupPrefix)) {
+    try { readGeneration(repositoryRoot, backup); return backup; } catch { /* Try the next immutable generation. */ }
+  }
+  return undefined;
+}
+
+function generationPaths(repositoryRoot: string, prefix: string): string[] {
+  try {
+    return readdirSync(resolve(repositoryRoot), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && entry.name.startsWith(prefix))
+      .map((entry) => resolve(repositoryRoot, entry.name))
+      .sort((left, right) => compare(right, left));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+function uniqueGenerationPath(repositoryRoot: string, prefix: string): string {
+  const timestamp = new Date().toISOString().replace(/[-:.]/g, '');
+  return resolve(repositoryRoot, `${prefix}${timestamp}-${randomUUID()}`);
+}
+
+function uniqueBackupPath(repositoryRoot: string): string {
+  const existingSequences = generationPaths(repositoryRoot, backupPrefix).map((path) => {
+    const match = basename(path).match(/^\.agent-experience-backup-(\d{16})-/);
+    return match ? Number(match[1]) : 0;
+  });
+  const sequence = Math.max(Date.now(), ...existingSequences.map((value) => value + 1));
+  return resolve(repositoryRoot, `${backupPrefix}${String(sequence).padStart(16, '0')}-${randomUUID()}`);
 }
 
 function assertSanitizedContent(value: Pick<SharedKnowledgeDocument, 'title' | 'context' | 'lesson' | 'recommendedBehavior' | 'evidenceSummary'>): void {

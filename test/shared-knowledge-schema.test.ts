@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -184,7 +184,12 @@ test('serves the prior complete generation during the directory swap and restore
 
   assert.throws(() => writeSharedKnowledge(repository, [{ ...document(), lesson: 'replacement' }], {
     afterCurrentMovedToBackup: () => {
-      duringSwap = readSharedKnowledge(repository);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const read = readSharedKnowledge(repository);
+        assert.notEqual(read.length, 0);
+        assert.equal(read[0]?.lesson, document().lesson);
+        duringSwap = read;
+      }
       throw new Error('injected publication failure');
     }
   }), /injected publication failure/);
@@ -193,12 +198,12 @@ test('serves the prior complete generation during the directory swap and restore
   assert.equal(readSharedKnowledge(repository)[0]?.lesson, document().lesson);
 });
 
-test('recovers an interrupted stable backup and safely cleans a leftover stage before publishing', () => {
+test('recovers an interrupted immutable backup and safely cleans a leftover stage before publishing', () => {
   const repository = root();
   writeSharedKnowledge(repository, [document()]);
   const primary = join(repository, 'agent-experience');
-  const backup = join(repository, '.agent-experience-backup');
-  const stage = join(repository, '.agent-experience-stage');
+  const backup = join(repository, '.agent-experience-backup-0001756123200000-fixture');
+  const stage = join(repository, '.agent-experience-stage-20260825T120000000Z-fixture');
   renameSync(primary, backup);
   cpSync(backup, stage, { recursive: true });
 
@@ -206,8 +211,22 @@ test('recovers an interrupted stable backup and safely cleans a leftover stage b
   writeSharedKnowledge(repository, [{ ...document(), lesson: 'recovered replacement' }]);
 
   assert.equal(readSharedKnowledge(repository)[0]?.lesson, 'recovered replacement');
-  assert.equal(existsSync(backup), false);
+  assert.equal(existsSync(backup), true);
   assert.equal(existsSync(stage), false);
+});
+
+test('keeps immutable unique backups and selects the newest valid generation deterministically', () => {
+  const repository = root();
+  writeSharedKnowledge(repository, [{ ...document(), lesson: 'generation one' }]);
+  writeSharedKnowledge(repository, [{ ...document(), lesson: 'generation two' }]);
+  writeSharedKnowledge(repository, [{ ...document(), lesson: 'generation three' }]);
+  const backups = readdirSync(repository).filter((name) => name.startsWith('.agent-experience-backup-')).sort();
+  assert.equal(backups.length, 2);
+  assert.notEqual(backups[0], backups[1]);
+
+  rmSync(join(repository, 'agent-experience'), { recursive: true });
+  assert.equal(readSharedKnowledge(repository)[0]?.lesson, 'generation two');
+  assert.equal(backups.every((name) => existsSync(join(repository, name))), true);
 });
 
 test('keeps superseded knowledge and its replacement linked and inspectable', () => {
