@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -17,7 +17,7 @@ import { createRuleIndex } from '../src/runtime/rule-index.js';
 import { compileRuntimeSnapshot } from '../src/runtime/snapshot.js';
 import { openExperienceDatabase } from '../src/storage/database.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
-import { overrideAuditMigration, OverrideStore } from '../src/storage/override-store.js';
+import { ensureOverrideAuditUseMigration, overrideAuditMigration, OverrideStore } from '../src/storage/override-store.js';
 
 const now = '2026-08-25T10:00:00.000Z';
 const action: RuntimeInput = {
@@ -210,6 +210,114 @@ test('ExperienceStore safely recognizes a use migration first applied by Overrid
   experienceStore.close();
   const database = openExperienceDatabase(databasePath);
   assert.equal(database.prepare('SELECT version FROM schema_migrations WHERE version = 6').get() !== undefined, true);
+  database.close();
+});
+
+function insertLegacyAudit(database: ReturnType<typeof openExperienceDatabase>, entry: OverrideAuditEntry): void {
+  database.prepare(`
+    INSERT INTO runtime_override_audit
+      (id, override_id, phase, scope_json, reason, created_at, expires_at, recorded_at, decision_references_json, post_action_outcome)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    entry.id, entry.override.id, entry.phase, JSON.stringify(entry.override.scope), entry.override.reason,
+    entry.override.createdAt, entry.override.expiresAt ?? null, entry.recordedAt,
+    JSON.stringify(entry.decisionReferences), entry.postActionOutcome ?? null
+  );
+}
+
+function legacyState(database: ReturnType<typeof openExperienceDatabase>): unknown {
+  return {
+    schema: database.prepare("SELECT type, name, sql FROM sqlite_master WHERE name LIKE 'runtime_override_audit%' ORDER BY type, name").all(),
+    rows: database.prepare('SELECT * FROM runtime_override_audit ORDER BY sequence').all(),
+    versions: database.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
+  };
+}
+
+function createVersion5Database(entry: OverrideAuditEntry): { databasePath: string; before: unknown; bytes: Buffer } {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-override-v5-')), 'experience.sqlite');
+  const database = openExperienceDatabase(databasePath);
+  database.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+  database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(5, now);
+  database.exec(overrideAuditMigration);
+  insertLegacyAudit(database, entry);
+  const before = legacyState(database);
+  database.close();
+  return { databasePath, before, bytes: readFileSync(databasePath) };
+}
+
+function attemptVersion6(databasePath: string): Error | undefined {
+  const database = openExperienceDatabase(databasePath);
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    ensureOverrideAuditUseMigration(database);
+    database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(6, now);
+    database.exec('COMMIT');
+    database.close();
+    return undefined;
+  } catch (error) {
+    database.exec('ROLLBACK');
+    database.close();
+    return error as Error;
+  }
+}
+
+test('unsafe legacy source and identifier references fail migration without rewriting audit history', () => {
+  for (const [label, reference, secret] of [
+    ['source', { ...decision.references[0]!, source: 'https://user:password@example.com/repository' }, 'https://user:password@example.com/repository'],
+    ['id', { ...decision.references[0]!, ruleId: '/Users/private/rule' }, '/Users/private/rule']
+  ] as const) {
+    const unsafe = {
+      ...audit(`legacy-unsafe-${label}`, `legacy-override-${label}`, 'authorized'),
+      decisionReferences: [reference]
+    };
+    const fixture = createVersion5Database(unsafe);
+    const error = attemptVersion6(fixture.databasePath);
+    assert.notEqual(error, undefined);
+    assert.equal(error!.message.includes(secret), false);
+
+    const database = openExperienceDatabase(fixture.databasePath);
+    assert.deepEqual(legacyState(database), fixture.before);
+    database.close();
+    assert.deepEqual(readFileSync(fixture.databasePath), fixture.bytes);
+  }
+});
+
+test('out-of-window legacy authorization fails migration with version 5 intact', () => {
+  const grant = createRuntimeOverride({
+    id: 'legacy-expired', scope: { kind: 'rule', ruleId: 'rule-a' }, reason: 'Legacy exception.',
+    createdAt: '2026-08-25T08:00:00.000Z', expiresAt: '2026-08-25T09:00:00.000Z'
+  });
+  const fixture = createVersion5Database({
+    ...audit('legacy-expired-auth', 'legacy-expired', 'authorized'), override: grant, recordedAt: '2026-08-25T09:00:00.000Z'
+  });
+  assert.match(attemptVersion6(fixture.databasePath)?.message ?? '', /authorization time/i);
+  const database = openExperienceDatabase(fixture.databasePath);
+  assert.deepEqual(legacyState(database), fixture.before);
+  assert.deepEqual((database.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as Array<{ version: number }>).map(({ version }) => version), [5]);
+  database.close();
+  assert.deepEqual(readFileSync(fixture.databasePath), fixture.bytes);
+});
+
+test('version 6 schema rejects null, empty, and duplicate use-phase identities directly', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-override-')), 'experience.sqlite');
+  new OverrideStore(databasePath).close();
+  const database = openExperienceDatabase(databasePath);
+  const entry = audit('direct', 'direct-override', 'authorized', undefined, 'direct-use');
+  const insert = database.prepare(`
+    INSERT INTO runtime_override_audit
+      (id, override_id, use_id, phase, scope_json, reason, created_at, expires_at, recorded_at, decision_references_json, post_action_outcome)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const values = (id: string, useId: string | null) => [
+    id, entry.override.id, useId, entry.phase, JSON.stringify(entry.override.scope), entry.override.reason,
+    entry.override.createdAt, null, entry.recordedAt, JSON.stringify(entry.decisionReferences), null
+  ] as const;
+  assert.throws(() => insert.run(...values('null-use', null)), /NOT NULL|constraint/i);
+  assert.throws(() => insert.run(...values('empty-use', '')), /CHECK|constraint/i);
+  assert.throws(() => insert.run(...values('noncanonical-use', 'bad/use')), /CHECK|constraint/i);
+  insert.run(...values('valid-use', 'direct-use'));
+  assert.throws(() => insert.run(...values('duplicate-use', 'direct-use')), /UNIQUE|constraint/i);
+  assert.equal((database.prepare('SELECT COUNT(*) AS count FROM runtime_override_audit').get() as { count: number }).count, 1);
   database.close();
 });
 

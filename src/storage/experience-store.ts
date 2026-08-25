@@ -325,6 +325,8 @@ export class ExperienceStore {
       if (!applied.has(6)) {
         ensureOverrideAuditUseMigration(this.database);
         this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(6, new Date().toISOString());
+      } else {
+        ensureOverrideAuditUseMigration(this.database);
       }
       this.database.exec('COMMIT');
     } catch (error) {
