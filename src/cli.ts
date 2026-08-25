@@ -20,6 +20,7 @@ interface ParsedArguments { readonly positionals: string[]; readonly options: Ma
 const scopes = new Set(['global', 'repo'] as const);
 const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired']);
 const reviewSources = new Set(['codex', 'claude-code', 'cursor'] as const);
+const knownCommands = new Set(['init', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'review', 'runtime', 'knowledge']);
 
 export function runCli(args: string[]): CliResult {
   if (args.length === 1 && args[0] === '--help') return { exitCode: 0, stdout: `${usage()}\n`, stderr: '' };
@@ -104,12 +105,12 @@ function execute(service: ExperienceService, parsed: ParsedArguments): unknown {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'input', 'json', 'repository']);
     return service.knowledgePromote(requiredString(parsed.options, 'repository'), requiredString(parsed.options, 'input'));
   }
-  throw new SyntaxError(`Unknown command: ${[command, subcommand, ...rest].filter(Boolean).join(' ')}`);
+  throw invalidCommand(command);
 }
 
 function parseReviewRequest(parsed: ParsedArguments) {
   const [command, subcommand, ...rest] = parsed.positionals;
-  if (command !== 'review' || !['session', 'sessions'].includes(subcommand ?? '') || rest.length !== 0) throw new SyntaxError(`Unknown command: ${parsed.positionals.join(' ')}`);
+  if (command !== 'review' || !['session', 'sessions'].includes(subcommand ?? '') || rest.length !== 0) throw invalidCommand(command);
   assertNoUnknownOptions(
     parsed.options,
     subcommand === 'sessions'
@@ -206,7 +207,7 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
     const status = value as { health: string; profileId: string; fallbackSource: string; circuitState: string };
     return `Runtime ${status.health}; profile ${status.profileId}; fallback ${status.fallbackSource}; circuit ${status.circuitState}.`;
   }
-  if (command === 'runtime' && subcommand === 'config') return `Runtime profile ${(value as { profile: { id: string } }).profile.id}.`;
+  if (command === 'runtime' && subcommand === 'config') return formatRuntimeConfiguration(value as RuntimeConfigurationExplanation);
   if (command === 'knowledge' && subcommand === 'promote') return `Promoted ${(value as { identity: string }).identity} as branch-local knowledge.`;
   if (command === 'knowledge' && subcommand === 'validate') {
     const result = value as { entries: number; trustedRefActive: boolean };
@@ -218,6 +219,34 @@ interface KnowledgeRecord { readonly id: string; readonly state: string; readonl
 function formatKnowledgeList(entries: readonly KnowledgeRecord[]): string { return entries.length ? entries.map((entry) => formatKnowledge(entry, false)).join('\n') : 'No knowledge entries found.'; }
 function formatKnowledge(entry: KnowledgeRecord, includeEvidence: boolean): string { return `${entry.id} [${entry.state}]${entry.authoritative ? ' [authoritative]' : ''}\n${entry.statement}${includeEvidence ? `\nEvidence: ${entry.evidenceIds.join(', ')}` : ''}`; }
 function countLabel(count: number, singular: string): string { return `${count} ${count === 1 ? singular : `${singular}s`}`; }
+interface RuntimeConfigurationExplanation {
+  readonly profile: {
+    readonly id: string;
+    readonly hardBlocking: boolean;
+    readonly warningsEnabled: boolean;
+    readonly captureEnabled: boolean;
+    readonly retrievalEnabled: boolean;
+    readonly degradedOutcomes: Readonly<Record<'normal' | 'caution' | 'protected', string>>;
+  };
+  readonly trace: Readonly<Record<'id' | 'hardBlocking' | 'warningsEnabled' | 'captureEnabled' | 'retrievalEnabled' | 'degradedOutcomes', { readonly source: string; readonly profileId?: string }>>;
+}
+function formatRuntimeConfiguration(value: RuntimeConfigurationExplanation): string {
+  const fields = ['id', 'hardBlocking', 'warningsEnabled', 'captureEnabled', 'retrievalEnabled', 'degradedOutcomes'] as const;
+  const rendered = fields.map((field) => {
+    const raw = field === 'degradedOutcomes'
+      ? `normal=${value.profile.degradedOutcomes.normal},caution=${value.profile.degradedOutcomes.caution},protected=${value.profile.degradedOutcomes.protected}`
+      : String(value.profile[field]);
+    const trace = value.trace[field];
+    const profileId = trace.profileId !== undefined && /^[A-Za-z0-9._-]+$/.test(trace.profileId) ? `:${trace.profileId}` : '';
+    return `${field}=${raw} [${trace.source}${profileId}]`;
+  });
+  return [`Runtime profile ${value.profile.id}.`, ...rendered].join('\n');
+}
+function invalidCommand(command: string | undefined): SyntaxError {
+  return new SyntaxError(command !== undefined && knownCommands.has(command)
+    ? `Unknown command form for ${command}.`
+    : 'Unknown command.');
+}
 function usage(): string { return 'Usage: ael <init|experience add|validate|inspect|lessons list|retrieve|export|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge promote> [options]'; }
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } {
   return error instanceof DomainError || error instanceof RuntimeServiceError

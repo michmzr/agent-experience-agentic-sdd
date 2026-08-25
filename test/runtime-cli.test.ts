@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { runCli } from '../src/cli.js';
-import { createLocalGitContentAdapter } from '../src/application/runtime-service.js';
+import { createLocalGitContentAdapter, RuntimeService } from '../src/application/runtime-service.js';
 import type { RuntimeRule } from '../src/runtime/contracts.js';
 import { compileRuntimeSnapshot } from '../src/runtime/snapshot.js';
 import { RuntimeSnapshotStore } from '../src/storage/runtime-snapshot-store.js';
@@ -50,12 +50,34 @@ test('creates an empty snapshot only when the target snapshot is absent or refre
 
   const first = runCli(['runtime', 'evaluate', '--input', input, '--json', '--data-dir', dataDir]);
   const second = runCli(['runtime', 'evaluate', '--input', input, '--json', '--data-dir', dataDir]);
+  const repeated = runCli(['runtime', 'evaluate', '--input', input, '--json', '--data-dir', dataDir]);
   const refreshed = runCli(['runtime', 'evaluate', '--input', input, '--refresh', '--json', '--data-dir', dataDir]);
 
   assert.equal(first.exitCode, 0);
   assert.equal(JSON.parse(first.stdout).outcome, 'ALLOW');
-  assert.equal(second.stdout, first.stdout);
-  assert.equal(refreshed.stdout, first.stdout);
+  assert.equal(repeated.stdout, second.stdout);
+  assert.equal(JSON.parse(refreshed.stdout).outcome, 'ALLOW');
+}));
+
+test('rebuilds a validated snapshot for a different repository without serving cross-repository rules', () => withDirectory((dataDir) => {
+  const inputA = join(dataDir, 'repo-a.json');
+  const inputB = join(dataDir, 'repo-b.json');
+  writeFileSync(inputA, JSON.stringify(action));
+  writeFileSync(inputB, JSON.stringify({ ...action, repositoryId: 'repo-b' }));
+  const rule: RuntimeRule = {
+    id: 'repo-a-only', state: 'verified', authoritative: true, effect: 'conflict', signature: action.signature,
+    applicability: { scope: 'repository', repositoryId: 'repo-1' }, reference: { knowledgeId: 'repo-a-only', evidenceIds: [] }
+  };
+  new RuntimeSnapshotStore(join(dataDir, 'runtime'), { clock: Date.now }).publish(compileRuntimeSnapshot({
+    repositoryId: 'repo-1', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule]
+  }));
+  const service = new RuntimeService({ dataDir });
+
+  assert.equal(service.evaluate({ inputPath: inputA }).outcome, 'BLOCK');
+  assert.equal(service.evaluate({ inputPath: inputB }).outcome, 'ALLOW');
+  assert.equal(new RuntimeSnapshotStore(join(dataDir, 'runtime'), { clock: Date.now }).loadCurrent().repositoryId, 'repo-b');
+  assert.equal(service.evaluate({ inputPath: inputA }).outcome, 'BLOCK');
+  assert.equal(new RuntimeSnapshotStore(join(dataDir, 'runtime'), { clock: Date.now }).loadCurrent().repositoryId, 'repo-1');
 }));
 
 test('does not overwrite corrupt existing snapshot state without explicit refresh', () => withDirectory((dataDir) => {
@@ -80,6 +102,21 @@ test('enforces runtime command option allowlists and returns syntax exit code 2'
   assert.equal(runCli(['runtime', 'evaluate', '--input', input, '--remote', 'x', '--data-dir', dataDir]).exitCode, 2);
   assert.equal(runCli(['runtime', 'evaluate', '--input', input, '--profile', 'custom', '--data-dir', dataDir]).exitCode, 2);
   assert.equal(runCli(['runtime', 'status', '--input', input, '--data-dir', dataDir]).exitCode, 2);
+}));
+
+test('does not echo unexpected positional paths or values in command-shape diagnostics', () => withDirectory((dataDir) => {
+  const protectedPath = join(dataDir, 'private', 'credential-value');
+  for (const args of [
+    ['runtime', 'evaluate', protectedPath],
+    ['runtime', 'config', 'explain', protectedPath],
+    ['knowledge', 'validate', protectedPath],
+    [protectedPath]
+  ]) {
+    const result = runCli(args);
+    assert.equal(result.exitCode, 2);
+    assert.equal(`${result.stdout}${result.stderr}`.includes(protectedPath), false);
+    assert.match(`${result.stdout}${result.stderr}`, /invalid|unknown/i);
+  }
 }));
 
 test('does not expose input paths or captured sensitive values in runtime diagnostics', () => withDirectory((dataDir) => {
@@ -107,6 +144,19 @@ test('explains target configuration without echoing the workspace or credential-
   assert.equal(output.trace.id.source, 'built-in-default');
   assert.equal(result.stdout.includes(workspace), false);
   assert.equal(result.stdout.includes('secret'), false);
+
+  const human = runCli(['runtime', 'config', 'explain', '--workspace', workspace, '--remote', remote, '--data-dir', dataDir]);
+  assert.equal(human.stdout, [
+    'Runtime profile normal.',
+    'id=normal [built-in-default:normal]',
+    'hardBlocking=true [built-in-default:normal]',
+    'warningsEnabled=true [built-in-default:normal]',
+    'captureEnabled=true [built-in-default:normal]',
+    'retrievalEnabled=true [built-in-default:normal]',
+    'degradedOutcomes=normal=ALLOW,caution=WARN,protected=BLOCK [built-in-default:normal]'
+  ].join('\n') + '\n');
+  assert.equal(human.stdout.includes(workspace), false);
+  assert.equal(human.stdout.includes('secret'), false);
 }));
 
 test('promotes and validates repository knowledge with concise deterministic output', () => withDirectory((directory) => {

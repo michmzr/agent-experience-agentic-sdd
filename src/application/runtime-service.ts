@@ -6,7 +6,8 @@ import { resolveProfileTarget, type ResolvedProfileTarget } from '../config/prof
 import { BUILT_IN_RUNTIME_PROFILES } from '../config/runtime-profile.js';
 import type { RuntimeInput, RuntimeProfile } from '../runtime/contracts.js';
 import { createRuntimeGate, type GateDecision } from '../runtime/gate.js';
-import { ResilientRuntime, type RuntimeStatus } from '../runtime/resilience.js';
+import { ResilientRuntime, RuntimeSnapshotUnavailableError, type RuntimeStatus } from '../runtime/resilience.js';
+import { createRuleIndex, type RuleIndex } from '../runtime/rule-index.js';
 import { compileRuntimeSnapshot, type RuntimeSnapshotV1 } from '../runtime/snapshot.js';
 import { activateGitKnowledge, type GitContentAdapter } from '../shared-knowledge/git-activation.js';
 import { promoteKnowledge } from '../shared-knowledge/promotion-policy.js';
@@ -62,6 +63,9 @@ export class RuntimeService {
   readonly #clock: () => Date;
   readonly #gitAdapter: (repository: string) => GitContentAdapter;
   readonly #refreshSnapshot: (input: RuntimeInput, current: RuntimeSnapshotV1 | undefined) => RuntimeSnapshotV1;
+  readonly #runtimes = new Map<string, { readonly runtime: ResilientRuntime; readonly snapshotChecksum?: string }>();
+  readonly #snapshotsByTarget = new Map<string, RuntimeSnapshotV1>();
+  #activeRuntimeKey?: string;
 
   constructor(options: RuntimeServiceOptions) {
     this.#clock = options.clock ?? (() => new Date());
@@ -86,20 +90,44 @@ export class RuntimeService {
   evaluate(options: RuntimeEvaluationOptions): PublicGateDecision {
     const input = this.#readRuntimeInput(options.inputPath);
     const profile = runtimeProfile(options.profileId ?? 'normal');
+    const target = input.repositoryId ?? 'global';
     const snapshotAbsent = !existsSync(this.#store.paths.manifest);
     const current = this.#optionalCurrent();
-    if (options.refresh === true || snapshotAbsent) {
-      try { this.#store.publish(this.#refreshSnapshot(input, current)); }
+    if (current !== undefined) this.#snapshotsByTarget.set(current.repositoryId, current);
+    const targetMismatch = current !== undefined && current.repositoryId !== target;
+    let activeChecksum = current?.repositoryId === target ? current.checksum : undefined;
+    if (options.refresh === true || snapshotAbsent || targetMismatch) {
+      let published: RuntimeSnapshotV1;
+      try {
+        const candidate = this.#refreshSnapshot(input, current?.repositoryId === target ? current : this.#snapshotsByTarget.get(target));
+        if (candidate.repositoryId !== target) throw new TypeError('Runtime snapshot compiler returned the wrong repository.');
+        published = this.#store.publish(candidate);
+      }
       catch { throw new RuntimeServiceError('RUNTIME_UNAVAILABLE', 'Runtime snapshot refresh failed.'); }
+      this.#snapshotsByTarget.set(target, published);
+      this.#replaceTargetRuntimes(target, profile, createRuleIndex(published), published.checksum);
+      activeChecksum = published.checksum;
     }
 
-    const resolution = this.#resolve(profile);
+    const runtime = this.#runtimeFor(profile, target, undefined, activeChecksum);
+    this.#activeRuntimeKey = runtimeKey(profile.id, target);
+    const resolution = runtime.resolve(input.operationClass);
     const gate = createRuntimeGate({ profile, status: resolution.status, ...(resolution.index === undefined ? {} : { index: resolution.index }) });
     return publicDecision(gate.evaluate(input));
   }
 
   status(): RuntimeStatus {
-    return this.#resolve(BUILT_IN_RUNTIME_PROFILES.normal).status;
+    if (this.#activeRuntimeKey !== undefined) {
+      const active = this.#runtimes.get(this.#activeRuntimeKey);
+      if (active !== undefined) return active.runtime.resolve('normal').status;
+    }
+    const current = this.#optionalCurrent();
+    const target = current?.repositoryId ?? 'global';
+    if (current !== undefined) this.#snapshotsByTarget.set(target, current);
+    const profile = BUILT_IN_RUNTIME_PROFILES.normal;
+    const runtime = this.#runtimeFor(profile, target, undefined, current?.checksum);
+    this.#activeRuntimeKey = runtimeKey(profile.id, target);
+    return runtime.resolve('normal').status;
   }
 
   explainConfiguration(workspace: string, remote?: string): ResolvedProfileTarget {
@@ -136,14 +164,26 @@ export class RuntimeService {
     }
   }
 
-  #resolve(profile: RuntimeProfile) {
+  #runtimeFor(profile: RuntimeProfile, target: string, currentIndex?: RuleIndex, snapshotChecksum?: string): ResilientRuntime {
+    const key = runtimeKey(profile.id, target);
+    const existing = this.#runtimes.get(key);
+    if (existing !== undefined && (snapshotChecksum === undefined || existing.snapshotChecksum === snapshotChecksum)) return existing.runtime;
     const runtime = new ResilientRuntime({
       profile,
+      ...(currentIndex === undefined ? {} : { currentIndex }),
       clock: () => this.#clock().getTime(),
-      loadCurrent: () => this.#store.loadCurrent(),
-      loadLastKnownGood: () => this.#store.loadLastKnownGood()
+      loadCurrent: () => snapshotForTarget(this.#store.loadCurrent(), target, snapshotChecksum),
+      loadLastKnownGood: () => snapshotForTarget(this.#store.loadLastKnownGood(), target)
     });
-    return runtime.resolve('normal');
+    this.#runtimes.set(key, { runtime, ...(snapshotChecksum === undefined ? {} : { snapshotChecksum }) });
+    return runtime;
+  }
+
+  #replaceTargetRuntimes(target: string, profile: RuntimeProfile, index: RuleIndex, checksum: string): void {
+    for (const key of this.#runtimes.keys()) {
+      if (key.endsWith(`\u0000${target}`)) this.#runtimes.delete(key);
+    }
+    this.#runtimeFor(profile, target, index, checksum);
   }
 
   #optionalCurrent(): RuntimeSnapshotV1 | undefined {
@@ -170,6 +210,17 @@ export function isBuiltInRuntimeProfileId(value: string): value is BuiltInRuntim
 
 function runtimeProfile(id: BuiltInRuntimeProfileId): RuntimeProfile {
   return BUILT_IN_RUNTIME_PROFILES[id];
+}
+
+function runtimeKey(profileId: string, target: string): string {
+  return `${profileId}\u0000${target}`;
+}
+
+function snapshotForTarget(snapshot: RuntimeSnapshotV1, target: string, checksum?: string): RuntimeSnapshotV1 {
+  if (snapshot.repositoryId !== target || (checksum !== undefined && snapshot.checksum !== checksum)) {
+    throw new RuntimeSnapshotUnavailableError('Runtime snapshot is unavailable for the target repository and generation.');
+  }
+  return snapshot;
 }
 
 function publicDecision(decision: GateDecision): PublicGateDecision {
