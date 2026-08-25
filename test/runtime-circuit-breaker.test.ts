@@ -31,3 +31,7 @@ test('a failed half-open probe reopens the circuit for a new reset interval', ()
   now = 19;
   assert.equal(breaker.canAttempt(), false);
 });
+
+test('requires an injected clock', () => {
+  assert.throws(() => new CircuitBreaker({ failureThreshold: 1, resetAfterMs: 10 } as never));
+});

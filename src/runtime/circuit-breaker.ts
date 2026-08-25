@@ -3,7 +3,7 @@ export type CircuitState = 'closed' | 'open' | 'half-open';
 export interface CircuitBreakerConfig {
   readonly failureThreshold: number;
   readonly resetAfterMs: number;
-  readonly clock?: () => number;
+  readonly clock: () => number;
 }
 
 export class CircuitBreaker {
@@ -17,9 +17,10 @@ export class CircuitBreaker {
   constructor(config: CircuitBreakerConfig) {
     if (!Number.isInteger(config.failureThreshold) || config.failureThreshold < 1) throw new RangeError('Circuit failure threshold must be a positive integer.');
     if (!Number.isFinite(config.resetAfterMs) || config.resetAfterMs < 0) throw new RangeError('Circuit reset interval must be non-negative.');
+    if (typeof config.clock !== 'function') throw new TypeError('Circuit breaker requires an injected clock.');
     this.#failureThreshold = config.failureThreshold;
     this.#resetAfterMs = config.resetAfterMs;
-    this.#clock = config.clock ?? Date.now;
+    this.#clock = config.clock;
   }
 
   get state(): CircuitState { return this.#state; }

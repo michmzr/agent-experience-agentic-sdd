@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -7,7 +7,7 @@ import test from 'node:test';
 import type { RuntimeRule } from '../src/runtime/contracts.js';
 import { createRuleIndex } from '../src/runtime/rule-index.js';
 import { compileRuntimeSnapshot, parseRuntimeSnapshot, serializeRuntimeSnapshot } from '../src/runtime/snapshot.js';
-import { RuntimeSnapshotStore } from '../src/storage/runtime-snapshot-store.js';
+import { RuntimeSnapshotStore, type RuntimeSnapshotStoreStep } from '../src/storage/runtime-snapshot-store.js';
 
 function rule(id: string, scope: 'global' | 'repository' = 'repository', repositoryId = 'repo-a'): RuntimeRule {
   return {
@@ -21,7 +21,7 @@ function rule(id: string, scope: 'global' | 'repository' = 'repository', reposit
 test('compiles stable isolated snapshots and excludes inactive rules', () => {
   const snapshot = compileRuntimeSnapshot({
     repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z',
-    globalRules: [rule('global', 'global'), { ...rule('unapproved', 'global'), authoritative: false }],
+    globalRules: [rule('global', 'global')],
     repositoryRules: [rule('other', 'repository', 'repo-b'), rule('active'), { ...rule('expired'), state: 'expired' }]
   });
   assert.deepEqual(snapshot.rules.map(({ id }) => id), ['active', 'global']);
@@ -32,9 +32,17 @@ test('compiles stable isolated snapshots and excludes inactive rules', () => {
 test('includes non-authoritative and disputed context only when explicitly supplied', () => {
   const contextual = { ...rule('context'), state: 'disputed' as const, authoritative: false };
   const observed = { ...rule('observed'), state: 'observed' as const };
-  const snapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [observed], contextRules: [contextual] });
+  assert.throws(() => compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [observed] }));
+  assert.throws(() => compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', globalRules: [{ ...rule('unapproved', 'global'), authoritative: false }] }));
+  const snapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', contextRules: [contextual, observed] });
   assert.deepEqual(snapshot.rules.map(({ id }) => id), ['context', 'observed']);
   assert.equal(snapshot.rules.every(({ effect }) => effect === 'context'), true);
+});
+
+test('uses only an explicit timestamp or injected clock when compiling a snapshot', () => {
+  const snapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', now: () => new Date('2026-08-25T01:02:03.000Z'), repositoryRules: [rule('active')] });
+  assert.equal(snapshot.generatedAt, '2026-08-25T01:02:03.000Z');
+  assert.throws(() => compileRuntimeSnapshot({ repositoryId: 'repo-a', repositoryRules: [rule('active')] } as never));
 });
 
 test('rejects incompatible, corrupt, and unsafe path snapshots', () => {
@@ -69,8 +77,18 @@ test('atomically rotates current into exactly one validated last-known-good snap
   store.publish(second);
   assert.equal(store.loadCurrent().rules[0]?.id, 'second');
   assert.equal(store.loadLastKnownGood().rules[0]?.id, 'first');
-  writeFileSync(store.paths.current, '{broken', 'utf8');
+  const manifest = JSON.parse(readFileSync(store.paths.manifest, 'utf8')) as { version: number; current: { checksum: string; file: string }; lastKnownGood: { checksum: string; file: string } };
+  assert.equal(manifest.version, 1);
+  assert.equal(manifest.current.checksum, second.checksum);
+  assert.equal(manifest.lastKnownGood.checksum, first.checksum);
+  assert.deepEqual(readdirSync(root).filter((name) => name.startsWith('generation-')).sort(), [manifest.current.file, manifest.lastKnownGood.file].sort());
+  writeFileSync(store.generationPath(second.checksum), '{broken', 'utf8');
   assert.throws(() => store.loadCurrent());
+  assert.equal(store.loadLastKnownGood().rules[0]?.id, 'first');
+  const priorManifest = readFileSync(store.paths.manifest, 'utf8');
+  const third = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:02:00.000Z', repositoryRules: [rule('third')] });
+  assert.throws(() => store.publish(third));
+  assert.equal(readFileSync(store.paths.manifest, 'utf8'), priorManifest);
   assert.equal(store.loadLastKnownGood().rules[0]?.id, 'first');
 });
 
@@ -83,7 +101,7 @@ test('failed candidate validation and symlink state paths preserve current', () 
   assert.equal(store.loadCurrent().rules[0]?.id, 'first');
 
   const unsafeRoot = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
-  symlinkSync('/dev/null', join(unsafeRoot, 'current.json'));
+  symlinkSync('/dev/null', join(unsafeRoot, 'manifest.json'));
   assert.throws(() => new RuntimeSnapshotStore(unsafeRoot).publish(first));
 });
 
@@ -102,8 +120,41 @@ test('rejects a state directory reached through a symlinked ancestor', () => {
   const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
   const target = join(root, 'target');
   mkdirSync(target, { mode: 0o700 });
+  mkdirSync(join(target, 'state'), { mode: 0o700 });
   const linked = join(root, 'linked');
   symlinkSync(target, linked);
   const snapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
   assert.throws(() => new RuntimeSnapshotStore(join(linked, 'state')).publish(snapshot));
+});
+
+test('manifest commit failures preserve the prior logical current and LKG generations', () => {
+  const steps: readonly RuntimeSnapshotStoreStep[] = [
+    'after-generation-write', 'after-generation-reopen', 'before-generation-rename', 'before-generation-directory-sync',
+    'after-manifest-write', 'after-manifest-reopen', 'before-manifest-rename', 'before-commit-directory-sync'
+  ];
+  for (const step of steps) {
+    const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+    const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+    const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
+    const third = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:02:00.000Z', repositoryRules: [rule('third')] });
+    new RuntimeSnapshotStore(root).publish(first);
+    new RuntimeSnapshotStore(root).publish(second);
+    const priorManifest = readFileSync(new RuntimeSnapshotStore(root).paths.manifest, 'utf8');
+    const failing = new RuntimeSnapshotStore(root, { injectFailure: (at) => { if (at === step) throw new Error(`injected ${step}`); } });
+    assert.throws(() => failing.publish(third));
+    assert.equal(readFileSync(failing.paths.manifest, 'utf8'), priorManifest, step);
+    assert.equal(new RuntimeSnapshotStore(root).loadCurrent().rules[0]?.id, 'second', step);
+    assert.equal(new RuntimeSnapshotStore(root).loadLastKnownGood().rules[0]?.id, 'first', step);
+  }
+});
+
+test('cleanup failure after a committed manifest cannot change logical correctness', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
+  new RuntimeSnapshotStore(root).publish(first);
+  const store = new RuntimeSnapshotStore(root, { injectFailure: (step) => { if (step === 'cleanup') throw new Error('cleanup failed'); } });
+  store.publish(second);
+  assert.equal(store.loadCurrent().rules[0]?.id, 'second');
+  assert.equal(store.loadLastKnownGood().rules[0]?.id, 'first');
 });

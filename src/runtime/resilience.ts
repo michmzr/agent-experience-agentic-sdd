@@ -1,7 +1,12 @@
 import type { DecisionOutcome, OperationClass, RuntimeProfile } from './contracts.js';
 import { CircuitBreaker, type CircuitBreakerConfig, type CircuitState } from './circuit-breaker.js';
 import { createRuleIndex, type RuleIndex } from './rule-index.js';
-import type { RuntimeSnapshotV1 } from './snapshot.js';
+import { RuntimeSnapshotValidationError, type RuntimeSnapshotV1 } from './snapshot.js';
+import { RuntimeSnapshotStorageError } from '../storage/runtime-snapshot-store.js';
+
+export class RuntimeSnapshotUnavailableError extends Error {
+  constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = 'RuntimeSnapshotUnavailableError'; }
+}
 
 export type RuntimeFallbackSource = 'memory' | 'snapshot' | 'last-known-good' | 'degraded-policy';
 export type RuntimeHealth = 'healthy' | 'fallback' | 'degraded';
@@ -28,7 +33,7 @@ export interface ResilientRuntimeOptions {
   readonly loadCurrent: () => RuntimeSnapshotV1;
   readonly loadLastKnownGood: () => RuntimeSnapshotV1;
   readonly circuit?: Omit<CircuitBreakerConfig, 'clock'>;
-  readonly clock?: () => number;
+  readonly clock: () => number;
   readonly onDiagnostic?: (message: string) => void;
 }
 
@@ -57,12 +62,16 @@ export class ResilientRuntime {
         const index = createRuleIndex(this.#loadCurrent());
         this.#breaker.recordSuccess(); this.#degradedDiagnosticEmitted = false; this.#current = index;
         return this.#withIndex('snapshot', 'healthy', index);
-      } catch {
+      } catch (currentError) {
+        if (!isExpectedAvailabilityError(currentError)) throw currentError;
         try {
           const index = createRuleIndex(this.#loadLastKnownGood());
           this.#breaker.recordSuccess(); this.#degradedDiagnosticEmitted = false; this.#current = index;
           return this.#withIndex('last-known-good', 'fallback', index);
-        } catch { this.#breaker.recordFailure(); }
+        } catch (lastKnownGoodError) {
+          if (!isExpectedAvailabilityError(lastKnownGoodError)) throw lastKnownGoodError;
+          this.#breaker.recordFailure();
+        }
       }
     }
     if (!this.#degradedDiagnosticEmitted) {
@@ -82,4 +91,10 @@ export class ResilientRuntime {
   #status(source: RuntimeFallbackSource, health: RuntimeHealth): RuntimeStatus {
     return Object.freeze({ health, profileId: this.#profile.id, hardBlocking: this.#profile.hardBlocking, retrievalMode: source === 'degraded-policy' ? 'degraded' : 'deterministic', fallbackSource: source, circuitState: this.#breaker.state });
   }
+}
+
+function isExpectedAvailabilityError(error: unknown): boolean {
+  return error instanceof RuntimeSnapshotUnavailableError
+    || error instanceof RuntimeSnapshotStorageError
+    || error instanceof RuntimeSnapshotValidationError;
 }
