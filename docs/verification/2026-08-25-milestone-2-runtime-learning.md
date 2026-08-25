@@ -2,7 +2,7 @@
 
 Date: 2026-08-25
 
-The verified implementation and acceptance commit is `b44cc04ee3547d1fa9c0e25d465134192b1eeb08`. It contains the complete production knowledge-to-runtime bridge, three runtime fixtures, milestone acceptance tests, and deterministic benchmark test. This verification document is a later docs-only commit, so the implementation SHA is exact without circular self-reference.
+The verified implementation and acceptance commit is `e3708aa722bc0bee4d37890e613e5b60d447adfe`. It contains the complete production knowledge-to-runtime bridge, three runtime fixtures, milestone acceptance tests, and deterministic benchmark test. This verification document is a later docs-only commit, so the implementation SHA is exact without circular self-reference.
 
 ## Executed evidence
 
@@ -18,7 +18,7 @@ The production local Git adapter uses `node:child_process` in `src/application/r
 
 ## Acceptance coverage
 
-The acceptance suite covers repeated invalid action prevention, successful workflow context retrieval, stale verified-rule contradiction, disputed-rule non-enforcement, task-specific promotion rejection, and learning-mode capture. Its adapter case starts from a real version 3 repository document at a trusted Git commit, calls the public runtime refresh method, then evaluates equivalent Codex, Claude Code, and Cursor inputs through restarted `RuntimeService` instances. It also proves that an uncommitted local directive is nonauthoritative and another repository cannot receive the rule.
+The acceptance suite covers repeated invalid action prevention, successful workflow context retrieval, stale verified-rule contradiction, disputed-rule non-enforcement, task-specific promotion rejection, and learning-mode capture. Its adapter case starts from a real version 3 repository document at a trusted Git commit, calls the public runtime refresh method, then evaluates equivalent Codex, Claude Code, and Cursor inputs through restarted `RuntimeService` instances. A valid active branch-local directive is included in the same snapshot as `authoritative: false` context: its exact match returns ALLOW with its knowledge reference and `CONTEXT_ONLY` explanation. Inactive local entries and entries for another repository are excluded, and cross-repository evaluation returns no reference.
 
 The schema and compiler tests cover byte-stable version 3 serialization, compatible version 1 and version 2 reads, malformed directives, closed-world keys, bounded canonical values, path flavors, privacy rejection, deterministic immutable rule ordering, exact repository scope, trusted provenance, inactive states, context-only disputed/observed knowledge, empty evidence references, and the absence of prose inference. Promotion tests prove that validated structured directives survive the document flow while prose-only documents acquire no directive.
 
@@ -28,13 +28,13 @@ Boundary cases cover cross-adapter credential classification and benign controls
 
 ## Benchmark observation
 
-The focused post-commit run recorded four deterministic fixtures, retrieval recall `1.0`, `0` false warnings, `0` false hard blocks, and `20,000` synchronous decisions. Observed elapsed gate time was `129.501292 ms`, or `6.4750646 microseconds` per decision on that run. Timing is observational and is not a release threshold.
+The focused post-commit run recorded four deterministic fixtures, retrieval recall `1.0`, `0` false warnings, `0` false hard blocks, and `20,000` synchronous decisions. Observed elapsed gate time was `143.194875 ms`, or `7.15974375 microseconds` per decision on that run. Timing is observational and is not a release threshold.
 
 Release thresholds remain unset because real project-session data has not been collected. The current fixture values are regression observations only.
 
 ## Reviewer disposition
 
-Task-level specification and quality reviews for Tasks 1 through 7 were approved before Task 8 began. The first Task 8 review rejected the acceptance-only bridge because production could not compile trusted repository knowledge into runtime rules. Commit `b44cc04ee3547d1fa9c0e25d465134192b1eeb08` adds that missing bridge and replaces manual acceptance rule construction. Independent specification and quality re-reviews of this commit and the complete milestone remain pending. The product roadmap remains in progress until both reviews approve the verified tree.
+Task-level specification and quality reviews for Tasks 1 through 7 were approved before Task 8 began. The first Task 8 review rejected the acceptance-only bridge because production could not compile trusted repository knowledge into runtime rules. A later policy review found that the bridge omitted valid branch-local structured context. Commit `e3708aa722bc0bee4d37890e613e5b60d447adfe` retains that context while forcing it non-authoritative and non-enforcing. Final independent quality review of this commit and the complete milestone remains pending. The product roadmap remains in progress until that review approves the verified tree.
 
 ## Known minor follow-ups
 

@@ -8,7 +8,7 @@
 
 **Tech stack:** TypeScript 5.9, Node.js 22 built-ins, `node:sqlite`, `node:test`, local Git subprocesses through injected adapters, pnpm.
 
-**Execution status (2026-08-25):** Tasks 1-7 complete. Task 8 implementation and verification are complete at `b44cc04ee3547d1fa9c0e25d465134192b1eeb08`; final independent milestone reviews of the production knowledge-to-runtime bridge are pending.
+**Execution status (2026-08-25):** Tasks 1-7 complete. Task 8 implementation and verification are complete at `e3708aa722bc0bee4d37890e613e5b60d447adfe`; final independent quality review of the production knowledge-to-runtime bridge is pending.
 
 ---
 
@@ -379,7 +379,7 @@ git commit -m "feat: expose runtime learning commands"
 
 ### Task 8: Milestone acceptance, benchmarks, and delivery evidence
 
-Status: Implementation and verification complete at `b44cc04ee3547d1fa9c0e25d465134192b1eeb08`. Final independent milestone reviews are pending.
+Status: Implementation and verification complete at `e3708aa722bc0bee4d37890e613e5b60d447adfe`. Final independent quality review is pending.
 
 **Files:**
 
@@ -400,7 +400,7 @@ Status: Implementation and verification complete at `b44cc04ee3547d1fa9c0e25d465
 
 - [x] **Step 1: Add failing acceptance fixtures and tests**
 
-Cover repeated invalid action prevention, reusable successful workflow retrieval, stale verified rule contradicted by success, disputed rule never blocking, task-specific instruction not promoted, learning-mode downgrade with capture active, trusted structured repository knowledge compiled and published through the public application bridge, durable reuse through all three adapters, ordinary degraded fail-open, protected configured fail-closed, deterministic serialization, and no network/LLM runtime dependency. Preserve v1/v2 knowledge reads while v3 adds a strict optional runtime directive. Never derive enforcement from Markdown prose or branch-local changes.
+Cover repeated invalid action prevention, reusable successful workflow retrieval, stale verified rule contradicted by success, disputed rule never blocking, task-specific instruction not promoted, learning-mode downgrade with capture active, trusted structured repository knowledge compiled and published through the public application bridge, durable reuse through all three adapters, ordinary degraded fail-open, protected configured fail-closed, deterministic serialization, and no network/LLM runtime dependency. Preserve v1/v2 knowledge reads while v3 adds a strict optional runtime directive. Never derive enforcement from Markdown prose or branch-local changes; valid active branch-local directives remain non-authoritative runtime context.
 
 - [x] **Step 2: Add deterministic benchmark metrics**
 
