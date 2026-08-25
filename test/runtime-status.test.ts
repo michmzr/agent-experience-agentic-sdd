@@ -254,11 +254,34 @@ test('restart defers corrupt current recovery to last-known-good for status and 
     assert.equal(recovered.outcome, 'BLOCK');
     assert.equal(recovered.status.fallbackSource, 'last-known-good');
 
-    const refreshed = new RuntimeService({
-      dataDir,
-      refreshSnapshot: () => compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:02.000Z' })
-    }).evaluate({ inputPath: input, refresh: true });
+    const refreshed = new RuntimeService({ dataDir, clock: () => new Date('2026-08-25T00:00:02.000Z') })
+      .evaluate({ inputPath: input, refresh: true });
+    assert.equal(refreshed.outcome, 'BLOCK');
+    assert.equal(refreshed.status.health, 'healthy');
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('explicit refresh recovers an initial corrupt generation only from a same-target candidate', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-runtime-status-'));
+  const input = join(dataDir, 'action.json');
+  try {
+    writeFileSync(input, JSON.stringify(action));
+    const targetStore = new RuntimeSnapshotStore(runtimeTargetSnapshotDirectory(dataDir, 'repo-a'), { clock: Date.now });
+    const first = blockingSnapshot();
+    targetStore.publish(first);
+    writeFileSync(targetStore.generationPath(first.checksum), '{broken', { mode: 0o600 });
+
+    const wrongTarget = new RuntimeService({ dataDir, refreshSnapshot: () => compileRuntimeSnapshot({
+      repositoryId: 'repo-b', generatedAt: '2026-08-25T00:00:01.000Z'
+    }) });
+    assert.throws(() => wrongTarget.evaluate({ inputPath: input, refresh: true }), RuntimeServiceError);
+    assert.throws(() => targetStore.loadCurrent());
+
+    const refreshed = new RuntimeService({ dataDir, refreshSnapshot: () => compileRuntimeSnapshot({
+      repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:02.000Z'
+    }) }).evaluate({ inputPath: input, refresh: true });
     assert.equal(refreshed.outcome, 'ALLOW');
+    assert.equal(refreshed.status.health, 'healthy');
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 
@@ -278,7 +301,7 @@ test('explicit refresh proceeds when orchestration cannot validate current', () 
     mkdirSync(store.paths.root);
     writeFileSync(store.paths.manifest, '{}', { mode: 0o600 });
     const service = new RuntimeService({ dataDir, snapshotStore: store, refreshSnapshot: (runtimeInput, current) => {
-      assert.equal(current, undefined);
+      assert.equal(current?.checksum, snapshot.checksum);
       return compileRuntimeSnapshot({ repositoryId: runtimeInput.repositoryId!, generatedAt: '2026-08-25T00:00:02.000Z' });
     } });
 

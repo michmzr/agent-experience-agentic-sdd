@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -128,6 +128,70 @@ test('atomically rotates current into exactly one validated last-known-good snap
   assert.throws(() => snapshotStore.publish(third));
   assert.equal(readFileSync(snapshotStore.paths.manifest, 'utf8'), priorManifest);
   assert.equal(snapshotStore.loadLastKnownGood().rules[0]?.id, 'first');
+});
+
+test('recovery atomically replaces a corrupt single generation without weakening normal publish', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const snapshotStore = store(root);
+  const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
+  snapshotStore.publish(first);
+  writeFileSync(snapshotStore.generationPath(first.checksum), '{broken', { mode: 0o600 });
+
+  assert.throws(() => snapshotStore.publish(second));
+  assert.throws(() => snapshotStore.recover(compileRuntimeSnapshot({
+    repositoryId: 'repo-b', generatedAt: '2026-08-25T00:01:00.000Z'
+  }), 'repo-a'));
+  assert.equal(snapshotStore.recover(second, 'repo-a').rules[0]?.id, 'second');
+  assert.equal(snapshotStore.loadCurrent().rules[0]?.id, 'second');
+  assert.throws(() => snapshotStore.loadLastKnownGood());
+});
+
+test('recovery failure restores corrupt logical state and rejects unsafe manifest metadata', () => {
+  const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
+  const steps: readonly RuntimeSnapshotStoreStep[] = [
+    'after-generation-write', 'after-generation-reopen', 'before-generation-rename', 'before-generation-directory-sync',
+    'after-manifest-write', 'after-manifest-reopen', 'before-manifest-rename', 'before-commit-directory-sync'
+  ];
+  for (const failureStep of steps) {
+    const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+    store(root).publish(first);
+    writeFileSync(store(root).generationPath(first.checksum), '{broken', { mode: 0o600 });
+    const priorManifest = readFileSync(store(root).paths.manifest, 'utf8');
+    const failing = store(root, { injectFailure: (step) => {
+      if (step === failureStep) throw new Error(`injected ${failureStep}`);
+    } });
+
+    assert.throws(() => failing.recover(second, 'repo-a'), new RegExp(failureStep));
+    assert.equal(readFileSync(failing.paths.manifest, 'utf8'), priorManifest, failureStep);
+    assert.throws(() => store(root).loadCurrent(), failureStep);
+  }
+
+  const unsafeRoot = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  store(unsafeRoot).publish(first);
+  writeFileSync(store(unsafeRoot).generationPath(first.checksum), '{broken', { mode: 0o600 });
+  const priorManifest = readFileSync(store(unsafeRoot).paths.manifest, 'utf8');
+  chmodSync(store(unsafeRoot).paths.manifest, 0o644);
+  assert.throws(() => store(unsafeRoot).recover(second, 'repo-a'));
+  assert.equal(readFileSync(store(unsafeRoot).paths.manifest, 'utf8'), priorManifest);
+});
+
+test('recovery retains a validated rollback and uses it as last-known-good', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
+  const third = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:02:00.000Z', repositoryRules: [rule('third')] });
+  const snapshotStore = store(root);
+  snapshotStore.publish(first);
+  snapshotStore.publish(second);
+  const rollback = readFileSync(snapshotStore.paths.rollbackManifest, 'utf8');
+  writeFileSync(snapshotStore.generationPath(second.checksum), '{broken', { mode: 0o600 });
+
+  snapshotStore.recover(third, 'repo-a');
+  assert.equal(snapshotStore.loadCurrent().rules[0]?.id, 'third');
+  assert.equal(snapshotStore.loadLastKnownGood().rules[0]?.id, 'first');
+  assert.equal(readFileSync(snapshotStore.paths.rollbackManifest, 'utf8'), rollback);
 });
 
 test('failed candidate validation and symlink state paths preserve current', () => {

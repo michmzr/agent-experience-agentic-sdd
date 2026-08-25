@@ -121,7 +121,9 @@ export class RuntimeSnapshotStore {
   }
 
   publish(snapshot: RuntimeSnapshotV1): RuntimeSnapshotV1 { return this.publishSerialized(serializeRuntimeSnapshot(snapshot)); }
-  recover(snapshot: RuntimeSnapshotV1): RuntimeSnapshotV1 { return this.recoverSerialized(serializeRuntimeSnapshot(snapshot)); }
+  recover(snapshot: RuntimeSnapshotV1, expectedRepositoryId: string): RuntimeSnapshotV1 {
+    return this.recoverSerialized(serializeRuntimeSnapshot(snapshot), expectedRepositoryId);
+  }
   rebuild(compiler: () => RuntimeSnapshotV1): RuntimeSnapshotV1 { return this.publish(compiler()); }
 
   publishSerialized(serialized: string): RuntimeSnapshotV1 {
@@ -130,18 +132,22 @@ export class RuntimeSnapshotStore {
     return this.#withWriterLock(() => this.#publishLocked(serialized, expected));
   }
 
-  recoverSerialized(serialized: string): RuntimeSnapshotV1 {
+  recoverSerialized(serialized: string, expectedRepositoryId: string): RuntimeSnapshotV1 {
     const expected = parseSerializedRuntimeSnapshot(serialized);
+    if (expected.repositoryId !== expectedRepositoryId) throw new RuntimeSnapshotStorageError('Runtime recovery candidate has the wrong target identity.');
     this.#ensurePrivateDirectory();
     return this.#withWriterLock(() => {
+      let normalPublish = false;
       try {
         const manifest = this.#readOptionalManifest();
         if (manifest !== undefined) this.#readSnapshotFile(resolveReference(this.paths.root, manifest.current), manifest.current.checksum);
+        normalPublish = true;
       } catch (error) {
         if (!isRecoverableSnapshotError(error)) throw error;
-        this.#restoreLastKnownGoodManifest();
       }
-      return this.#publishLocked(serialized, expected);
+      return normalPublish
+        ? this.#publishLocked(serialized, expected)
+        : this.#recoverPublishLocked(serialized, expected, this.#validRecoveryReference());
     });
   }
 
@@ -238,7 +244,7 @@ export class RuntimeSnapshotStore {
     this.#syncDirectory();
   }
 
-  #restoreLastKnownGoodManifest(): void {
+  #validRecoveryReference(): ManifestReference | undefined {
     let referenceToRecover: ManifestReference | undefined;
     try {
       const rollback = this.#readOptionalRollbackManifest();
@@ -260,18 +266,53 @@ export class RuntimeSnapshotStore {
         if (!isRecoverableSnapshotError(error)) throw error;
       }
     }
-    if (referenceToRecover === undefined) throw new RuntimeSnapshotStorageError('No valid last-known-good runtime snapshot is available for recovery.');
+    return referenceToRecover;
+  }
 
+  #recoverPublishLocked(serialized: string, expected: RuntimeSnapshotV1, lastKnownGood?: ManifestReference): RuntimeSnapshotV1 {
+    const priorSerialized = this.#readOwnerFile(this.paths.manifest, MAX_MANIFEST_BYTES);
     const priorFingerprint = this.#manifestFingerprint();
-    const candidate = this.#candidate('recovery-manifest');
+    const generation = this.generationPath(expected.checksum);
+    const generationCandidate = this.#candidate('recovery-generation');
+    const manifestCandidate = this.#candidate('recovery-manifest');
+    const restorationCandidate = this.#candidate('recovery-restoration');
     try {
-      this.#writeFsyncedCandidate(candidate, serializeManifest({ version: 1, current: referenceToRecover }), MAX_MANIFEST_BYTES);
-      this.#readManifestFile(candidate);
-      this.#assertSafeTarget(this.paths.manifest, MAX_MANIFEST_BYTES, true);
-      if (this.#manifestFingerprint() !== priorFingerprint) throw new RuntimeSnapshotConflictError('Runtime snapshot manifest changed during recovery.');
-      renameSync(candidate, this.paths.manifest);
+      this.#writeFsyncedCandidate(generationCandidate, serialized, MAX_RUNTIME_SNAPSHOT_BYTES, 'after-generation-write');
+      const reopened = this.#readSnapshotFile(generationCandidate, expected.checksum);
+      this.#injectFailure('after-generation-reopen');
+      this.#injectFailure('before-generation-rename');
+      this.#installImmutableGeneration(generationCandidate, generation, expected.checksum);
+      this.#injectFailure('before-generation-directory-sync');
       this.#syncDirectory();
-    } finally { this.#removeCandidate(candidate); }
+
+      const committedManifest: RuntimeSnapshotManifestV1 = {
+        version: 1,
+        current: reference(expected.checksum),
+        ...(lastKnownGood === undefined ? {} : { lastKnownGood })
+      };
+      this.#writeFsyncedCandidate(manifestCandidate, serializeManifest(committedManifest), MAX_MANIFEST_BYTES, 'after-manifest-write');
+      this.#readManifestFile(manifestCandidate);
+      this.#injectFailure('after-manifest-reopen');
+      this.#writeFsyncedCandidate(restorationCandidate, priorSerialized, MAX_MANIFEST_BYTES);
+      this.#assertSafeTarget(this.paths.manifest, MAX_MANIFEST_BYTES, true);
+      this.#injectFailure('before-manifest-cas');
+      if (this.#manifestFingerprint() !== priorFingerprint) throw new RuntimeSnapshotConflictError('Runtime snapshot manifest changed during recovery.');
+      this.#injectFailure('before-manifest-rename');
+      renameSync(manifestCandidate, this.paths.manifest);
+      try {
+        this.#injectFailure('before-commit-directory-sync');
+        this.#syncDirectory();
+      } catch (error) {
+        renameSync(restorationCandidate, this.paths.manifest);
+        this.#syncDirectory();
+        throw error;
+      }
+      return reopened;
+    } finally {
+      this.#removeCandidate(generationCandidate);
+      this.#removeCandidate(manifestCandidate);
+      this.#removeCandidate(restorationCandidate);
+    }
   }
 
   #cleanupAfterCommit(manifest: RuntimeSnapshotManifestV1): void {

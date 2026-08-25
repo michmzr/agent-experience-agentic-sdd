@@ -57,7 +57,7 @@ type RuntimeTargetKind = 'global' | 'repository';
 export interface RuntimeSnapshotPersistence {
   readonly paths: RuntimeSnapshotPaths;
   publish(snapshot: RuntimeSnapshotV1): RuntimeSnapshotV1;
-  recover?(snapshot: RuntimeSnapshotV1): RuntimeSnapshotV1;
+  recover?(snapshot: RuntimeSnapshotV1, expectedRepositoryId: string): RuntimeSnapshotV1;
   loadCurrent(): RuntimeSnapshotV1;
   loadLastKnownGood(): RuntimeSnapshotV1;
 }
@@ -169,14 +169,20 @@ export class RuntimeService {
       throw new RuntimeServiceError('RUNTIME_UNAVAILABLE', 'Runtime snapshot target identity is invalid.');
     }
     if (current !== undefined) this.#snapshotsByTarget.set(target.hash, current);
+    const refreshBaseline = options.refresh === true && current === undefined && !snapshotAbsent
+      ? this.#optionalLastKnownGood(store)
+      : current;
+    if (refreshBaseline !== undefined && refreshBaseline.repositoryId !== target.snapshotRepositoryId) {
+      throw new RuntimeServiceError('RUNTIME_UNAVAILABLE', 'Runtime snapshot target identity is invalid.');
+    }
     let activeChecksum = current?.checksum;
     if (options.refresh === true || snapshotAbsent) {
       let published: RuntimeSnapshotV1;
       try {
-        const candidate = this.#refreshSnapshot(input, current ?? this.#snapshotsByTarget.get(target.hash));
+        const candidate = this.#refreshSnapshot(input, refreshBaseline);
         if (candidate.repositoryId !== target.snapshotRepositoryId) throw new TypeError('Runtime snapshot compiler returned the wrong repository.');
         published = current === undefined && !snapshotAbsent && store.recover !== undefined
-          ? store.recover(candidate)
+          ? store.recover(candidate, target.snapshotRepositoryId)
           : store.publish(candidate);
       }
       catch { throw new RuntimeServiceError('RUNTIME_UNAVAILABLE', 'Runtime snapshot refresh failed.'); }
