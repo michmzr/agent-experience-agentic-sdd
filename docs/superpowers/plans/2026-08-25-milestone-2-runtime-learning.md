@@ -8,7 +8,7 @@
 
 **Tech stack:** TypeScript 5.9, Node.js 22 built-ins, `node:sqlite`, `node:test`, local Git subprocesses through injected adapters, pnpm.
 
-**Execution status (2026-08-25):** Tasks 1-7 complete. Task 8 implementation and verification are complete at `4d9b493a241948b1598e6c652aa5fc4e00dbf6e8`; final independent review of the production knowledge-to-runtime bridge is pending.
+**Execution status (2026-08-25):** Tasks 1-7 complete. Task 8 implementation and verification are complete at `535c3f31b4800947d0f4862d176b87ccc3308490`; final independent review of the production knowledge-to-runtime bridge is pending.
 
 ---
 
@@ -379,7 +379,7 @@ git commit -m "feat: expose runtime learning commands"
 
 ### Task 8: Milestone acceptance, benchmarks, and delivery evidence
 
-Status: Implementation and verification complete at `4d9b493a241948b1598e6c652aa5fc4e00dbf6e8`. Final independent review is pending.
+Status: Implementation and verification complete at `535c3f31b4800947d0f4862d176b87ccc3308490`. Final independent review is pending.
 
 **Files:**
 

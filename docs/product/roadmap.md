@@ -18,7 +18,7 @@ Deliverables:
 
 ## Milestone 2: runtime learning and enforcement
 
-Status: In progress on 2026-08-25. Tasks 1-7 are complete. Task 8 implementation and verification passed at `4d9b493a241948b1598e6c652aa5fc4e00dbf6e8`: 382 tests passed and 0 failed. Final independent review of the production knowledge-to-runtime bridge is pending.
+Status: In progress on 2026-08-25. Tasks 1-7 are complete. Task 8 implementation and verification passed at `535c3f31b4800947d0f4862d176b87ccc3308490`: 382 tests passed and 0 failed. Final independent review of the production knowledge-to-runtime bridge is pending.
 
 Deliverables:
 
