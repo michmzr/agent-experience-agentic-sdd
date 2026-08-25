@@ -45,5 +45,11 @@ export class CircuitBreaker {
     }
   }
 
+  abortAttempt(): void {
+    if (this.#state !== 'half-open') return;
+    this.#state = 'open';
+    this.#openedAt = this.#clock();
+  }
+
   reset(): void { this.recordSuccess(); }
 }

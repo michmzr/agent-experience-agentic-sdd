@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
-  openSync, opendirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync
+  openSync, opendirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync,
+  type Dirent
 } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { getSystemErrorName } from 'node:util';
@@ -33,6 +34,8 @@ export type RuntimeSnapshotStoreStep =
   | 'before-manifest-cas'
   | 'before-manifest-rename'
   | 'before-commit-directory-sync'
+  | 'after-writer-lock-rename'
+  | 'before-writer-lock-directory-sync'
   | 'cleanup';
 
 export interface RuntimeSnapshotStoreOptions {
@@ -48,7 +51,7 @@ export interface RuntimeSnapshotStoreOptions {
   readonly beforeLockRelease?: () => void;
   readonly beforeReclaimClaimRelease?: (claim: string) => void;
   readonly beforeStaleReclaimClaimRemoval?: (claim: string) => void;
-  readonly onReclaimClaimEntryRead?: () => void;
+  readonly onDirectoryEntryRead?: (directory: 'reclaim' | 'state') => void;
 }
 export interface RuntimeSnapshotPaths { readonly root: string; readonly manifest: string; readonly rollbackManifest: string }
 interface ManifestReference { readonly checksum: string; readonly file: string }
@@ -63,6 +66,7 @@ const reclaimClaimPattern = /^claim-(\d{12})-([a-f0-9-]+)$/;
 const reclaimChoosingPattern = /^choosing-([a-f0-9-]+)$/;
 const reclaimRecoveringPattern = /^(?:recovering|releasing)-([a-f0-9-]+)$/;
 const MAX_RECLAIM_CLAIMS = 128;
+const MAX_STATE_DIRECTORY_ENTRIES = 256;
 
 export class RuntimeSnapshotStore {
   readonly paths: RuntimeSnapshotPaths;
@@ -78,7 +82,7 @@ export class RuntimeSnapshotStore {
   readonly #beforeLockRelease: () => void;
   readonly #beforeReclaimClaimRelease: (claim: string) => void;
   readonly #beforeStaleReclaimClaimRemoval: (claim: string) => void;
-  readonly #onReclaimClaimEntryRead: () => void;
+  readonly #onDirectoryEntryRead: (directory: 'reclaim' | 'state') => void;
 
   constructor(stateDirectory: string, options: RuntimeSnapshotStoreOptions) {
     if (typeof options?.clock !== 'function') throw new TypeError('Runtime snapshot store requires an injected clock.');
@@ -99,7 +103,7 @@ export class RuntimeSnapshotStore {
     this.#beforeLockRelease = options.beforeLockRelease ?? (() => undefined);
     this.#beforeReclaimClaimRelease = options.beforeReclaimClaimRelease ?? (() => undefined);
     this.#beforeStaleReclaimClaimRemoval = options.beforeStaleReclaimClaimRemoval ?? (() => undefined);
-    this.#onReclaimClaimEntryRead = options.onReclaimClaimEntryRead ?? (() => undefined);
+    this.#onDirectoryEntryRead = options.onDirectoryEntryRead ?? (() => undefined);
   }
 
   generationPath(checksum: string): string {
@@ -219,7 +223,7 @@ export class RuntimeSnapshotStore {
         retained.add(rollback.current.file);
         if (rollback.lastKnownGood !== undefined) retained.add(rollback.lastKnownGood.file);
       }
-      for (const name of readdirSync(this.paths.root)) {
+      for (const { name } of this.#readStateDirectoryEntries()) {
         if (generationPattern.test(name) && !retained.has(name)) this.#removeCandidate(resolve(this.paths.root, name));
       }
       this.#syncDirectory();
@@ -354,6 +358,7 @@ export class RuntimeSnapshotStore {
     writeFileSync(owner, JSON.stringify({ pid: process.pid, timestamp, token }), { mode: 0o600, flag: 'wx' });
     fsyncFile(owner);
     fsyncDirectory(candidate);
+    const preparedIdentity = lockIdentity(candidate);
     if (existsSync(lock)) return undefined;
     const reclaimNow = this.#clock();
     if (this.#hasLiveReclaimClaim(reclaimClaims, reclaimNow)) return undefined;
@@ -362,9 +367,18 @@ export class RuntimeSnapshotStore {
       if (isExpectedNodeFilesystemError(error) && (error.code === 'EEXIST' || error.code === 'ENOTEMPTY')) return undefined;
       throw error;
     }
-    const acquiredIdentity = lockIdentity(lock);
-    this.#syncDirectory();
-    return acquiredIdentity;
+    try {
+      this.#injectFailure('after-writer-lock-rename');
+      const acquiredIdentity = lockIdentity(lock);
+      if (!sameLockIdentity(preparedIdentity, acquiredIdentity)) throw new RuntimeSnapshotStorageError('Runtime snapshot writer lock identity changed during acquisition.');
+      this.#injectFailure('before-writer-lock-directory-sync');
+      this.#syncDirectory();
+      return acquiredIdentity;
+    } catch (error) {
+      try { this.#releaseOwnedWriterLock(lock, token, preparedIdentity); }
+      catch (rollbackError) { throw new AggregateError([error, rollbackError], 'Runtime snapshot writer lock acquisition rollback failed.'); }
+      throw error;
+    }
   }
 
   #recoverStaleWriterLock(lock: string, claims: string, now: number): void {
@@ -503,21 +517,7 @@ export class RuntimeSnapshotStore {
   }
 
   #readReclaimClaimEntries(claims: string): string[] {
-    const directory = opendirSync(claims);
-    const entries: string[] = [];
-    try {
-      while (true) {
-        const entry = directory.readSync();
-        if (entry === null) return entries;
-        entries.push(entry.name);
-        this.#onReclaimClaimEntryRead();
-        if (entries.length > MAX_RECLAIM_CLAIMS) {
-          throw new RuntimeSnapshotStorageError('Runtime snapshot reclaim claim limit exceeded.');
-        }
-      }
-    } finally {
-      directory.closeSync();
-    }
+    return this.#readBoundedDirectoryEntries(claims, MAX_RECLAIM_CLAIMS, 'Runtime snapshot reclaim claim limit exceeded.', 'reclaim').map(({ name }) => name);
   }
 
   #isStaleOwner(owner: LockOwner, now: number): boolean {
@@ -525,7 +525,7 @@ export class RuntimeSnapshotStore {
   }
 
   #cleanupAbandonedLockCandidates(now: number): void {
-    for (const entry of readdirSync(this.paths.root, { withFileTypes: true })) {
+    for (const entry of this.#readStateDirectoryEntries()) {
       if (!entry.isDirectory() || (!entry.name.startsWith('.writer-lock-candidate-') && !entry.name.startsWith('.writer-reclaim-candidate-'))) continue;
       const candidate = resolve(this.paths.root, entry.name);
       let observed: LockIdentity;
@@ -547,17 +547,38 @@ export class RuntimeSnapshotStore {
     try { this.#beforeLockRelease(); }
     catch (error) { programmingError = error; }
     try {
-      if (acquiredIdentity !== undefined) {
-        const observed = observeLock(lock);
-        if (observed.owner.token === token && sameLockIdentity(observed.identity, acquiredIdentity)) {
-          rmSync(lock, { recursive: true, force: true });
-          this.#syncDirectory();
-        }
-      }
+      if (acquiredIdentity !== undefined) this.#releaseOwnedWriterLock(lock, token, acquiredIdentity);
     } catch (error) {
       if (!isExpectedNodeFilesystemError(error) && programmingError === undefined) programmingError = error;
     }
     if (programmingError !== undefined) throw programmingError;
+  }
+
+  #releaseOwnedWriterLock(lock: string, token: string, acquiredIdentity: LockIdentity): void {
+    const observed = observeLock(lock);
+    if (observed.owner.token !== token || !sameLockIdentity(observed.identity, acquiredIdentity)) return;
+    rmSync(lock, { recursive: true, force: true });
+    this.#syncDirectory();
+  }
+
+  #readStateDirectoryEntries(): Dirent[] {
+    return this.#readBoundedDirectoryEntries(this.paths.root, MAX_STATE_DIRECTORY_ENTRIES, 'Runtime snapshot state directory entry limit exceeded.', 'state');
+  }
+
+  #readBoundedDirectoryEntries(path: string, maximum: number, message: string, kind: 'reclaim' | 'state'): Dirent[] {
+    const directory = opendirSync(path);
+    const entries: Dirent[] = [];
+    try {
+      while (true) {
+        const entry = directory.readSync();
+        if (entry === null) return entries;
+        entries.push(entry);
+        this.#onDirectoryEntryRead(kind);
+        if (entries.length > maximum) throw new RuntimeSnapshotStorageError(message);
+      }
+    } finally {
+      directory.closeSync();
+    }
   }
 
   #releaseReclaimClaim(claim: string, token: string, identity: LockIdentity): void {

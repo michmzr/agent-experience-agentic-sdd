@@ -64,6 +64,25 @@ test('uses only an explicit timestamp or injected clock when compiling a snapsho
   assert.throws(() => compileRuntimeSnapshot({ repositoryId: 'repo-a', repositoryRules: [rule('active')] } as never));
 });
 
+test('enforces compiler input counts, nested strings, and total serialized bytes before returning', () => {
+  const base = rule('base');
+  assert.throws(() => compileRuntimeSnapshot({
+    repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z',
+    repositoryRules: Array.from({ length: 10_001 }, () => base)
+  }), /rule-count limit/);
+  assert.throws(() => compileRuntimeSnapshot({
+    repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z',
+    repositoryRules: [{ ...base, reference: { ...base.reference, source: 'x'.repeat(4_097) } }]
+  }), /string-length limit/);
+  const byteHeavy = Array.from({ length: 1_100 }, (_, index) => ({
+    ...rule(`byte-${String(index).padStart(4, '0')}`),
+    reference: { knowledgeId: `knowledge-${index}`, evidenceIds: [`evidence-${index}`], source: 'x'.repeat(4_000) }
+  }));
+  assert.throws(() => compileRuntimeSnapshot({
+    repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: byteHeavy
+  }), /size limit/);
+});
+
 test('rejects incompatible, corrupt, and unsafe path snapshots', () => {
   const snapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('active')] });
   assert.throws(() => parseRuntimeSnapshot({ ...snapshot, version: 2 }));
@@ -265,7 +284,7 @@ test('streams at most one entry beyond the reclaim claim limit including unrelat
   mkdirSync(claims, { mode: 0o700 });
   for (let index = 0; index < 140; index += 1) writeFileSync(join(claims, `unrelated-${String(index).padStart(3, '0')}`), 'x');
   let entriesRead = 0;
-  const bounded = new RuntimeSnapshotStore(root, { clock, onReclaimClaimEntryRead: () => { entriesRead += 1; } });
+  const bounded = new RuntimeSnapshotStore(root, { clock, onDirectoryEntryRead: (directory) => { if (directory === 'reclaim') entriesRead += 1; } });
   assert.throws(() => bounded.publish(snapshot), /claim limit exceeded/);
   assert.equal(entriesRead, 129);
 });
@@ -278,9 +297,48 @@ test('propagates a filesystem-shaped reclaim scan hook error from writer acquisi
   writeFileSync(join(claims, 'unrelated'), 'x');
   const expected = fakeFilesystemError('reclaim scan hook bug', 'EEXIST');
   const snapshotStore = new RuntimeSnapshotStore(root, {
-    clock, onReclaimClaimEntryRead: () => { throw expected; }
+    clock, onDirectoryEntryRead: (directory) => { if (directory === 'reclaim') throw expected; }
   });
   assert.throws(() => snapshotStore.publish(snapshot), expected);
+});
+
+test('rolls back an owned writer lock when post-rename identity or directory sync fails', () => {
+  const steps: readonly RuntimeSnapshotStoreStep[] = ['after-writer-lock-rename', 'before-writer-lock-directory-sync'];
+  for (const step of steps) {
+    const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+    const snapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule(step)] });
+    const failing = store(root, { injectFailure: (at) => { if (at === step) throw new TypeError(`injected ${step}`); } });
+    assert.throws(() => failing.publish(snapshot), TypeError);
+    assert.equal(existsSync(join(failing.paths.root, '.writer-lock')), false);
+    store(root).publish(snapshot);
+    assert.equal(store(root).loadCurrent().rules[0]?.id, step);
+  }
+});
+
+test('bounds state-directory scans for abandoned candidates and committed generation cleanup', () => {
+  const crowdedRoot = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  for (let index = 0; index < 270; index += 1) writeFileSync(join(crowdedRoot, `unrelated-${String(index).padStart(3, '0')}`), 'x');
+  let acquisitionReads = 0;
+  const snapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  assert.throws(() => new RuntimeSnapshotStore(crowdedRoot, {
+    clock, onDirectoryEntryRead: (directory) => { if (directory === 'state') acquisitionReads += 1; }
+  }).publish(snapshot), /state directory entry limit exceeded/);
+  assert.equal(acquisitionReads, 257);
+
+  const cleanupRoot = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  store(cleanupRoot).publish(snapshot);
+  let cleanupReads = 0;
+  const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
+  const cleanupStore = store(cleanupRoot, {
+    afterLockAcquired: () => {
+      for (let index = 0; index < 270; index += 1) writeFileSync(join(cleanupRoot, `late-${String(index).padStart(3, '0')}`), 'x');
+      cleanupReads = 0;
+    },
+    onDirectoryEntryRead: (directory) => { if (directory === 'state') cleanupReads += 1; }
+  });
+  assert.throws(() => cleanupStore.publish(second), /state directory entry limit exceeded/);
+  assert.equal(cleanupReads, 257);
+  assert.equal(store(cleanupRoot).loadCurrent().rules[0]?.id, 'second');
 });
 
 test('releases an exclusively owned lock when a reentrant acquisition hook throws', () => {

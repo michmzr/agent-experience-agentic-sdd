@@ -63,13 +63,19 @@ export class ResilientRuntime {
         this.#breaker.recordSuccess(); this.#degradedDiagnosticEmitted = false; this.#current = index;
         return this.#withIndex('snapshot', 'healthy', index);
       } catch (currentError) {
-        if (!isExpectedAvailabilityError(currentError)) throw currentError;
+        if (!isExpectedAvailabilityError(currentError)) {
+          this.#breaker.abortAttempt();
+          throw currentError;
+        }
         try {
           const index = createRuleIndex(this.#loadLastKnownGood());
           this.#breaker.recordSuccess(); this.#degradedDiagnosticEmitted = false; this.#current = index;
           return this.#withIndex('last-known-good', 'fallback', index);
         } catch (lastKnownGoodError) {
-          if (!isExpectedAvailabilityError(lastKnownGoodError)) throw lastKnownGoodError;
+          if (!isExpectedAvailabilityError(lastKnownGoodError)) {
+            this.#breaker.abortAttempt();
+            throw lastKnownGoodError;
+          }
           this.#breaker.recordFailure();
         }
       }

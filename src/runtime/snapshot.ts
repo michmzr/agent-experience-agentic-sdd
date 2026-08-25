@@ -42,6 +42,7 @@ export function compileRuntimeSnapshot(input: RuntimeSnapshotCompilation): Runti
   assertString(input.repositoryId, 'repositoryId');
   const generatedAt = input.generatedAt ?? timestampFromNow(input.now);
   assertTimestamp(generatedAt);
+  assertCompilationInputLimits(input, generatedAt);
   assertAuthoritativeInput(input.globalRules ?? [], 'global');
   assertAuthoritativeInput((input.repositoryRules ?? []).filter((rule) => rule.applicability.scope !== 'repository'
     || rule.applicability.repositoryId === input.repositoryId), 'repository');
@@ -65,7 +66,9 @@ export function compileRuntimeSnapshot(input: RuntimeSnapshotCompilation): Runti
   }
   if (rules.length > MAX_RULES) throw new RuntimeSnapshotValidationError('Runtime snapshot rule-count limit exceeded.');
   const payload = { version: RUNTIME_SNAPSHOT_VERSION, repositoryId: input.repositoryId, generatedAt, rules };
-  return freezeSnapshot({ ...payload, checksum: checksumPayload(payload) });
+  const snapshot = freezeSnapshot({ ...payload, checksum: checksumPayload(payload) });
+  assertSnapshotByteLimit(snapshot);
+  return snapshot;
 }
 
 export function parseRuntimeSnapshot(value: unknown): RuntimeSnapshotV1 {
@@ -98,7 +101,9 @@ export function parseRuntimeSnapshot(value: unknown): RuntimeSnapshotV1 {
   }
   const payload = { version: RUNTIME_SNAPSHOT_VERSION, repositoryId: value.repositoryId, generatedAt: value.generatedAt, rules };
   if (checksumPayload(payload) !== value.checksum) throw new RuntimeSnapshotValidationError('Runtime snapshot checksum mismatch.');
-  return freezeSnapshot({ ...payload, checksum: value.checksum });
+  const snapshot = freezeSnapshot({ ...payload, checksum: value.checksum });
+  assertSnapshotByteLimit(snapshot);
+  return snapshot;
 }
 
 export function parseSerializedRuntimeSnapshot(serialized: string): RuntimeSnapshotV1 {
@@ -110,7 +115,26 @@ export function parseSerializedRuntimeSnapshot(serialized: string): RuntimeSnaps
 
 export function serializeRuntimeSnapshot(snapshot: RuntimeSnapshotV1): string {
   const parsed = parseRuntimeSnapshot(snapshot);
-  return `${JSON.stringify(sortObject(parsed), null, 2)}\n`;
+  return serializeSnapshotWithinLimit(parsed);
+}
+
+function assertCompilationInputLimits(input: RuntimeSnapshotCompilation, generatedAt: string): void {
+  const sources = [input.globalRules ?? [], input.repositoryRules ?? [], input.contextRules ?? []];
+  const totalRules = sources.reduce((total, rules) => total + rules.length, 0);
+  if (totalRules > MAX_RULES) throw new RuntimeSnapshotValidationError('Runtime snapshot rule-count limit exceeded.');
+  assertResourceLimits({ generatedAt, repositoryId: input.repositoryId, sources });
+}
+
+function assertSnapshotByteLimit(snapshot: RuntimeSnapshotV1): void {
+  if (Buffer.byteLength(`${JSON.stringify(sortObject(snapshot), null, 2)}\n`, 'utf8') > MAX_RUNTIME_SNAPSHOT_BYTES) {
+    throw new RuntimeSnapshotValidationError('Runtime snapshot size limit exceeded.');
+  }
+}
+
+function serializeSnapshotWithinLimit(snapshot: RuntimeSnapshotV1): string {
+  const serialized = `${JSON.stringify(sortObject(snapshot), null, 2)}\n`;
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_RUNTIME_SNAPSHOT_BYTES) throw new RuntimeSnapshotValidationError('Runtime snapshot size limit exceeded.');
+  return serialized;
 }
 
 function parseRule(value: unknown): RuntimeRule {

@@ -71,3 +71,26 @@ test('propagates TypeError and arbitrary programming exceptions from both loader
     assert.throws(() => runtime.resolve('normal'), /bug/);
   }
 });
+
+test('a half-open programming error reopens the circuit and permits a later retry', () => {
+  let now = 0;
+  let currentCalls = 0;
+  const runtime = new ResilientRuntime({
+    profile, clock: () => now, circuit: { failureThreshold: 1, resetAfterMs: 10 },
+    loadCurrent: () => {
+      currentCalls += 1;
+      if (currentCalls === 1) return unavailable();
+      if (currentCalls === 2) throw new TypeError('half-open loader bug');
+      return snapshot;
+    },
+    loadLastKnownGood: unavailable
+  });
+  assert.equal(runtime.resolve('normal').source, 'degraded-policy');
+  assert.equal(runtime.circuitState, 'open');
+  now = 10;
+  assert.throws(() => runtime.resolve('normal'), /half-open loader bug/);
+  assert.equal(runtime.circuitState, 'open');
+  now = 20;
+  assert.equal(runtime.resolve('normal').source, 'snapshot');
+  assert.equal(runtime.circuitState, 'closed');
+});
