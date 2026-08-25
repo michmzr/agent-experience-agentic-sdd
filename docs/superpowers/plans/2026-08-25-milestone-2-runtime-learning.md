@@ -8,7 +8,7 @@
 
 **Tech stack:** TypeScript 5.9, Node.js 22 built-ins, `node:sqlite`, `node:test`, local Git subprocesses through injected adapters, pnpm.
 
-**Execution status (2026-08-25):** Tasks 1-7 complete. Task 8 implementation and verification are complete at `535c3f31b4800947d0f4862d176b87ccc3308490`; final independent review of the production knowledge-to-runtime bridge is pending.
+**Execution status (2026-08-25):** Complete. Task 7 was delivered at `ddc22ed5499181411ee786954ecb3c17744e4a17`. Task 8 implementation and acceptance were verified at `535c3f31b4800947d0f4862d176b87ccc3308490`; independent specification and quality reviews approved that implementation.
 
 ---
 
@@ -327,7 +327,7 @@ git commit -m "feat: capture runtime evidence incrementally"
 
 ### Task 7: Application and CLI integration
 
-Status: Complete.
+Status: Complete at `ddc22ed5499181411ee786954ecb3c17744e4a17`.
 
 **Files:**
 
@@ -379,7 +379,7 @@ git commit -m "feat: expose runtime learning commands"
 
 ### Task 8: Milestone acceptance, benchmarks, and delivery evidence
 
-Status: Implementation and verification complete at `535c3f31b4800947d0f4862d176b87ccc3308490`. Final independent review is pending.
+Status: Complete at `535c3f31b4800947d0f4862d176b87ccc3308490`. Independent specification and quality reviews approved the implementation. Verification evidence before closure was recorded at `d6a56e840fd05c61b7dbad446d2599a39dd5e6b4`.
 
 **Files:**
 
@@ -436,3 +436,7 @@ The verification document must include exact commit SHA, test counts, focused ac
 git add test/fixtures/runtime test/milestone-2-acceptance.test.ts test/runtime-benchmark.test.ts docs/verification/2026-08-25-milestone-2-runtime-learning.md docs/product/roadmap.md docs/superpowers/plans/2026-08-25-milestone-2-runtime-learning.md
 git commit -m "docs: record milestone two verification"
 ```
+
+- [x] **Step 7: Complete independent reviews**
+
+Independent specification and quality reviews approved implementation commit `535c3f31b4800947d0f4862d176b87ccc3308490`. Fixture benchmarks remain acceptance evidence; release thresholds are deferred until real project-session measurements exist.

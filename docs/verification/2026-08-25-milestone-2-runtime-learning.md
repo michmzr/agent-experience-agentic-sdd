@@ -34,7 +34,13 @@ Release thresholds remain unset because real project-session data has not been c
 
 ## Reviewer disposition
 
-Task-level specification and quality reviews for Tasks 1 through 7 were approved before Task 8 began. Earlier Task 8 reviews found the missing production bridge, omitted branch-local structured context, credential-classifier divergence, and insufficient Git tree object validation. The final privacy review found that single-dash multi-character named options did not use the shared long-option classification. Commit `535c3f31b4800947d0f4862d176b87ccc3308490` closes that gap while retaining tool-specific handling for ambiguous one-character flags. Final independent review of this commit and the complete milestone remains pending. The product roadmap remains in progress until that review approves the verified tree.
+Task-level specification and quality reviews for Tasks 1 through 7 were approved before Task 8 began. Earlier Task 8 reviews found the missing production bridge, omitted branch-local structured context, credential-classifier divergence, insufficient Git tree object validation, and incomplete single-dash named-option classification. Commit `535c3f31b4800947d0f4862d176b87ccc3308490` closes those gaps while retaining tool-specific handling for ambiguous one-character flags.
+
+Final specification review: APPROVED for `535c3f31b4800947d0f4862d176b87ccc3308490`.
+
+Final quality review: APPROVED for `535c3f31b4800947d0f4862d176b87ccc3308490`.
+
+Milestone 2 acceptance is complete. Real-session benchmark thresholds remain deferred because no real project-session measurement set exists; the deterministic fixture benchmark is recorded evidence and does not establish release thresholds.
 
 ## Known minor follow-ups
 
