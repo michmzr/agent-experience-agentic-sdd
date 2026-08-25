@@ -18,6 +18,8 @@ Deliverables:
 
 ## Milestone 2: runtime learning and enforcement
 
+Status: In progress on 2026-08-25. Tasks 1-7 are complete. Task 8 implementation and verification passed at `8229948c7441ff131d3e3718a10a7108da125fa2`: 370 tests passed and 0 failed. Final independent milestone reviews are pending.
+
 Deliverables:
 
 - automatic experience capture;
