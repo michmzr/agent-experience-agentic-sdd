@@ -64,6 +64,7 @@ export interface OverrideLearningEvidence {
   readonly polarity: 'contradicts';
   readonly successfulOverrideIds: readonly string[];
   readonly successfulUseIds: readonly string[];
+  readonly successfulUseCount: number;
   readonly revalidationRequired: true;
 }
 
@@ -72,7 +73,6 @@ const canonicalIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:@-]*$/;
 const MAX_IDENTIFIER_LENGTH = 512;
 const MAX_TEXT_LENGTH = 4_096;
 const MAX_REFERENCES = 100;
-export const MAX_OVERRIDE_EVIDENCE_ENTRIES = 1_000;
 
 export function createRuntimeOverride(input: RuntimeOverrideInput): RuntimeOverride {
   const id = checkedIdentifier(input.id, 'override id');
@@ -149,43 +149,48 @@ export function applyRuntimeOverride(input: ApplyRuntimeOverrideInput): Override
   return Object.freeze({ accepted: true, decision });
 }
 
-/** Produces evidence proposals only. It never changes or removes knowledge. */
-export function deriveOverrideLearningEvidence(entries: readonly OverrideAuditEntry[]): readonly OverrideLearningEvidence[] {
-  if (entries.length > MAX_OVERRIDE_EVIDENCE_ENTRIES) throw new TypeError('Override evidence input resource limit exceeded.');
-  const successes = new Map<string, Map<string, string>>();
-  const authorized = new Map<string, string>();
-  for (const entry of entries) {
-    const validated = validateOverrideAuditEntry(entry);
-    const useKey = overrideUseKey(validated);
-    if (entry.phase === 'authorized') {
-      authorized.set(useKey, auditBinding(validated));
-      continue;
+interface RuleSuccessState {
+  count: number;
+  readonly supportingUses: Array<{ readonly overrideId: string; readonly useId: string }>;
+}
+
+/** Incrementally derives bounded supporting evidence without accepting a whole audit history. */
+export class OverrideLearningEvidenceAccumulator {
+  readonly #rules = new Map<string, RuleSuccessState>();
+
+  recordSuccessfulUse(authorizationInput: OverrideAuditEntry, completionInput: OverrideAuditEntry): void {
+    const authorization = validateOverrideAuditEntry(authorizationInput);
+    const completion = validateOverrideAuditEntry(completionInput);
+    if (authorization.phase !== 'authorized' || completion.phase !== 'completed' || completion.postActionOutcome !== 'succeeded'
+      || overrideUseKey(authorization) !== overrideUseKey(completion) || auditBinding(authorization) !== auditBinding(completion)
+      || completion.recordedAt < authorization.recordedAt) {
+      throw new TypeError('Successful override evidence requires a matching ordered authorization pair.');
     }
-    if (entry.postActionOutcome !== 'succeeded' || authorized.get(useKey) !== auditBinding(validated)) continue;
-    const scopedRuleId = entry.override.scope.kind === 'rule' ? entry.override.scope.ruleId : undefined;
+    const scopedRuleId = completion.override.scope.kind === 'rule' ? completion.override.scope.ruleId : undefined;
     const references = scopedRuleId === undefined
-      ? entry.decisionReferences
-      : entry.decisionReferences.filter(({ ruleId }) => ruleId === scopedRuleId);
+      ? completion.decisionReferences
+      : completion.decisionReferences.filter(({ ruleId }) => ruleId === scopedRuleId);
     for (const reference of references) {
-      const uses = successes.get(reference.ruleId) ?? new Map<string, string>();
-      uses.set(useKey, entry.override.id);
-      successes.set(reference.ruleId, uses);
+      const state = this.#rules.get(reference.ruleId) ?? { count: 0, supportingUses: [] };
+      state.count += 1;
+      if (state.supportingUses.length < 2) state.supportingUses.push({ overrideId: completion.override.id, useId: completion.useId });
+      this.#rules.set(reference.ruleId, state);
     }
   }
-  const evidence = [...successes.entries()]
-    .filter(([, uses]) => uses.size >= 2)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([ruleId, uses]) => {
-      const orderedUses = [...uses.entries()].sort(([left], [right]) => left.localeCompare(right));
-      return Object.freeze({
-      ruleId,
-      polarity: 'contradicts' as const,
-      successfulOverrideIds: Object.freeze(orderedUses.map(([, overrideId]) => overrideId)),
-      successfulUseIds: Object.freeze(orderedUses.map(([key]) => key.slice(key.indexOf('\0') + 1))),
-      revalidationRequired: true as const
-      });
-    });
-  return Object.freeze(evidence);
+
+  finish(): readonly OverrideLearningEvidence[] {
+    return Object.freeze([...this.#rules.entries()]
+      .filter(([, state]) => state.count >= 2)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([ruleId, state]) => Object.freeze({
+        ruleId,
+        polarity: 'contradicts' as const,
+        successfulOverrideIds: Object.freeze(state.supportingUses.map(({ overrideId }) => overrideId)),
+        successfulUseIds: Object.freeze(state.supportingUses.map(({ useId }) => useId)),
+        successfulUseCount: state.count,
+        revalidationRequired: true as const
+      })));
+  }
 }
 
 export function validateOverrideAuditEntry(value: OverrideAuditEntry): OverrideAuditEntry {

@@ -2,9 +2,11 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import type { DecisionReference } from '../runtime/contracts.js';
 import {
+  OverrideLearningEvidenceAccumulator,
   parseRuntimeOverride,
   validateOverrideAuditEntry,
   type OverrideAuditEntry,
+  type OverrideLearningEvidence,
   type PostActionOutcome
 } from '../runtime/override.js';
 import { openExperienceDatabase } from './database.js';
@@ -21,6 +23,10 @@ export interface OverrideAuditPageRequest {
 export interface OverrideAuditPage {
   readonly entries: readonly OverrideAuditEntry[];
   readonly nextCursor?: number;
+}
+
+export interface OverrideEvidenceRequest {
+  readonly overrideId?: string;
 }
 
 export const overrideAuditMigration = `
@@ -148,6 +154,33 @@ export class OverrideStore {
     return Object.freeze({ entries, ...(nextCursor === undefined ? {} : { nextCursor }) });
   }
 
+  deriveLearningEvidence(request: OverrideEvidenceRequest = {}): readonly OverrideLearningEvidence[] {
+    const accumulator = new OverrideLearningEvidenceAccumulator();
+    let afterSequence = 0;
+    while (true) {
+      const completionRows = (request.overrideId === undefined
+        ? this.#database.prepare(`SELECT * FROM runtime_override_audit
+            WHERE sequence > ? AND phase = 'completed' AND post_action_outcome = 'succeeded'
+            ORDER BY sequence LIMIT ?`).all(afterSequence, MAX_OVERRIDE_AUDIT_PAGE_SIZE)
+        : this.#database.prepare(`SELECT * FROM runtime_override_audit
+            WHERE sequence > ? AND override_id = ? AND phase = 'completed' AND post_action_outcome = 'succeeded'
+            ORDER BY sequence LIMIT ?`).all(afterSequence, request.overrideId, MAX_OVERRIDE_AUDIT_PAGE_SIZE)) as unknown as OverrideAuditRow[];
+      if (completionRows.length === 0) return accumulator.finish();
+      for (const row of completionRows) {
+        const completion = auditEntryFromRow(row, checkedUseId(row.use_id));
+        const authorizationRows = this.#database.prepare(`SELECT * FROM runtime_override_audit
+          WHERE override_id = ? AND use_id = ? AND phase = 'authorized' AND sequence < ?
+          ORDER BY sequence DESC LIMIT 2`).all(completion.override.id, completion.useId, row.sequence) as unknown as OverrideAuditRow[];
+        if (authorizationRows.length !== 1) throw new TypeError('Successful completion audit requires exactly one prior authorization row.');
+        accumulator.recordSuccessfulUse(
+          auditEntryFromRow(authorizationRows[0]!, completion.useId),
+          completion
+        );
+      }
+      afterSequence = completionRows.at(-1)!.sequence;
+    }
+  }
+
   close(): void {
     this.#database.close();
   }
@@ -180,6 +213,7 @@ export function ensureOverrideAuditUseMigration(database: DatabaseSync): void {
 
   const columns = database.prepare("SELECT name FROM pragma_table_info('runtime_override_audit')").all() as Array<{ name: string }>;
   const hasUseId = columns.some(({ name }) => name === 'use_id');
+  createLegacyLookupIndex(database, hasUseId);
   validateLegacyRows(database, hasUseId);
   if (database.prepare("SELECT name FROM sqlite_master WHERE name = 'runtime_override_audit_v6'").get() !== undefined) {
     throw new TypeError('Override audit migration staging schema already exists.');
@@ -199,6 +233,22 @@ export function ensureOverrideAuditUseMigration(database: DatabaseSync): void {
   `);
   database.exec('DROP TABLE runtime_override_audit');
   database.exec('ALTER TABLE runtime_override_audit_v6 RENAME TO runtime_override_audit');
+}
+
+function createLegacyLookupIndex(database: DatabaseSync, hasUseId: boolean): void {
+  database.exec('DROP INDEX IF EXISTS runtime_override_audit_once_per_phase');
+  database.exec(`CREATE INDEX runtime_override_audit_migration_lookup ON runtime_override_audit
+    (${hasUseId ? 'override_id, use_id, phase, sequence' : 'override_id, phase, sequence'})`);
+  const plan = (hasUseId
+    ? database.prepare(`EXPLAIN QUERY PLAN SELECT * FROM runtime_override_audit
+        WHERE sequence < ? AND override_id = ? AND use_id = ? AND phase = 'authorized'
+        ORDER BY sequence DESC LIMIT 2`).all(1, 'probe', 'probe')
+    : database.prepare(`EXPLAIN QUERY PLAN SELECT * FROM runtime_override_audit
+        WHERE sequence < ? AND override_id = ? AND phase = 'authorized'
+        ORDER BY sequence DESC LIMIT 2`).all(1, 'probe')) as Array<{ detail: string }>;
+  if (!plan.some(({ detail }) => detail.includes('runtime_override_audit_migration_lookup'))) {
+    throw new TypeError('Override audit migration lookup is not indexed.');
+  }
 }
 
 function checkedUseId(value: string | null | undefined): string {

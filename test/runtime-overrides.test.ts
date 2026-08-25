@@ -10,8 +10,6 @@ import { createRuntimeGate } from '../src/runtime/gate.js';
 import {
   applyRuntimeOverride,
   createRuntimeOverride,
-  deriveOverrideLearningEvidence,
-  MAX_OVERRIDE_EVIDENCE_ENTRIES,
   type OverrideAuditEntry
 } from '../src/runtime/override.js';
 import { createRuleIndex } from '../src/runtime/rule-index.js';
@@ -189,6 +187,7 @@ test('requires authorization before completion and an identical decision referen
 });
 
 test('repeated successful overrides retain history and derive contradiction and revalidation evidence', () => {
+  const store = new OverrideStore(join(mkdtempSync(join(tmpdir(), 'ael-override-')), 'experience.sqlite'));
   const reusedGrant = createRuntimeOverride({ id: 'override-reused', scope: { kind: 'rule', ruleId: 'rule-a' }, reason: 'Reviewed exception.', createdAt: now });
   const history = [
     { ...audit('authorized-1', 'override-reused', 'authorized', undefined, 'use-1'), override: reusedGrant },
@@ -196,16 +195,18 @@ test('repeated successful overrides retain history and derive contradiction and 
     { ...audit('authorized-2', 'override-reused', 'authorized', undefined, 'use-2'), override: reusedGrant },
     { ...audit('completed-2', 'override-reused', 'completed', 'succeeded', 'use-2'), override: reusedGrant }
   ];
-
-  const evidence = deriveOverrideLearningEvidence(history);
+  for (const entry of history) store.append(entry);
+  const evidence = store.deriveLearningEvidence({ overrideId: 'override-reused' });
   assert.deepEqual(evidence, [{
     ruleId: 'rule-a', polarity: 'contradicts',
     successfulOverrideIds: ['override-reused', 'override-reused'],
     successfulUseIds: ['use-1', 'use-2'],
+    successfulUseCount: 2,
     revalidationRequired: true
   }]);
   assert.equal(history.length, 4);
   assert.equal(Object.isFrozen(evidence), true);
+  store.close();
 });
 
 test('persists two complete uses of the same reusable grant without overwriting history', () => {
@@ -221,7 +222,7 @@ test('persists two complete uses of the same reusable grant without overwriting 
   assert.deepEqual(rows.map(({ useId, phase }) => [useId, phase]), [
     ['use-1', 'authorized'], ['use-1', 'completed'], ['use-2', 'authorized'], ['use-2', 'completed']
   ]);
-  assert.equal(deriveOverrideLearningEvidence(rows)[0]?.revalidationRequired, true);
+  assert.equal(store.deriveLearningEvidence({ overrideId: 'override-reused' })[0]?.revalidationRequired, true);
   store.close();
 });
 
@@ -391,18 +392,39 @@ test('validates and migrates legacy audit history spanning more than one batch',
   database.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
   database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(5, now);
   database.exec(overrideAuditMigration);
-  const count = OVERRIDE_AUDIT_MIGRATION_BATCH_SIZE + 3;
-  for (let index = 0; index < count; index += 1) insertLegacyAudit(database, audit(`batch-${index}`, `batch-override-${index}`, 'authorized'));
+  const count = Math.floor(OVERRIDE_AUDIT_MIGRATION_BATCH_SIZE / 2) + 3;
+  for (let index = 0; index < count; index += 1) {
+    insertLegacyAudit(database, audit(`batch-auth-${index}`, `batch-override-${index}`, 'authorized'));
+    insertLegacyAudit(database, audit(`batch-done-${index}`, `batch-override-${index}`, 'completed', 'succeeded'));
+  }
   database.close();
   assert.equal(attemptVersion6(databasePath), undefined);
   const migrated = new OverrideStore(databasePath);
-  assert.equal(allAudit(migrated).length, count);
+  assert.equal(allAudit(migrated).length, count * 2);
   migrated.close();
 });
 
-test('rejects unbounded evidence derivation input', () => {
-  const entry = audit('bounded', 'bounded-override', 'authorized');
-  assert.throws(() => deriveOverrideLearningEvidence(Array.from({ length: MAX_OVERRIDE_EVIDENCE_ENTRIES + 1 }, () => entry)), /resource limit/i);
+test('derives exact evidence across more than 1000 paginated audit rows', () => {
+  const store = new OverrideStore(join(mkdtempSync(join(tmpdir(), 'ael-override-')), 'experience.sqlite'));
+  const grant = createRuntimeOverride({ id: 'long-history', scope: { kind: 'rule', ruleId: 'rule-a' }, reason: 'Long-running exception.', createdAt: now });
+  const useCount = 502;
+  for (let index = 0; index < useCount; index += 1) {
+    const useId = `long-use-${String(index).padStart(3, '0')}`;
+    store.append({ ...audit(`long-auth-${index}`, grant.id, 'authorized', undefined, useId), override: grant });
+    store.append({
+      ...audit(`long-done-${index}`, grant.id, 'completed', 'succeeded', useId),
+      override: grant
+    });
+  }
+  assert.equal(allAudit(store, grant.id).length, 1_004);
+  assert.deepEqual(store.deriveLearningEvidence({ overrideId: grant.id }), [{
+    ruleId: 'rule-a', polarity: 'contradicts',
+    successfulOverrideIds: ['long-history', 'long-history'],
+    successfulUseIds: ['long-use-000', 'long-use-001'],
+    successfulUseCount: 502,
+    revalidationRequired: true
+  }]);
+  store.close();
 });
 
 test('rejects private or credential-bearing decision references atomically without echoing values', () => {
