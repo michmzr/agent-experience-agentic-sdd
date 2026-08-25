@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { chmodSync, closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import type { KnowledgeState, LessonKind } from '../domain/types.js';
 import { assertDurableTextSafe } from '../review/sanitizer.js';
@@ -49,6 +49,7 @@ export interface RepositoryKnowledgeOptions extends PublicationHooks {
   readonly wait?: (milliseconds: number) => void;
   readonly lockTimeoutMs?: number;
   readonly staleLockMs?: number;
+  readonly afterLockCandidatePrepared?: (candidate: string) => void;
 }
 
 export class RepositoryKnowledgeValidationError extends Error {
@@ -297,14 +298,35 @@ interface PrivatePaths {
 function privatePaths(repositoryRoot: string, options: RepositoryKnowledgeOptions): PrivatePaths {
   const canonical = realpathSync.native(resolve(repositoryRoot));
   const digest = createHash('sha256').update(canonical).digest('hex');
-  const stateRoot = resolve(options.stateRoot ?? join(resolvePrivateDataDirectory(), 'repository-knowledge'));
-  if (relative(canonical, stateRoot) === '' || !relative(canonical, stateRoot).startsWith('..')) {
+  const requestedStateRoot = resolve(options.stateRoot ?? join(resolvePrivateDataDirectory(), 'repository-knowledge'));
+  const stateRoot = canonicalizePotentialPath(requestedStateRoot);
+  if (isPathInside(canonical, stateRoot)) {
     throw new Error('Repository knowledge private state must be outside the repository.');
   }
   const directory = join(stateRoot, digest);
+  if (isPathInside(canonical, canonicalizePotentialPath(directory))) {
+    throw new Error('Repository knowledge private state must be outside the repository.');
+  }
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   chmodSync(directory, 0o700);
   return { directory, lock: join(directory, 'lock'), recovery: join(directory, 'recovery') };
+}
+
+function canonicalizePotentialPath(path: string): string {
+  let existing = resolve(path);
+  const missing: string[] = [];
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    missing.unshift(basename(existing));
+    existing = parent;
+  }
+  return resolve(realpathSync.native(existing), ...missing);
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const path = relative(parent, child);
+  return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path));
 }
 
 export function withRepositoryKnowledgeLock<T>(repositoryRoot: string, action: () => T, options: RepositoryKnowledgeOptions = {}): T {
@@ -316,15 +338,31 @@ export function withRepositoryKnowledgeLock<T>(repositoryRoot: string, action: (
   const started = clock();
   const token = randomUUID();
   while (true) {
+    cleanupAbandonedLockCandidates(paths.directory, clock(), staleAfter);
+    const candidate = join(paths.directory, `lock-candidate-${token}-${randomUUID()}`);
     try {
-      mkdirSync(paths.lock, { mode: 0o700 });
-      writeFileSync(join(paths.lock, 'owner.json'), JSON.stringify({ pid: process.pid, timestamp: clock(), token }), { mode: 0o600, flag: 'wx' });
+      mkdirSync(candidate, { mode: 0o700 });
+      const ownerPath = join(candidate, 'owner.json');
+      writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, timestamp: clock(), token }), { mode: 0o600, flag: 'wx' });
+      fsyncPath(ownerPath);
+      fsyncDirectory(candidate);
+      options.afterLockCandidatePrepared?.(candidate);
+      if (existsSync(paths.lock)) {
+        const occupied = new Error('Repository knowledge lock is already held.') as NodeJS.ErrnoException;
+        occupied.code = 'EEXIST';
+        throw occupied;
+      }
+      renameSync(candidate, paths.lock);
+      fsyncDirectory(paths.directory);
       break;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST' && code !== 'ENOTEMPTY') throw error;
       recoverStaleLock(paths.lock, clock(), staleAfter);
       if (clock() - started >= timeout) throw new Error('Timed out waiting for repository knowledge lock.');
       wait(Math.min(25, timeout));
+    } finally {
+      if (existsSync(candidate)) rmSync(candidate, { recursive: true, force: true });
     }
   }
   try {
@@ -342,14 +380,47 @@ export function withRepositoryKnowledgeLock<T>(repositoryRoot: string, action: (
 function recoverStaleLock(lock: string, now: number, staleAfter: number): void {
   try {
     const owner = JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')) as { pid?: number; timestamp?: number; token?: string };
-    if (typeof owner.pid !== 'number' || typeof owner.timestamp !== 'number' || typeof owner.token !== 'string') return;
+    if (typeof owner.pid !== 'number' || typeof owner.timestamp !== 'number' || typeof owner.token !== 'string') {
+      recoverMalformedStaleLock(lock, now, staleAfter);
+      return;
+    }
     if (now - owner.timestamp <= staleAfter || isPidAlive(owner.pid)) return;
     const confirmed = JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')) as { pid?: number; timestamp?: number; token?: string };
     if (confirmed.pid !== owner.pid || confirmed.timestamp !== owner.timestamp || confirmed.token !== owner.token || isPidAlive(owner.pid)) return;
     const stale = `${lock}.stale-${owner.token}`;
     renameSync(lock, stale);
     rmSync(stale, { recursive: true, force: true });
-  } catch { /* A live or concurrently changing owner remains untouched. */ }
+  } catch { recoverMalformedStaleLock(lock, now, staleAfter); }
+}
+
+function recoverMalformedStaleLock(lock: string, now: number, staleAfter: number): void {
+  try {
+    const observed = statSync(lock);
+    if (now - observed.mtimeMs <= staleAfter) return;
+    try {
+      const owner = JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')) as { pid?: number; timestamp?: number; token?: string };
+      if (typeof owner.pid === 'number' && typeof owner.timestamp === 'number' && typeof owner.token === 'string') return;
+    } catch { /* The conservative directory age protects an incomplete legacy owner write. */ }
+    const confirmed = statSync(lock);
+    if (confirmed.dev !== observed.dev || confirmed.ino !== observed.ino || confirmed.mtimeMs !== observed.mtimeMs) return;
+    const stale = `${lock}.stale-malformed-${randomUUID()}`;
+    renameSync(lock, stale);
+    rmSync(stale, { recursive: true, force: true });
+  } catch { /* A live or concurrently changing legacy lock remains untouched. */ }
+}
+
+function cleanupAbandonedLockCandidates(directory: string, now: number, staleAfter: number): void {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith('lock-candidate-')) continue;
+    const candidate = join(directory, entry.name);
+    try {
+      const observed = statSync(candidate);
+      if (now - observed.mtimeMs <= staleAfter) continue;
+      const confirmed = statSync(candidate);
+      if (confirmed.dev !== observed.dev || confirmed.ino !== observed.ino || confirmed.mtimeMs !== observed.mtimeMs) continue;
+      rmSync(candidate, { recursive: true, force: true });
+    } catch { /* A concurrently changing candidate remains untouched. */ }
+  }
 }
 
 function isPidAlive(pid: number): boolean {
@@ -401,17 +472,24 @@ function replaceRecovery(repositoryRoot: string, base: string, paths: PrivatePat
 }
 
 function publishStage(repositoryRoot: string, base: string, stage: string, paths: PrivatePaths, expectedGeneration: string, hooks: PublicationHooks): void {
+  let primaryRemovedByThisPublication = false;
+  let stagePublishedByThisPublication = false;
   try {
     if (primaryFingerprint(base) !== expectedGeneration) throw new Error('Repository knowledge changed during locked publication.');
-    if (existsSync(base)) rmSync(base, { recursive: true, force: true });
+    if (existsSync(base)) {
+      rmSync(base, { recursive: true, force: true });
+      primaryRemovedByThisPublication = true;
+    }
     hooks.afterPrimaryRemoved?.();
     publishRename(stage, base);
+    stagePublishedByThisPublication = true;
     readGeneration(repositoryRoot, base);
     fsyncTree(base);
     fsyncDirectory(dirname(base));
   } catch (error) {
-    if (existsSync(base)) rmSync(base, { recursive: true, force: true });
-    if (existsSync(paths.recovery)) {
+    if (!primaryRemovedByThisPublication && !stagePublishedByThisPublication) throw error;
+    if (stagePublishedByThisPublication && existsSync(base)) rmSync(base, { recursive: true, force: true });
+    if (primaryRemovedByThisPublication && existsSync(paths.recovery)) {
       const rollback = join(paths.directory, `stage-rollback-${randomUUID()}`);
       try {
         cpSync(paths.recovery, rollback, { recursive: true, errorOnExist: true });

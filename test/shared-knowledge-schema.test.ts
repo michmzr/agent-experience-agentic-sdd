@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -232,6 +232,24 @@ test('rolls back from private recovery when publication fails after primary remo
   assert.equal(readSharedKnowledge(repository, { stateRoot })[0]?.lesson, 'stable generation');
 });
 
+test('preserves an external primary edit when CAS fails before publication mutates it', () => {
+  const repository = root();
+  const stateRoot = mkdtempSync(join(tmpdir(), 'ael-private-state-'));
+  writeSharedKnowledge(repository, [{ ...document(), lesson: 'stable generation' }], { stateRoot });
+  const markdown = join(repository, 'agent-experience', 'knowledge', 'safe-reset.md');
+  let externallyEdited = Buffer.alloc(0);
+
+  assert.throws(() => writeSharedKnowledge(repository, [{ ...document(), lesson: 'replacement generation' }], {
+    stateRoot,
+    beforePrimaryPublication: () => {
+      externallyEdited = Buffer.concat([readFileSync(markdown), Buffer.from('external edit\n')]);
+      writeFileSync(markdown, externallyEdited);
+    }
+  }), /changed during locked publication/);
+
+  assert.deepEqual(readFileSync(markdown), externallyEdited);
+});
+
 test('recovers a stale dead-owner lock but never deletes a live-owner lock', () => {
   const repository = root();
   const stateRoot = mkdtempSync(join(tmpdir(), 'ael-private-state-'));
@@ -251,6 +269,55 @@ test('recovers a stale dead-owner lock but never deletes a live-owner lock', () 
   }), /Timed out/);
   assert.equal(existsSync(lock), true);
   rmSync(lock, { recursive: true });
+});
+
+test('publishes only fully prepared locks and ages out abandoned candidates separately', () => {
+  const repository = root();
+  const stateRoot = mkdtempSync(join(tmpdir(), 'ael-private-state-'));
+  const digest = createHash('sha256').update(realpathSync.native(repository)).digest('hex');
+  const privateDirectory = join(stateRoot, digest);
+  const lock = join(privateDirectory, 'lock');
+  let probed = false;
+
+  assert.throws(() => readSharedKnowledge(repository, {
+    stateRoot,
+    afterLockCandidatePrepared: (candidate: string) => {
+      probed = true;
+      assert.equal(existsSync(lock), false);
+      assert.equal(existsSync(join(candidate, 'owner.json')), true);
+      throw new Error('injected pre-acquisition crash');
+    }
+  }), /injected pre-acquisition crash/);
+  assert.equal(probed, true);
+
+  const abandoned = join(privateDirectory, 'lock-candidate-abandoned');
+  mkdirSync(abandoned, { recursive: true });
+  writeFileSync(join(abandoned, 'owner.json'), '{}');
+  utimesSync(abandoned, 0, 0);
+  assert.deepEqual(readSharedKnowledge(repository, { stateRoot, clock: () => 100_000, staleLockMs: 1 }), []);
+  assert.equal(existsSync(abandoned), false);
+
+  mkdirSync(lock);
+  let currentTime = Date.now();
+  assert.throws(() => readSharedKnowledge(repository, {
+    stateRoot, clock: () => currentTime, wait: (milliseconds) => { currentTime += milliseconds; }, lockTimeoutMs: 50, staleLockMs: 1_000
+  }), /Timed out/);
+  assert.equal(existsSync(lock), true);
+
+  utimesSync(lock, 0, 0);
+  assert.deepEqual(readSharedKnowledge(repository, { stateRoot, clock: () => currentTime, staleLockMs: 1 }), []);
+  assert.equal(existsSync(lock), false);
+});
+
+test('rejects a state root whose symlink ancestry resolves inside the repository', () => {
+  const repository = root();
+  const privateTarget = join(repository, 'private-state-target');
+  mkdirSync(privateTarget);
+  const apparentStateRoot = join(root(), 'external-state-link');
+  symlinkSync(privateTarget, apparentStateRoot);
+
+  assert.throws(() => readSharedKnowledge(repository, { stateRoot: apparentStateRoot }), /private state must be outside/i);
+  assert.deepEqual(readdirSync(privateTarget), []);
 });
 
 test('rejects canonical sensitive durable text and pre-parse resource excess', () => {
