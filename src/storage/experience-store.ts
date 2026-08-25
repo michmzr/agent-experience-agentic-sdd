@@ -756,6 +756,7 @@ export class ExperienceStore {
     if (event.outcome === 'unknown') throw new TypeError('Unknown post-result cannot produce lifecycle evidence.');
     if (input.candidate !== undefined) {
       if (event.outcome !== 'failed') throw new TypeError('Candidate failure capture requires an explicit failed result.');
+      if (input.candidate.evidence.polarity !== 'confirms') throw new TypeError('Failed candidate capture requires confirming evidence.');
       const candidateSnapshot = event.relatedEventId === undefined ? undefined : this.loadCaptureEnforcementSnapshot(event.source, event.relatedEventId);
       if (candidateSnapshot !== undefined && candidateSnapshot.enforcingReferences.length + candidateSnapshot.overrideReferences.length > 0) {
         throw new TypeError('Failure candidate conflicts with its persisted enforcement snapshot.');
@@ -768,7 +769,13 @@ export class ExperienceStore {
     const allowed = new Set([...snapshot.enforcingReferences, ...snapshot.overrideReferences].map(({ knowledgeId }) => knowledgeId));
     const updates = input.evidenceUpdates ?? (input.evidence === undefined || input.transition === undefined ? [] : [{ evidence: input.evidence, transition: input.transition }]);
     const expectedPolarity = event.outcome === 'succeeded' ? 'contradicts' : 'confirms';
+    const updatedKnowledge = new Set<string>();
     for (const update of updates) {
+      if (updatedKnowledge.has(update.transition.knowledgeId)) throw new TypeError('Captured result cannot contain duplicate knowledge updates.');
+      updatedKnowledge.add(update.transition.knowledgeId);
+      if (update.evidence.revalidatesTo !== undefined || update.transition.target !== undefined) {
+        throw new TypeError('Capture-derived evidence cannot request revalidation or an arbitrary target.');
+      }
       if (!allowed.has(update.transition.knowledgeId) || update.evidence.polarity !== expectedPolarity) {
         throw new TypeError('Post-result lifecycle evidence conflicts with its persisted enforcement snapshot.');
       }

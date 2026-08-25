@@ -137,6 +137,65 @@ test('unknown post-result persists the event without lifecycle evidence or state
   target.close();
 });
 
+test('rejects non-canonical post-result lifecycle effects atomically', () => {
+  const target = seededStore();
+  const session = { id: 'runtime-session' as SessionId, source: 'codex' as const, startedAt: now };
+  const pre = capture('pre-adversarial', 'pre_action');
+  target.appendIncremental({
+    session, event: pre,
+    enforcementSnapshot: { inputBinding: 'binding-1', enforcingReferences: [{ ruleId: 'rule-1', knowledgeId: 'knowledge-1' }], overrideReferences: [] }
+  });
+  const failed = capture('post-adversarial', 'post_result', 'failed', 'pre-adversarial');
+  assert.throws(() => target.appendIncremental({
+    event: failed,
+    evidenceUpdates: [
+      { evidence: { id: 'duplicate-update-1', polarity: 'confirms', summary: 'First.' }, transition: { knowledgeId: 'knowledge-1', occurredAt: now } },
+      { evidence: { id: 'duplicate-update-2', polarity: 'confirms', summary: 'Second.' }, transition: { knowledgeId: 'knowledge-1', occurredAt: now } }
+    ]
+  }), /duplicate.*knowledge|one.*knowledge/i);
+  assert.equal(target.listCapturedEventsPage().entries.some(({ sourceEventId }) => sourceEventId === 'post-adversarial'), false);
+  assert.equal(target.listEvidencePage().entries.some(({ id }) => id.startsWith('duplicate-update')), false);
+
+  target.appendIncremental({
+    evidence: { id: 'manual-dispute', candidateId: 'candidate-1', polarity: 'contradicts', summary: 'Manual contradiction.' },
+    transition: { knowledgeId: 'knowledge-1', occurredAt: now }
+  });
+  assert.equal(target.inspect('knowledge-1' as KnowledgeEntry['id'])?.state, 'disputed');
+  for (const [eventId, evidence, transition] of [
+    ['post-revalidation-evidence', { id: 'capture-revalidation', polarity: 'confirms' as const, summary: 'Captured failure.', revalidatesTo: 'verified' as const }, { knowledgeId: 'knowledge-1', occurredAt: now }],
+    ['post-revalidation-target', { id: 'capture-target', polarity: 'confirms' as const, summary: 'Captured failure.' }, { knowledgeId: 'knowledge-1', occurredAt: now, target: 'verified' as const }]
+  ] as const) {
+    assert.throws(() => target.appendIncremental({
+      event: capture(eventId, 'post_result', 'failed', 'pre-adversarial'),
+      evidenceUpdates: [{ evidence, transition }]
+    }), /revalidat|target/i);
+  }
+  assert.equal(target.inspect('knowledge-1' as KnowledgeEntry['id'])?.state, 'disputed');
+  assert.equal(target.listEvidencePage().entries.some(({ id }) => id === 'capture-revalidation'), false);
+  assert.equal(target.listEvidencePage().entries.some(({ id }) => id === 'capture-target'), false);
+  target.close();
+});
+
+test('failed candidate capture requires confirming evidence', () => {
+  const target = new ExperienceStore(join(mkdtempSync(join(tmpdir(), 'ael-failed-candidate-')), 'experience.sqlite'));
+  const session = { id: 'runtime-session' as SessionId, source: 'codex' as const, startedAt: now };
+  target.appendIncremental({
+    session, event: capture('pre-failed-candidate', 'pre_action'),
+    enforcementSnapshot: { inputBinding: 'binding-1', enforcingReferences: [], overrideReferences: [] }
+  });
+  assert.throws(() => target.appendIncremental({
+    event: capture('post-failed-candidate', 'post_result', 'failed', 'pre-failed-candidate'),
+    candidate: {
+      observation: { id: 'observation-failed', statement: 'Failed.' }, cluster: { id: 'cluster-failed' },
+      candidate: { id: 'candidate-failed', kind: 'failure', statement: 'Failed action.' },
+      evidence: { id: 'evidence-failed', polarity: 'contradicts', summary: 'Failed action.' }
+    }
+  }), /confirm/i);
+  assert.deepEqual(target.listCapturedEventsPage().entries.map(({ phase }) => phase), ['pre-action']);
+  assert.deepEqual(target.listCandidatesPage().entries, []);
+  target.close();
+});
+
 test('capture failure cannot change the synchronous gate outcome and returns a privacy-safe diagnostic', () => {
   const service = createCaptureService({
     store: { appendIncremental() { throw new Error('Bearer: super-secret-token-value'); } },

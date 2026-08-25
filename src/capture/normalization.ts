@@ -189,16 +189,26 @@ function stringArray(value: unknown, tool: string, action: string): string[] {
   });
   const joined = arguments_.join(' ');
   assertNoCredentialMaterial(joined, 'arguments');
-  const sensitiveValueFlag = /^--(?:password|passwd|token|access[-_]?token|refresh[-_]?token|api[-_]?key|private[-_]?key|secret|client[-_]?secret|authorization|auth)(?:[-_](?:file|stdin))?$/i;
+  const sensitiveValueFlag = /^--(?:password|passwd|token|access[-_]?token|refresh[-_]?token|oauth2[-_]?bearer|api[-_]?key|access[-_]?key|private[-_]?key|secret|client[-_]?secret|authorization|auth|credential|credentials)(?:[-_](?:file|stdin))?$/i;
   const sensitiveKey = /^(?:[A-Z][A-Z0-9_]*_)?(?:PASSWORD|PASSWD|TOKEN|KEY|API_KEY|APIKEY|SECRET|CLIENT_SECRET|AUTHORIZATION)$/i;
   const shortPasswordTool = /^(?:mysql|mariadb)$/.test(tool === 'shell' ? action : tool);
+  const curlTool = (tool === 'shell' ? action : tool) === 'curl';
+  const credentialAssignment = /^(?:[A-Z][A-Z0-9_]*_)?(?:TOKEN|KEY|SECRET|PASSWORD)=.*$/i;
   if (shortPasswordTool && arguments_.some((argument) => /^-p.+/.test(argument))) {
+    throw new TypeError('Capture arguments contain credential-like or private material.');
+  }
+  if (arguments_.some((argument) => credentialAssignment.test(argument)
+    || /authorization(?::|=)/i.test(argument)
+    || /^(?:-H|--header=?)authorization:/i.test(argument)
+    || (curlTool && (/^-u.+/.test(argument) || /^--(?:user|proxy-user)=.+/i.test(argument))))) {
     throw new TypeError('Capture arguments contain credential-like or private material.');
   }
   for (let index = 0; index < arguments_.length - 1; index += 1) {
     const argument = arguments_[index]!;
     if (sensitiveValueFlag.test(argument) || sensitiveKey.test(argument)
-      || (argument === '-p' && shortPasswordTool)) {
+      || (argument === '-p' && shortPasswordTool)
+      || (curlTool && /^(?:-u|--user|--proxy-user)$/i.test(argument))
+      || (/^(?:-H|--header)$/i.test(argument) && /^authorization(?::|=)/i.test(arguments_[index + 1]!))) {
       throw new TypeError('Capture arguments contain credential-like or private material.');
     }
   }
