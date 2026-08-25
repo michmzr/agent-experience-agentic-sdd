@@ -91,8 +91,13 @@ function incrementalAppend(session: Session, event: NormalizedCaptureEvent, deci
 }
 
 function uniqueKnowledgeReferences(decision: GateDecision): Array<{ knowledgeId: string }> {
+  const enforcingRuleIds = new Set(decision.explanations
+    .filter(({ outcome, ruleId }) => outcome !== 'ALLOW' && ruleId !== undefined)
+    .map(({ ruleId }) => ruleId!));
+  for (const ruleId of decision.override?.overriddenRuleIds ?? []) enforcingRuleIds.add(ruleId);
   const unique = new Map<string, { knowledgeId: string }>();
   for (const reference of decision.references) {
+    if (!enforcingRuleIds.has(reference.ruleId)) continue;
     unique.set(reference.knowledgeId, { knowledgeId: reference.knowledgeId });
   }
   return [...unique.values()].sort((left, right) => left.knowledgeId.localeCompare(right.knowledgeId));

@@ -30,6 +30,7 @@ import type {
   RevalidationProposal
 } from '../capture/contracts.js';
 import { validateNormalizedCaptureEvent } from '../capture/normalization.js';
+import { assertDurableTextSafe } from '../review/sanitizer.js';
 import { openExperienceDatabase } from './database.js';
 import { ensureOverrideAuditUseMigration, ensureOverrideEvidenceMigration, overrideAuditMigration } from './override-store.js';
 
@@ -64,6 +65,7 @@ interface SessionRow {
 }
 
 interface CaptureRow {
+  sequence: number;
   event_id: string;
   source: CapturedEventRecord['source'];
   source_event_id: string;
@@ -78,6 +80,7 @@ interface CaptureRow {
 }
 
 interface CandidateRow {
+  sequence: number;
   id: string;
   cluster_id: string;
   kind: CandidateLesson['kind'];
@@ -85,6 +88,7 @@ interface CandidateRow {
 }
 
 interface EvidenceRow {
+  sequence: number;
   id: string;
   candidate_id: string;
   polarity: Evidence['polarity'];
@@ -93,6 +97,7 @@ interface EvidenceRow {
 }
 
 interface TransitionRow {
+  sequence: number;
   from_state: KnowledgeState;
   to_state: KnowledgeState;
   evidence_id: string;
@@ -100,6 +105,7 @@ interface TransitionRow {
 }
 
 interface ProposalRow {
+  sequence: number;
   id: string;
   knowledge_id: string;
   created_at: string;
@@ -120,6 +126,23 @@ export interface RetrievalFilter {
 
 export interface RetrievedKnowledgeEntry extends KnowledgeEntry {
   readonly authoritative: boolean;
+}
+
+export const MAX_INCREMENTAL_PAGE_SIZE = 100;
+
+export interface IncrementalPageCursor {
+  readonly afterSequence: number;
+  readonly highWaterSequence: number;
+}
+
+export interface IncrementalPageRequest {
+  readonly cursor?: IncrementalPageCursor;
+  readonly limit?: number;
+}
+
+export interface IncrementalPage<T> {
+  readonly entries: readonly T[];
+  readonly nextCursor?: IncrementalPageCursor;
 }
 
 const schemaMigration = `
@@ -282,12 +305,13 @@ export class ExperienceStore {
   appendIncremental(input: IncrementalCaptureAppend): IncrementalAppendResult {
     if (!input || typeof input !== 'object') throw new TypeError('Incremental append must be an object.');
     assertOnlyIncrementalKeys(input as unknown as Record<string, unknown>, ['session', 'event', 'candidate', 'evidence', 'transition', 'evidenceUpdates']);
-    if (input.transition !== undefined) assertOnlyIncrementalKeys(input.transition as unknown as Record<string, unknown>, ['knowledgeId', 'occurredAt', 'target']);
+    if (input.session !== undefined) assertIncrementalSession(input.session);
+    if (input.transition !== undefined) assertIncrementalTransition(input.transition);
     if (input.evidenceUpdates !== undefined) {
       if (!Array.isArray(input.evidenceUpdates) || input.evidenceUpdates.length > 256) throw new TypeError('Incremental evidence update limit exceeded.');
       for (const update of input.evidenceUpdates) {
         assertOnlyIncrementalKeys(update as unknown as Record<string, unknown>, ['evidence', 'transition']);
-        assertOnlyIncrementalKeys(update.transition as unknown as Record<string, unknown>, ['knowledgeId', 'occurredAt', 'target']);
+        assertIncrementalTransition(update.transition);
       }
     }
     if (input.candidate !== undefined && input.event === undefined) throw new TypeError('Candidate capture requires its source event.');
@@ -296,6 +320,7 @@ export class ExperienceStore {
 
     this.database.exec('BEGIN IMMEDIATE');
     try {
+      let sessionInserted = false;
       if (input.event !== undefined) {
         const event = validateNormalizedCaptureEvent(input.event);
         this.insertSession(input.session, event);
@@ -305,54 +330,66 @@ export class ExperienceStore {
           this.database.exec('COMMIT');
           return Object.freeze({ inserted: false });
         }
+        this.assertPostResultLink(event);
         this.insertCaptureEvent(event);
       } else if (input.session !== undefined) {
-        this.insertOrVerifySession(input.session);
+        sessionInserted = this.insertOrVerifySession(input.session);
       }
 
       if (input.candidate !== undefined) this.insertCandidateCapture(input.event!, input.candidate);
       if (input.evidence !== undefined) this.insertIncrementalEvidence(input.evidence, input.transition);
       for (const update of input.evidenceUpdates ?? []) this.insertIncrementalEvidence(update.evidence, update.transition);
       this.database.exec('COMMIT');
-      return Object.freeze({ inserted: input.event !== undefined || input.session !== undefined || input.candidate !== undefined || input.evidence !== undefined || (input.evidenceUpdates?.length ?? 0) > 0 });
+      return Object.freeze({ inserted: input.event !== undefined || sessionInserted || input.candidate !== undefined || input.evidence !== undefined || (input.evidenceUpdates?.length ?? 0) > 0 });
     } catch (error) {
       this.database.exec('ROLLBACK');
       throw error;
     }
   }
 
-  listCapturedEvents(): CapturedEventRecord[] {
+  listCapturedEventsPage(request: IncrementalPageRequest = {}): IncrementalPage<CapturedEventRecord> {
+    const page = checkedPageRequest(request, this.captureHighWater());
     const rows = this.database.prepare(`
-      SELECT ce.event_id, ce.source, ce.source_event_id, ce.phase, ce.signature_json, ce.summary,
+      SELECT ce.rowid AS sequence, ce.event_id, ce.source, ce.source_event_id, ce.phase, ce.signature_json, ce.summary,
         ce.capture_outcome, ce.related_event_id, e.session_id, e.occurred_at, e.exit_status
       FROM capture_events ce JOIN events e ON e.id = ce.event_id
-      ORDER BY e.occurred_at, ce.rowid
-    `).all() as unknown as CaptureRow[];
-    return rows.map(captureFromRow);
+      WHERE ce.rowid > ? AND ce.rowid <= ? ORDER BY ce.rowid LIMIT ?
+    `).all(page.afterSequence, page.highWaterSequence, page.limit + 1) as unknown as CaptureRow[];
+    return pageResult(rows, page, captureFromRow);
   }
 
-  listCandidates(): CandidateLesson[] {
-    return (this.database.prepare('SELECT id, cluster_id, kind, statement FROM candidates ORDER BY id').all() as unknown as CandidateRow[])
-      .map((row) => ({ id: row.id as CandidateLessonId, clusterId: row.cluster_id as ClusterId, kind: row.kind, statement: row.statement }));
+  listCandidatesPage(request: IncrementalPageRequest = {}): IncrementalPage<CandidateLesson> {
+    const page = checkedPageRequest(request, tableHighWater(this.database, 'candidates'));
+    const rows = this.database.prepare('SELECT rowid AS sequence, id, cluster_id, kind, statement FROM candidates WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?')
+      .all(page.afterSequence, page.highWaterSequence, page.limit + 1) as unknown as CandidateRow[];
+    return pageResult(rows, page, (row) => Object.freeze({ id: row.id as CandidateLessonId, clusterId: row.cluster_id as ClusterId, kind: row.kind, statement: row.statement }));
   }
 
-  listEvidence(): Evidence[] {
-    return (this.database.prepare('SELECT id, candidate_id, polarity, summary, revalidates_to FROM evidence ORDER BY id').all() as unknown as EvidenceRow[])
-      .map(evidenceFromRow);
+  listEvidencePage(request: IncrementalPageRequest = {}): IncrementalPage<Evidence> {
+    const page = checkedPageRequest(request, tableHighWater(this.database, 'evidence'));
+    const rows = this.database.prepare('SELECT rowid AS sequence, id, candidate_id, polarity, summary, revalidates_to FROM evidence WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?')
+      .all(page.afterSequence, page.highWaterSequence, page.limit + 1) as unknown as EvidenceRow[];
+    return pageResult(rows, page, evidenceFromRow);
   }
 
-  listTransitionHistory(knowledgeId: string): TransitionHistoryEntry[] {
-    return (this.database.prepare(`
-      SELECT from_state, to_state, evidence_id, occurred_at
-      FROM knowledge_transition_history WHERE knowledge_id = ? ORDER BY id
-    `).all(knowledgeId) as unknown as TransitionRow[]).map((row) => ({
+  listTransitionHistoryPage(knowledgeId: string, request: IncrementalPageRequest = {}): IncrementalPage<TransitionHistoryEntry> {
+    if (!canonicalIncrementalIdentifier.test(knowledgeId)) throw new RangeError('Transition history knowledge id is invalid.');
+    const highWater = (this.database.prepare('SELECT COALESCE(MAX(id), 0) AS high_water FROM knowledge_transition_history WHERE knowledge_id = ?').get(knowledgeId) as { high_water: number }).high_water;
+    const page = checkedPageRequest(request, highWater);
+    const rows = this.database.prepare(`
+      SELECT id AS sequence, from_state, to_state, evidence_id, occurred_at
+      FROM knowledge_transition_history WHERE knowledge_id = ? AND id > ? AND id <= ? ORDER BY id LIMIT ?
+    `).all(knowledgeId, page.afterSequence, page.highWaterSequence, page.limit + 1) as unknown as TransitionRow[];
+    return pageResult(rows, page, (row) => Object.freeze({
       from: row.from_state, to: row.to_state, evidenceId: row.evidence_id as EvidenceId, occurredAt: row.occurred_at
     }));
   }
 
-  listRevalidationProposals(): RevalidationProposal[] {
-    return (this.database.prepare('SELECT id, knowledge_id, created_at, contradiction_count, status FROM revalidation_proposals ORDER BY id').all() as unknown as ProposalRow[])
-      .map((row) => Object.freeze({ id: row.id, knowledgeId: row.knowledge_id, createdAt: row.created_at, contradictionCount: row.contradiction_count, status: row.status }));
+  listRevalidationProposalsPage(request: IncrementalPageRequest = {}): IncrementalPage<RevalidationProposal> {
+    const page = checkedPageRequest(request, tableHighWater(this.database, 'revalidation_proposals'));
+    const rows = this.database.prepare('SELECT rowid AS sequence, id, knowledge_id, created_at, contradiction_count, status FROM revalidation_proposals WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?')
+      .all(page.afterSequence, page.highWaterSequence, page.limit + 1) as unknown as ProposalRow[];
+    return pageResult(rows, page, (row) => Object.freeze({ id: row.id, knowledgeId: row.knowledge_id, createdAt: row.created_at, contradictionCount: row.contradiction_count, status: row.status }));
   }
 
   inspect(id: KnowledgeId): KnowledgeEntry | undefined {
@@ -450,6 +487,7 @@ export class ExperienceStore {
         LEFT JOIN event_tombstones t ON t.event_id = e.id
         WHERE t.event_id IS NULL
           AND NOT EXISTS (SELECT 1 FROM observation_events oe WHERE oe.event_id = e.id)
+          AND NOT EXISTS (SELECT 1 FROM capture_events ce WHERE ce.event_id = e.id)
       `).all() as Array<{ id: string }>;
       const tombstoneEvent = this.database.prepare('INSERT INTO event_tombstones (event_id, tombstoned_at) VALUES (?, ?)');
       for (const event of eventCandidates) tombstoneEvent.run(event.id, now);
@@ -458,6 +496,7 @@ export class ExperienceStore {
         FROM event_tombstones t
         WHERE t.tombstoned_at < ?
           AND NOT EXISTS (SELECT 1 FROM observation_events oe WHERE oe.event_id = t.event_id)
+          AND NOT EXISTS (SELECT 1 FROM capture_events ce WHERE ce.event_id = t.event_id)
       `).all(now) as Array<{ id: string }>;
       const removeEventTombstone = this.database.prepare('DELETE FROM event_tombstones WHERE event_id = ?');
       const removeEvent = this.database.prepare('DELETE FROM events WHERE id = ?');
@@ -534,7 +573,7 @@ export class ExperienceStore {
 
   private captureByIdentity(source: CapturedEventRecord['source'], sourceEventId: string): CapturedEventRecord | undefined {
     const row = this.database.prepare(`
-      SELECT ce.event_id, ce.source, ce.source_event_id, ce.phase, ce.signature_json, ce.summary,
+      SELECT ce.rowid AS sequence, ce.event_id, ce.source, ce.source_event_id, ce.phase, ce.signature_json, ce.summary,
         ce.capture_outcome, ce.related_event_id, e.session_id, e.occurred_at, e.exit_status
       FROM capture_events ce JOIN events e ON e.id = ce.event_id
       WHERE ce.source = ? AND ce.source_event_id = ?
@@ -556,16 +595,17 @@ export class ExperienceStore {
     if (session !== undefined) this.assertSameSession(existing, session);
   }
 
-  private insertOrVerifySession(session: Session): void {
+  private insertOrVerifySession(session: Session): boolean {
     const existing = this.database.prepare('SELECT id, source, started_at, repository_id, workspace_id, user_id FROM sessions WHERE id = ?').get(session.id) as unknown as SessionRow | undefined;
     if (existing !== undefined) {
       this.assertSameSession(existing, session);
-      return;
+      return false;
     }
     const validation = validateImport({ sessions: [session], events: [], observations: [], clusters: [], candidates: [], evidence: [], knowledge: [] });
     if (!validation.ok) throw new TypeError(`${validation.code}: ${validation.message}`);
     this.database.prepare('INSERT INTO sessions (id, source, started_at, repository_id, workspace_id, user_id) VALUES (?, ?, ?, ?, ?, ?)')
       .run(session.id, session.source, session.startedAt, session.repositoryId ?? null, session.workspaceId ?? null, session.userId ?? null);
+    return true;
   }
 
   private assertSameSession(row: SessionRow, session: Session): void {
@@ -595,6 +635,20 @@ export class ExperienceStore {
       (event_id, source, source_event_id, phase, signature_json, summary, capture_outcome, related_event_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(event.id, event.source, event.sourceEventId, event.phase, JSON.stringify(event.signature), event.summary, event.outcome ?? null, event.relatedEventId ?? null);
+  }
+
+  private assertPostResultLink(event: CapturedEventRecord): void {
+    if (event.phase !== 'post-result') return;
+    if (event.relatedEventId === undefined) throw new TypeError('Post-result capture requires a related pre-action.');
+    const related = this.database.prepare(`
+      SELECT ce.phase, ce.signature_json, e.session_id, e.occurred_at
+      FROM capture_events ce JOIN events e ON e.id = ce.event_id
+      WHERE ce.source = ? AND ce.source_event_id = ?
+    `).get(event.source, event.relatedEventId) as { phase: string; signature_json: string; session_id: string; occurred_at: string } | undefined;
+    if (related === undefined || related.phase !== 'pre-action') throw new TypeError('Post-result capture requires an existing related pre-action.');
+    if (related.session_id !== event.sessionId) throw new TypeError('Post-result capture session does not match its related pre-action.');
+    if (related.signature_json !== JSON.stringify(event.signature)) throw new TypeError('Post-result capture signature does not match its related pre-action.');
+    if (event.occurredAt < related.occurred_at) throw new TypeError('Post-result capture cannot precede its related pre-action.');
   }
 
   private insertCandidateCapture(event: CapturedEventRecord, bundle: NonNullable<IncrementalCaptureAppend['candidate']>): void {
@@ -631,6 +685,11 @@ export class ExperienceStore {
     };
     const validation = validateIncrementalEvidence(evidence);
     if (!validation.ok) throw new TypeError(`${validation.code}: ${validation.message}`);
+    try {
+      assertDurableTextSafe(evidence.summary);
+    } catch {
+      throw new TypeError('Incremental evidence summary contains private or credential-like material.');
+    }
     const candidate = this.database.prepare('SELECT id FROM candidates WHERE id = ?').get(evidence.candidateId);
     if (candidate === undefined) throw new TypeError('Incremental evidence references a missing candidate.');
     this.database.prepare('INSERT INTO evidence (id, candidate_id, polarity, summary, revalidates_to) VALUES (?, ?, ?, ?, ?)')
@@ -639,17 +698,26 @@ export class ExperienceStore {
     assertCanonicalTimestamp(transition.occurredAt);
     const row = this.database.prepare('SELECT id, candidate_id, state, statement FROM knowledge WHERE id = ?').get(transition.knowledgeId) as KnowledgeRow | undefined;
     if (row === undefined) throw new TypeError('Incremental transition references missing knowledge.');
-    const current = this.toKnowledgeEntry(row);
+    const current: KnowledgeEntry = {
+      id: row.id as KnowledgeId,
+      candidateId: row.candidate_id as CandidateLessonId,
+      evidenceIds: [],
+      state: row.state,
+      statement: row.statement
+    };
     if (current.candidateId !== evidence.candidateId) throw new TypeError('Knowledge evidence must support its candidate.');
-    const lifecycle = applyTransition(current, evidence, this.listTransitionHistory(transition.knowledgeId), transition.target);
+    const lifecycle = applyTransition(current, evidence, [], transition.target);
+    if (transition.target !== undefined && lifecycle.history.at(-1)?.to !== transition.target) {
+      throw new TypeError('Incremental lifecycle transition did not reach the exact target.');
+    }
     const attached = lifecycle.entry.evidenceIds.includes(evidence.id);
     if (!attached) throw new TypeError('Incremental evidence does not permit the requested lifecycle transition.');
     if (attached) {
-      const position = current.evidenceIds.length;
+      const position = (this.database.prepare('SELECT COUNT(*) AS count FROM knowledge_evidence WHERE knowledge_id = ?').get(row.id) as { count: number }).count;
       this.database.prepare('INSERT INTO knowledge_evidence (knowledge_id, evidence_id, position) VALUES (?, ?, ?)').run(row.id, evidence.id, position);
     }
     if (lifecycle.entry.state !== current.state) this.database.prepare('UPDATE knowledge SET state = ? WHERE id = ?').run(lifecycle.entry.state, row.id);
-    for (const item of lifecycle.history.slice(this.listTransitionHistory(transition.knowledgeId).length)) {
+    for (const item of lifecycle.history) {
       this.database.prepare('INSERT INTO knowledge_transition_history (knowledge_id, from_state, to_state, evidence_id, occurred_at) VALUES (?, ?, ?, ?, ?)')
         .run(row.id, item.from, item.to, item.evidenceId, transition.occurredAt);
     }
@@ -683,6 +751,10 @@ export class ExperienceStore {
       ...(event.outcome === undefined ? {} : { outcome: event.outcome === 'succeeded' ? 'passed' : event.outcome }),
       ...(event.exitStatus === undefined ? {} : { exitStatus: event.exitStatus })
     };
+  }
+
+  private captureHighWater(): number {
+    return tableHighWater(this.database, 'capture_events');
   }
 
   private defaultMetadata(knowledgeId: string, record: ExperienceImport): Required<Pick<KnowledgeMetadata, 'scope' | 'createdAt'>> & KnowledgeMetadata {
@@ -801,7 +873,7 @@ function evidenceFromRow(row: EvidenceRow): Evidence {
 }
 
 function assertCanonicalTimestamp(value: string): void {
-  if (Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) throw new TypeError('Transition timestamp must be canonical ISO time.');
+  if (typeof value !== 'string' || Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) throw new TypeError('Transition timestamp must be canonical ISO time.');
 }
 
 function assertIncrementalCandidateResources(bundle: NonNullable<IncrementalCaptureAppend['candidate']>): void {
@@ -819,13 +891,99 @@ function assertIncrementalCandidateResources(bundle: NonNullable<IncrementalCapt
     ['candidate statement', bundle.candidate.statement, 2_048],
     ['evidence summary', bundle.evidence.summary, 2_048]
   ] as const) {
-    if (value.length < 1 || value.length > maximum) throw new TypeError(`Incremental ${field} exceeds its resource limit.`);
+    if (value.length < 1 || value.length > maximum || value !== value.trim() || /[\u0000-\u001F\u007F]/.test(value)) {
+      throw new TypeError(`Incremental ${field} is invalid or exceeds its resource limit.`);
+    }
+    if (field.endsWith('id') && !canonicalIncrementalIdentifier.test(value)) throw new TypeError(`Incremental ${field} is invalid.`);
+    try {
+      assertDurableTextSafe(value);
+    } catch {
+      throw new TypeError(`Incremental ${field} contains private or credential-like material.`);
+    }
+  }
+  if (bundle.evidence.candidateId !== undefined && !canonicalIncrementalIdentifier.test(bundle.evidence.candidateId)) {
+    throw new TypeError('Incremental evidence candidate id is invalid.');
   }
 }
 
 function assertOnlyIncrementalKeys(value: Record<string, unknown>, allowed: readonly string[]): void {
   const unexpected = Object.keys(value).find((key) => !allowed.includes(key));
   if (unexpected !== undefined) throw new TypeError(`Unsupported incremental field: ${unexpected}.`);
+}
+
+const canonicalIncrementalIdentifier = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,511}$/;
+
+function assertIncrementalSession(session: Session): void {
+  if (!session || typeof session !== 'object') throw new TypeError('Incremental session is invalid.');
+  assertOnlyIncrementalKeys(session as unknown as Record<string, unknown>, ['id', 'source', 'startedAt', 'repositoryId', 'workspaceId', 'userId']);
+  if (session.source !== 'codex' && session.source !== 'claude-code' && session.source !== 'cursor') throw new TypeError('Incremental session source is invalid.');
+  assertCanonicalTimestamp(session.startedAt);
+  for (const [field, value] of [
+    ['session id', session.id], ['repository id', session.repositoryId],
+    ['workspace id', session.workspaceId], ['user id', session.userId]
+  ] as const) {
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !canonicalIncrementalIdentifier.test(value)) throw new TypeError(`Incremental ${field} is invalid.`);
+    try {
+      assertDurableTextSafe(value);
+    } catch {
+      throw new TypeError(`Incremental ${field} contains private or credential-like material.`);
+    }
+  }
+}
+
+function assertIncrementalTransition(transition: NonNullable<IncrementalCaptureAppend['transition']>): void {
+  if (!transition || typeof transition !== 'object') throw new TypeError('Incremental transition is invalid.');
+  assertOnlyIncrementalKeys(transition as unknown as Record<string, unknown>, ['knowledgeId', 'occurredAt', 'target']);
+  if (typeof transition.knowledgeId !== 'string' || !canonicalIncrementalIdentifier.test(transition.knowledgeId)) throw new TypeError('Incremental transition knowledge id is invalid.');
+  assertCanonicalTimestamp(transition.occurredAt);
+  if (transition.target !== undefined && !['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired'].includes(transition.target)) {
+    throw new TypeError('Incremental transition target is invalid.');
+  }
+}
+
+interface CheckedPage {
+  readonly afterSequence: number;
+  readonly highWaterSequence: number;
+  readonly limit: number;
+}
+
+function checkedPageRequest(request: IncrementalPageRequest, currentHighWater: number): CheckedPage {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) throw new RangeError('Incremental page request is invalid.');
+  const unexpectedRequestField = Object.keys(request).find((key) => !['cursor', 'limit'].includes(key));
+  if (unexpectedRequestField !== undefined) throw new RangeError(`Unsupported incremental page request field: ${unexpectedRequestField}.`);
+  const limit = request.limit ?? MAX_INCREMENTAL_PAGE_SIZE;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_INCREMENTAL_PAGE_SIZE) {
+    throw new RangeError(`Incremental page size must be between 1 and ${MAX_INCREMENTAL_PAGE_SIZE}.`);
+  }
+  const cursor = request.cursor ?? { afterSequence: 0, highWaterSequence: currentHighWater };
+  if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)
+    || Object.keys(cursor).some((key) => !['afterSequence', 'highWaterSequence'].includes(key))) {
+    throw new RangeError('Incremental page cursor is invalid.');
+  }
+  if (!Number.isSafeInteger(cursor.afterSequence) || cursor.afterSequence < 0
+    || !Number.isSafeInteger(cursor.highWaterSequence) || cursor.highWaterSequence < cursor.afterSequence
+    || cursor.highWaterSequence > currentHighWater) {
+    throw new RangeError('Incremental page cursor is invalid.');
+  }
+  return { afterSequence: cursor.afterSequence, highWaterSequence: cursor.highWaterSequence, limit };
+}
+
+function pageResult<Row extends { sequence: number }, Value>(
+  rows: readonly Row[],
+  page: CheckedPage,
+  convert: (row: Row) => Value
+): IncrementalPage<Value> {
+  const visible = rows.slice(0, page.limit);
+  const entries = Object.freeze(visible.map(convert));
+  const nextCursor = rows.length > page.limit
+    ? Object.freeze({ afterSequence: visible.at(-1)!.sequence, highWaterSequence: page.highWaterSequence })
+    : undefined;
+  return Object.freeze({ entries, ...(nextCursor === undefined ? {} : { nextCursor }) });
+}
+
+function tableHighWater(database: DatabaseSync, table: 'capture_events' | 'candidates' | 'evidence' | 'revalidation_proposals'): number {
+  return (database.prepare(`SELECT COALESCE(MAX(rowid), 0) AS high_water FROM ${table}`).get() as { high_water: number }).high_water;
 }
 
 function normalizeTags(tags: readonly string[]): string[] {

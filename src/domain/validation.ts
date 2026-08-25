@@ -24,6 +24,7 @@ const states: readonly KnowledgeState[] = ['candidate', 'observed', 'confirmed',
 const lessonKinds: readonly LessonKind[] = ['failure', 'successful-workflow', 'project-fact', 'convention', 'tool-capability', 'environment-quirk', 'heuristic', 'preference'];
 const evidencePolarities: readonly EvidencePolarity[] = ['confirms', 'contradicts', 'contextualizes'];
 const eventOutcomes = ['passed', 'failed', 'unknown'] as const;
+const incrementalIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,511}$/;
 const collectionKeys = ['sessions', 'events', 'observations', 'clusters', 'candidates', 'evidence', 'knowledge'] as const;
 const metadataKeys = ['scope', 'repositoryId', 'path', 'tool', 'tags', 'createdAt', 'approvalKind', 'approvedAt', 'activation', 'mergedProvenance'] as const;
 const allowedEntityKeys: Record<typeof collectionKeys[number], readonly string[]> = {
@@ -193,9 +194,12 @@ export function validateIncrementalEvidence(value: unknown): ValidationResult {
   if (evidence.polarity === 'contradicts' && evidence.revalidatesTo !== undefined) {
     return invalid('INVALID_SHAPE', 'Contradictory evidence cannot revalidate knowledge.');
   }
-  if (evidence.id.trim().length === 0 || evidence.candidateId.trim().length === 0) return invalid('INVALID_SHAPE', 'Evidence identifiers must be non-empty.');
+  if (!incrementalIdentifierPattern.test(evidence.id) || !incrementalIdentifierPattern.test(evidence.candidateId)) return invalid('INVALID_SHAPE', 'Evidence identifiers are invalid.');
   if (evidence.id.length > 512 || evidence.candidateId.length > 512 || evidence.summary.length > 2_048) {
     return invalid('INVALID_SHAPE', 'Incremental evidence exceeds its resource limit.');
+  }
+  if (evidence.summary.length < 1 || evidence.summary !== evidence.summary.trim() || /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(evidence.summary)) {
+    return invalid('INVALID_SHAPE', 'Incremental evidence summary is invalid.');
   }
   return { ok: true };
 }

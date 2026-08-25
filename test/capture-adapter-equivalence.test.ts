@@ -48,6 +48,9 @@ test('rejects raw transcripts, credentials, unknown kinds, unstable fields, and 
     { ...base, payload: { arbitrary: true } },
     { ...base, summary: 'Bearer: abcdefghijklmnopqrstuvwxyz' },
     { ...base, arguments: ['ghp_abcdefghijklmnopqrstuvwxyz123456'] },
+    { ...base, arguments: ['User: paste the full transcript here'] },
+    { ...base, arguments: ['line one\nline two'] },
+    { ...base, arguments: ['arbitrary prose payload'] },
     { ...base, event_kind: 'assistant_message' },
     { ...base, sequence: 42 },
     { ...base, summary: 'x'.repeat(2_049) }

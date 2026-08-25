@@ -14,7 +14,11 @@ import {
   type NormalizedCaptureEvent
 } from './contracts.js';
 
-const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/;
+const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,511}$/;
+const signatureTokenPattern = /^[a-z0-9][a-z0-9._:/-]{0,127}$/;
+const argumentPattern = /^[A-Za-z0-9_./:@%+=,~\\-]+$/;
+const MAX_CAPTURE_ARGUMENT_LENGTH = 512;
+const MAX_CAPTURE_ARGUMENT_TEXT = 8_192;
 const credentialPatterns: readonly RegExp[] = [
   /-----BEGIN (?:[A-Z0-9 ]* )?PRIVATE KEY(?: BLOCK)?-----/i,
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/,
@@ -59,12 +63,13 @@ export function normalizeMappedCapture(input: MappedCaptureRecord): NormalizedCa
 
 export function normalizeCaptureBatch(events: readonly NormalizedCaptureEvent[]): readonly NormalizedCaptureEvent[] {
   const identities = new Set<string>();
-  for (const event of events) {
+  const normalized = events.map(validateNormalizedCaptureEvent);
+  for (const event of normalized) {
     const identity = `${event.source}\0${event.sourceEventId}`;
     if (identities.has(identity)) throw new TypeError('Duplicate source-event identity in capture batch.');
     identities.add(identity);
   }
-  return Object.freeze([...events]);
+  return Object.freeze(normalized);
 }
 
 export function validateNormalizedCaptureEvent(value: NormalizedCaptureEvent): NormalizedCaptureEvent {
@@ -141,7 +146,9 @@ function identifier(value: unknown, field: string): string {
 }
 
 function safeToken(value: unknown, field: string): string {
-  return safeText(value, field).trim().toLowerCase();
+  const normalized = safeText(value, field).toLowerCase();
+  if (!signatureTokenPattern.test(normalized)) throw new TypeError(`Capture ${field} is not an allowlisted signature token.`);
+  return normalized;
 }
 
 function safeText(value: unknown, field: string): string {
@@ -161,13 +168,22 @@ function safeStructuredText(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.length < 1 || value.length > MAX_CAPTURE_TEXT_LENGTH || value !== value.trim()) {
     throw new TypeError(`Capture ${field} is invalid or exceeds its resource limit.`);
   }
+  if (/[\u0000-\u001F\u007F]/.test(value)) throw new TypeError(`Capture ${field} contains unsupported control characters.`);
   assertNoCredentialMaterial(value, field);
   return value;
 }
 
 function stringArray(value: unknown, field: string): string[] {
   if (!Array.isArray(value) || value.length > MAX_CAPTURE_ARGUMENTS) throw new TypeError(`Capture ${field} exceed its resource limit.`);
-  return value.map((item) => safeStructuredText(item, 'argument'));
+  let total = 0;
+  return value.map((item) => {
+    const argument = safeStructuredText(item, 'argument');
+    total += argument.length;
+    if (argument.length > MAX_CAPTURE_ARGUMENT_LENGTH || total > MAX_CAPTURE_ARGUMENT_TEXT || !argumentPattern.test(argument)) {
+      throw new TypeError('Capture argument is not an allowlisted bounded token or option.');
+    }
+    return argument;
+  });
 }
 
 function optionalExitStatus(value: unknown): number | undefined {

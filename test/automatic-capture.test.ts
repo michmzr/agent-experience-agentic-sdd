@@ -34,8 +34,12 @@ function seededStore(): ExperienceStore {
   return target;
 }
 
-function capture(eventId: string, kind: 'pre_action' | 'post_result', outcome?: 'succeeded') {
-  return adaptCodexCapture({ event_id: eventId, session_id: 'runtime-session', event_kind: kind, occurred_at: now, tool: 'git', action: 'push', arguments: ['--force'], cwd: '/work/repo', summary: outcome ? 'Reviewed force push succeeded.' : 'Attempt force push.', ...(kind === 'post_result' ? { outcome, exit_status: 0, related_event_id: 'pre-1' } : {}) });
+function capture(eventId: string, kind: 'pre_action' | 'post_result', outcome?: 'succeeded', relatedEventId = 'pre-1') {
+  return adaptCodexCapture({ event_id: eventId, session_id: 'runtime-session', event_kind: kind, occurred_at: now, tool: 'git', action: 'push', arguments: ['--force'], cwd: '/work/repo', summary: outcome ? 'Reviewed force push succeeded.' : 'Attempt force push.', ...(kind === 'post_result' ? { outcome, exit_status: 0, related_event_id: relatedEventId } : {}) });
+}
+
+function capturedPhases(target: ExperienceStore): string[] {
+  return target.listCapturedEventsPage().entries.map(({ phase }) => phase);
 }
 
 test('learning downgrade records both pre-action and post-result evidence', () => {
@@ -44,7 +48,7 @@ test('learning downgrade records both pre-action and post-result evidence', () =
   assert.equal(service.capture(capture('pre-1', 'pre_action'), learningDecision).status, 'captured');
   assert.equal(service.capture(capture('post-1', 'post_result', 'succeeded'), learningDecision).status, 'captured');
   assert.equal(service.capture(capture('post-1', 'post_result', 'succeeded'), learningDecision).status, 'duplicate');
-  assert.deepEqual(target.listCapturedEvents().map(({ phase }) => phase), ['pre-action', 'post-result']);
+  assert.deepEqual(capturedPhases(target), ['pre-action', 'post-result']);
   assert.equal(target.inspect('knowledge-1' as KnowledgeEntry['id'])?.state, 'disputed');
   assert.equal(target.inspect('knowledge-1' as KnowledgeEntry['id'])?.evidenceIds.length, 2);
   target.close();
@@ -53,14 +57,16 @@ test('learning downgrade records both pre-action and post-result evidence', () =
 test('repeated successful contradictions create a proposal without deleting or silently revalidating knowledge', () => {
   const target = seededStore();
   const service = createCaptureService({ store: target, session: { id: 'runtime-session' as SessionId, source: 'codex', startedAt: now } });
+  service.capture(capture('pre-1', 'pre_action'), learningDecision);
   service.capture(capture('post-1', 'post_result', 'succeeded'), learningDecision);
-  service.capture(capture('post-2', 'post_result', 'succeeded'), learningDecision);
+  service.capture(capture('pre-2', 'pre_action'), learningDecision);
+  service.capture(capture('post-2', 'post_result', 'succeeded', 'pre-2'), learningDecision);
 
   const knowledge = target.inspect('knowledge-1' as KnowledgeEntry['id']);
   assert.equal(knowledge?.state, 'disputed');
   assert.equal(knowledge?.evidenceIds.length, 3);
-  assert.deepEqual(target.listRevalidationProposals().map(({ knowledgeId }) => knowledgeId), ['knowledge-1']);
-  assert.equal(target.listTransitionHistory('knowledge-1').filter(({ to }) => to === 'verified').length, 0);
+  assert.deepEqual(target.listRevalidationProposalsPage().entries.map(({ knowledgeId }) => knowledgeId), ['knowledge-1']);
+  assert.equal(target.listTransitionHistoryPage('knowledge-1').entries.filter(({ to }) => to === 'verified').length, 0);
   target.close();
 });
 
@@ -72,9 +78,34 @@ test('treats a successful audited override as contradiction evidence after conti
     outcome: 'ALLOW',
     override: { overrideId: 'override-1', scope: 'rule', overriddenRuleIds: ['rule-1'] }
   };
-  assert.equal(service.capture(capture('post-override', 'post_result', 'succeeded'), continued).status, 'captured');
+  service.capture(capture('pre-override', 'pre_action'), continued);
+  assert.equal(service.capture(capture('post-override', 'post_result', 'succeeded', 'pre-override'), continued).status, 'captured');
   assert.equal(target.inspect('knowledge-1' as KnowledgeEntry['id'])?.state, 'disputed');
-  assert.equal(target.listEvidence().find(({ id }) => id !== 'seed-evidence')?.polarity, 'contradicts');
+  assert.equal(target.listEvidencePage().entries.find(({ id }) => id !== 'seed-evidence')?.polarity, 'contradicts');
+  target.close();
+});
+
+test('captures contradiction only for enforcing or explicitly overridden rule references', () => {
+  const target = seededStore();
+  target.import({
+    sessions: [{ id: 'context-session' as SessionId, source: 'codex', startedAt: now }],
+    events: [{ id: 'context-event' as never, sessionId: 'context-session' as SessionId, kind: 'test-result', occurredAt: now, outcome: 'passed' }],
+    observations: [{ id: 'context-observation' as never, eventIds: ['context-event' as never], statement: 'Context only.' }],
+    clusters: [{ id: 'context-cluster' as never, observationIds: ['context-observation' as never] }],
+    candidates: [{ id: 'context-candidate' as CandidateLessonId, clusterId: 'context-cluster' as never, kind: 'heuristic', statement: 'Context only.' }],
+    evidence: [{ id: 'context-evidence' as Evidence['id'], candidateId: 'context-candidate' as CandidateLessonId, polarity: 'confirms', summary: 'Context.' }],
+    knowledge: [{ id: 'context-knowledge' as KnowledgeEntry['id'], candidateId: 'context-candidate' as CandidateLessonId, evidenceIds: ['context-evidence' as Evidence['id']], state: 'observed', statement: 'Context only.' }]
+  });
+  const decision: GateDecision = {
+    ...learningDecision,
+    explanations: [...learningDecision.explanations, { code: 'CONTEXT_ONLY', message: 'Context.', outcome: 'ALLOW', ruleId: 'context-rule', matchStrength: 'metadata', authoritative: true, knowledgeState: 'observed' }],
+    references: [...learningDecision.references, { ruleId: 'context-rule', knowledgeId: 'context-knowledge', evidenceIds: ['context-evidence'] }]
+  };
+  const service = createCaptureService({ store: target, session: { id: 'runtime-session' as SessionId, source: 'codex', startedAt: now } });
+  service.capture(capture('pre-scope', 'pre_action'), decision);
+  service.capture(capture('post-scope', 'post_result', 'succeeded', 'pre-scope'), decision);
+  assert.equal(target.inspect('knowledge-1' as KnowledgeEntry['id'])?.state, 'disputed');
+  assert.deepEqual(target.inspect('context-knowledge' as KnowledgeEntry['id'])?.evidenceIds, ['context-evidence']);
   target.close();
 });
 
