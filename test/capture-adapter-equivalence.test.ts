@@ -59,6 +59,21 @@ test('rejects raw transcripts, credentials, unknown kinds, unstable fields, and 
   }
 });
 
+test('rejects credentials split across otherwise allowlisted action arguments', () => {
+  const base = { event_id: 'event-secret', session_id: 'session-1', event_kind: 'pre_action', occurred_at: timestamp, tool: 'git', action: 'push', summary: 'Run action.' };
+  for (const arguments_ of [
+    ['--password', 'do-not-store'], ['--token', 'do-not-store'], ['Bearer', 'do-not-store'],
+    ['API_KEY', 'do-not-store'], ['OPENAI_KEY', 'do-not-store'], ['PASSWORD', 'do-not-store']
+  ]) {
+    assert.throws(() => adaptCodexCapture({ ...base, arguments: arguments_ }), /credential|private/i);
+  }
+  assert.throws(() => adaptCodexCapture({ ...base, tool: 'mysql', action: 'connect', arguments: ['-p', 'do-not-store'] }), /credential|private/i);
+  assert.throws(() => adaptCodexCapture({ ...base, tool: 'mysql', action: 'connect', arguments: ['-pdo-not-store'] }), /credential|private/i);
+  const valid = adaptCodexCapture({ ...base, arguments: ['--force-with-lease', 'main'] });
+  assert.equal(valid.signature.kind, 'action');
+  if (valid.signature.kind === 'action') assert.deepEqual(valid.signature.arguments, ['--force-with-lease', 'main']);
+});
+
 test('rejects duplicate source-event identities before persistence', () => {
   const event = adaptCodexCapture({ event_id: 'event-1', session_id: 'session-1', event_kind: 'pre_action', occurred_at: timestamp, tool: 'git', action: 'status', summary: 'Inspect status.' });
   assert.throws(() => normalizeCaptureBatch([event, event]), /duplicate source-event/i);

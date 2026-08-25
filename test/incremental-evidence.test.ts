@@ -74,6 +74,51 @@ test('failed capture creates observation, candidate, and evidence without durabl
   target.close();
 });
 
+test('reconciles the complete duplicate event bundle and rejects conflicting side effects', () => {
+  const target = store();
+  const session = { id: 'session-1' as SessionId, source: 'codex' as const, startedAt: now };
+  const failed = event();
+  const candidate = {
+    observation: { id: 'observation-bundle', statement: 'Git push failed.' },
+    cluster: { id: 'cluster-bundle' },
+    candidate: { id: 'candidate-bundle', kind: 'failure' as const, statement: 'Git push failed for the normalized action.' },
+    evidence: { id: 'evidence-bundle', polarity: 'confirms' as const, summary: 'The normalized action returned exit status 1.' }
+  };
+  target.appendIncremental({ session, event: preEvent() });
+  assert.equal(target.appendIncremental({ event: failed }).inserted, true);
+  assert.equal(target.appendIncremental({ event: failed, candidate }).inserted, true);
+  assert.equal(target.appendIncremental({ event: failed, candidate }).inserted, false);
+  assert.throws(() => target.appendIncremental({
+    event: failed,
+    candidate: { ...candidate, observation: { ...candidate.observation, statement: 'Conflicting statement.' } }
+  }), /conflicting duplicate/i);
+  assert.deepEqual(target.listCandidatesPage().entries.map(({ id }) => id), ['candidate-bundle']);
+  assert.deepEqual(target.listEvidencePage().entries.map(({ id }) => id), ['evidence-bundle']);
+  target.close();
+});
+
+test('rejects lifecycle side effects for an unknown post-result and rolls back the event', () => {
+  const target = store();
+  const session = { id: 'session-1' as SessionId, source: 'codex' as const, startedAt: now };
+  target.appendIncremental({ session, event: preEvent() });
+  const unknown = adaptCodexCapture({
+    event_id: 'post-unknown', session_id: 'session-1', event_kind: 'post_result', occurred_at: now,
+    tool: 'git', action: 'push', arguments: ['main'], cwd: '/work/repo', summary: 'Outcome unavailable.',
+    outcome: 'unknown', related_event_id: 'pre-1'
+  });
+  assert.throws(() => target.appendIncremental({
+    event: unknown,
+    candidate: {
+      observation: { id: 'observation-unknown', statement: 'Unknown.' }, cluster: { id: 'cluster-unknown' },
+      candidate: { id: 'candidate-unknown', kind: 'failure', statement: 'Unknown result.' },
+      evidence: { id: 'evidence-unknown', polarity: 'confirms', summary: 'Unknown result.' }
+    }
+  }), /unknown.*lifecycle/i);
+  assert.deepEqual(target.listCapturedEventsPage().entries.map(({ phase }) => phase), ['pre-action']);
+  assert.deepEqual(target.listEvidencePage().entries, []);
+  target.close();
+});
+
 test('attaches contradiction evidence, disputes active knowledge, explicitly revalidates, and preserves history', () => {
   const target = store();
   target.import({
@@ -209,7 +254,15 @@ test('rejects transitions before knowledge creation and before the latest persis
     transition: { knowledgeId: 'knowledge-causal', occurredAt: '2026-08-25T11:00:00.000Z' }
   });
   const runtimeSession = { id: 'session-1' as SessionId, source: 'codex' as const, startedAt: now };
-  target.appendIncremental({ session: runtimeSession, event: preEvent('pre-causal', 'push', '2026-08-25T12:00:00.000Z') });
+  target.appendIncremental({
+    session: runtimeSession,
+    event: preEvent('pre-causal', 'push', '2026-08-25T12:00:00.000Z'),
+    enforcementSnapshot: {
+      inputBinding: 'binding-causal',
+      enforcingReferences: [{ ruleId: 'rule-causal', knowledgeId: 'knowledge-causal' }],
+      overrideReferences: []
+    }
+  });
   const post = adaptCodexCapture({
     event_id: 'post-causal', session_id: 'session-1', event_kind: 'post_result', occurred_at: '2026-08-25T13:00:00.000Z',
     tool: 'git', action: 'push', arguments: ['main'], cwd: '/work/repo', summary: 'Push succeeded.',

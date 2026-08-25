@@ -24,6 +24,7 @@ import type {
 import { applyTransition, reconcileImportedKnowledgeLifecycle } from '../domain/transitions.js';
 import { validateImport, validateIncrementalEvidence } from '../domain/validation.js';
 import type {
+  CaptureEnforcementSnapshot,
   CapturedEventRecord,
   IncrementalAppendResult,
   IncrementalCaptureAppend,
@@ -237,6 +238,22 @@ const incrementalCaptureMigration = `
   );
 `;
 
+const captureEnforcementSnapshotMigration = `
+  CREATE TABLE IF NOT EXISTS capture_enforcement_snapshots (
+    event_id TEXT PRIMARY KEY REFERENCES capture_events(event_id) ON DELETE RESTRICT,
+    input_binding TEXT NOT NULL,
+    enforcing_references_json TEXT NOT NULL,
+    override_references_json TEXT NOT NULL
+  );
+`;
+
+const captureEffectBundleMigration = `
+  CREATE TABLE IF NOT EXISTS capture_effect_bundles (
+    event_id TEXT PRIMARY KEY REFERENCES capture_events(event_id) ON DELETE RESTRICT,
+    bundle_hash TEXT NOT NULL
+  );
+`;
+
 export class ExperienceStore {
   private readonly database: DatabaseSync;
 
@@ -304,17 +321,21 @@ export class ExperienceStore {
 
   appendIncremental(input: IncrementalCaptureAppend): IncrementalAppendResult {
     if (!input || typeof input !== 'object') throw new TypeError('Incremental append must be an object.');
-    assertOnlyIncrementalKeys(input as unknown as Record<string, unknown>, ['session', 'event', 'candidate', 'evidence', 'transition', 'evidenceUpdates']);
+    assertOnlyIncrementalKeys(input as unknown as Record<string, unknown>, ['session', 'event', 'enforcementSnapshot', 'candidate', 'evidence', 'transition', 'evidenceUpdates']);
     if (input.session !== undefined) assertIncrementalSession(input.session);
+    if (input.candidate !== undefined) assertIncrementalCandidateResources(input.candidate);
+    if (input.evidence !== undefined) assertIncrementalEvidenceResources(input.evidence);
     if (input.transition !== undefined) assertIncrementalTransition(input.transition);
     if (input.evidenceUpdates !== undefined) {
-      if (!Array.isArray(input.evidenceUpdates) || input.evidenceUpdates.length > 256) throw new TypeError('Incremental evidence update limit exceeded.');
+      if (!Array.isArray(input.evidenceUpdates) || input.evidenceUpdates.length < 1 || input.evidenceUpdates.length > 256) throw new TypeError('Incremental evidence update limit exceeded.');
       for (const update of input.evidenceUpdates) {
         assertOnlyIncrementalKeys(update as unknown as Record<string, unknown>, ['evidence', 'transition']);
+        assertIncrementalEvidenceResources(update.evidence);
         assertIncrementalTransition(update.transition);
       }
     }
     if (input.candidate !== undefined && input.event === undefined) throw new TypeError('Candidate capture requires its source event.');
+    if (input.enforcementSnapshot !== undefined && input.event?.phase !== 'pre-action') throw new TypeError('Enforcement snapshot requires its pre-action event.');
     if (input.transition !== undefined && input.evidence === undefined) throw new TypeError('Knowledge transition requires evidence.');
     if (input.evidenceUpdates !== undefined && (input.evidence !== undefined || input.transition !== undefined)) throw new TypeError('Incremental evidence forms cannot be mixed.');
 
@@ -322,36 +343,41 @@ export class ExperienceStore {
     try {
       let sessionInserted = false;
       let appendedEvent: CapturedEventRecord | undefined;
+      let inserted = false;
       if (input.event !== undefined) {
         const event = validateNormalizedCaptureEvent(input.event);
         this.insertSession(input.session, event);
         const duplicate = this.captureByIdentity(event.source, event.sourceEventId);
         if (duplicate !== undefined) {
           if (JSON.stringify(duplicate) !== JSON.stringify(event)) throw new TypeError('Conflicting duplicate source-event identity.');
-          this.database.exec('COMMIT');
-          return Object.freeze({ inserted: false });
+        } else {
+          this.assertPostResultLink(event);
+          this.insertCaptureEvent(event);
+          inserted = true;
         }
-        this.assertPostResultLink(event);
+        if (duplicate !== undefined) this.assertPostResultLink(event);
         if (event.phase !== 'post-result' && (input.candidate !== undefined || input.evidence !== undefined || (input.evidenceUpdates?.length ?? 0) > 0)) {
           throw new TypeError('Captured event lifecycle mutation requires a post-result event.');
         }
-        this.insertCaptureEvent(event);
         appendedEvent = event;
+        if (input.enforcementSnapshot !== undefined) inserted = this.insertOrVerifyEnforcementSnapshot(event, input.enforcementSnapshot) || inserted;
+        this.assertPostResultEffects(event, input);
+        inserted = this.insertOrVerifyEffectBundle(event, input) || inserted;
       } else if (input.session !== undefined) {
         sessionInserted = this.insertOrVerifySession(input.session);
       }
 
-      if (input.candidate !== undefined) this.insertCandidateCapture(input.event!, input.candidate);
+      if (input.candidate !== undefined) inserted = this.insertCandidateCapture(input.event!, input.candidate) || inserted;
       if (input.evidence !== undefined) {
         assertTransitionAfterEvent(appendedEvent, input.transition);
-        this.insertIncrementalEvidence(input.evidence, input.transition);
+        inserted = this.insertIncrementalEvidence(input.evidence, input.transition) || inserted;
       }
       for (const update of input.evidenceUpdates ?? []) {
         assertTransitionAfterEvent(appendedEvent, update.transition);
-        this.insertIncrementalEvidence(update.evidence, update.transition);
+        inserted = this.insertIncrementalEvidence(update.evidence, update.transition) || inserted;
       }
       this.database.exec('COMMIT');
-      return Object.freeze({ inserted: input.event !== undefined || sessionInserted || input.candidate !== undefined || input.evidence !== undefined || (input.evidenceUpdates?.length ?? 0) > 0 });
+      return Object.freeze({ inserted: inserted || sessionInserted });
     } catch (error) {
       this.database.exec('ROLLBACK');
       throw error;
@@ -367,6 +393,20 @@ export class ExperienceStore {
       WHERE ce.rowid > ? AND ce.rowid <= ? ORDER BY ce.rowid LIMIT ?
     `).all(page.afterSequence, page.highWaterSequence, page.limit + 1) as unknown as CaptureRow[];
     return pageResult(rows, page, captureFromRow);
+  }
+
+  loadCaptureEnforcementSnapshot(source: CapturedEventRecord['source'], sourceEventId: string): CaptureEnforcementSnapshot | undefined {
+    const row = this.database.prepare(`
+      SELECT s.input_binding, s.enforcing_references_json, s.override_references_json
+      FROM capture_enforcement_snapshots s JOIN capture_events ce ON ce.event_id = s.event_id
+      WHERE ce.source = ? AND ce.source_event_id = ?
+    `).get(source, sourceEventId) as { input_binding: string; enforcing_references_json: string; override_references_json: string } | undefined;
+    if (row === undefined) return undefined;
+    return checkedEnforcementSnapshot({
+      inputBinding: row.input_binding,
+      enforcingReferences: JSON.parse(row.enforcing_references_json) as unknown,
+      overrideReferences: JSON.parse(row.override_references_json) as unknown
+    });
   }
 
   listCandidatesPage(request: IncrementalPageRequest = {}): IncrementalPage<CandidateLesson> {
@@ -564,6 +604,14 @@ export class ExperienceStore {
         this.database.exec(incrementalCaptureMigration);
         this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(8, new Date().toISOString());
       }
+      if (!applied.has(9)) {
+        this.database.exec(captureEnforcementSnapshotMigration);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(9, new Date().toISOString());
+      }
+      if (!applied.has(10)) {
+        this.database.exec(captureEffectBundleMigration);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(10, new Date().toISOString());
+      }
       this.database.exec('COMMIT');
     } catch (error) {
       this.database.exec('ROLLBACK');
@@ -669,7 +717,65 @@ export class ExperienceStore {
     if (event.occurredAt < related.occurred_at) throw new TypeError('Post-result capture cannot precede its related pre-action.');
   }
 
-  private insertCandidateCapture(event: CapturedEventRecord, bundle: NonNullable<IncrementalCaptureAppend['candidate']>): void {
+  private insertOrVerifyEnforcementSnapshot(event: CapturedEventRecord, input: CaptureEnforcementSnapshot): boolean {
+    const snapshot = checkedEnforcementSnapshot(input);
+    const existing = this.database.prepare(`SELECT input_binding, enforcing_references_json, override_references_json
+      FROM capture_enforcement_snapshots WHERE event_id = ?`).get(event.id) as {
+        input_binding: string; enforcing_references_json: string; override_references_json: string;
+      } | undefined;
+    const enforcing = JSON.stringify(snapshot.enforcingReferences);
+    const overrides = JSON.stringify(snapshot.overrideReferences);
+    if (existing !== undefined) {
+      if (existing.input_binding !== snapshot.inputBinding || existing.enforcing_references_json !== enforcing || existing.override_references_json !== overrides) {
+        throw new TypeError('Conflicting duplicate enforcement snapshot.');
+      }
+      return false;
+    }
+    this.database.prepare(`INSERT INTO capture_enforcement_snapshots
+      (event_id, input_binding, enforcing_references_json, override_references_json) VALUES (?, ?, ?, ?)`)
+      .run(event.id, snapshot.inputBinding, enforcing, overrides);
+    return true;
+  }
+
+  private insertOrVerifyEffectBundle(event: CapturedEventRecord, input: IncrementalCaptureAppend): boolean {
+    const effects = canonicalEffectBundle(input);
+    if (effects === undefined) return false;
+    const existing = this.database.prepare('SELECT bundle_hash FROM capture_effect_bundles WHERE event_id = ?').get(event.id) as { bundle_hash: string } | undefined;
+    if (existing !== undefined) {
+      if (existing.bundle_hash !== effects) throw new TypeError('Conflicting duplicate capture side-effect bundle.');
+      return false;
+    }
+    this.database.prepare('INSERT INTO capture_effect_bundles (event_id, bundle_hash) VALUES (?, ?)').run(event.id, effects);
+    return true;
+  }
+
+  private assertPostResultEffects(event: CapturedEventRecord, input: IncrementalCaptureAppend): void {
+    if (event.phase !== 'post-result') return;
+    const hasLifecycleEffects = input.candidate !== undefined || input.evidence !== undefined || (input.evidenceUpdates?.length ?? 0) > 0;
+    if (!hasLifecycleEffects) return;
+    if (event.outcome === 'unknown') throw new TypeError('Unknown post-result cannot produce lifecycle evidence.');
+    if (input.candidate !== undefined) {
+      if (event.outcome !== 'failed') throw new TypeError('Candidate failure capture requires an explicit failed result.');
+      const candidateSnapshot = event.relatedEventId === undefined ? undefined : this.loadCaptureEnforcementSnapshot(event.source, event.relatedEventId);
+      if (candidateSnapshot !== undefined && candidateSnapshot.enforcingReferences.length + candidateSnapshot.overrideReferences.length > 0) {
+        throw new TypeError('Failure candidate conflicts with its persisted enforcement snapshot.');
+      }
+      return;
+    }
+    const snapshot = event.relatedEventId === undefined ? undefined : this.loadCaptureEnforcementSnapshot(event.source, event.relatedEventId);
+    if (snapshot === undefined) throw new TypeError('Post-result lifecycle evidence requires its persisted enforcement snapshot.');
+    if (input.evidence !== undefined && input.transition === undefined) throw new TypeError('Post-result lifecycle evidence requires a knowledge transition.');
+    const allowed = new Set([...snapshot.enforcingReferences, ...snapshot.overrideReferences].map(({ knowledgeId }) => knowledgeId));
+    const updates = input.evidenceUpdates ?? (input.evidence === undefined || input.transition === undefined ? [] : [{ evidence: input.evidence, transition: input.transition }]);
+    const expectedPolarity = event.outcome === 'succeeded' ? 'contradicts' : 'confirms';
+    for (const update of updates) {
+      if (!allowed.has(update.transition.knowledgeId) || update.evidence.polarity !== expectedPolarity) {
+        throw new TypeError('Post-result lifecycle evidence conflicts with its persisted enforcement snapshot.');
+      }
+    }
+  }
+
+  private insertCandidateCapture(event: CapturedEventRecord, bundle: NonNullable<IncrementalCaptureAppend['candidate']>): boolean {
     assertIncrementalCandidateResources(bundle);
     const candidateId = bundle.candidate.id as CandidateLessonId;
     const evidenceCandidateId = (bundle.evidence.candidateId ?? bundle.candidate.id) as CandidateLessonId;
@@ -685,6 +791,25 @@ export class ExperienceStore {
     };
     const validation = validateImport(record);
     if (!validation.ok) throw new TypeError(`${validation.code}: ${validation.message}`);
+    const existing = this.database.prepare('SELECT statement FROM observations WHERE id = ?').get(bundle.observation.id) as { statement: string } | undefined;
+    if (existing !== undefined) {
+      const cluster = this.database.prepare('SELECT id FROM clusters WHERE id = ?').get(bundle.cluster.id) as { id: string } | undefined;
+      const candidate = this.database.prepare('SELECT cluster_id, kind, statement FROM candidates WHERE id = ?').get(bundle.candidate.id) as { cluster_id: string; kind: string; statement: string } | undefined;
+      const evidence = this.database.prepare('SELECT candidate_id, polarity, summary, revalidates_to FROM evidence WHERE id = ?').get(bundle.evidence.id) as { candidate_id: string; polarity: string; summary: string; revalidates_to: string | null } | undefined;
+      const observationEvent = this.database.prepare('SELECT 1 AS found FROM observation_events WHERE observation_id = ? AND event_id = ? AND position = 0').get(bundle.observation.id, event.id);
+      const clusterObservation = this.database.prepare('SELECT 1 AS found FROM cluster_observations WHERE cluster_id = ? AND observation_id = ? AND position = 0').get(bundle.cluster.id, bundle.observation.id);
+      if (existing.statement !== bundle.observation.statement || cluster === undefined || candidate?.cluster_id !== bundle.cluster.id
+        || candidate?.kind !== bundle.candidate.kind || candidate?.statement !== bundle.candidate.statement
+        || evidence?.candidate_id !== evidenceCandidateId || evidence?.polarity !== bundle.evidence.polarity
+        || evidence?.summary !== bundle.evidence.summary || evidence?.revalidates_to !== null
+        || observationEvent === undefined || clusterObservation === undefined) {
+        throw new TypeError('Conflicting duplicate candidate capture bundle.');
+      }
+      return false;
+    }
+    for (const [table, id] of [['clusters', bundle.cluster.id], ['candidates', bundle.candidate.id], ['evidence', bundle.evidence.id]] as const) {
+      if (this.database.prepare(`SELECT 1 AS found FROM ${table} WHERE id = ?`).get(id) !== undefined) throw new TypeError('Conflicting duplicate candidate capture bundle.');
+    }
     this.database.prepare('INSERT INTO observations (id, statement) VALUES (?, ?)').run(bundle.observation.id, bundle.observation.statement);
     this.database.prepare('INSERT INTO observation_events (observation_id, event_id, position) VALUES (?, ?, 0)').run(bundle.observation.id, event.id);
     this.database.prepare('INSERT INTO clusters (id) VALUES (?)').run(bundle.cluster.id);
@@ -692,9 +817,10 @@ export class ExperienceStore {
     this.database.prepare('INSERT INTO candidates (id, cluster_id, kind, statement) VALUES (?, ?, ?, ?)').run(bundle.candidate.id, bundle.cluster.id, bundle.candidate.kind, bundle.candidate.statement);
     this.database.prepare('INSERT INTO evidence (id, candidate_id, polarity, summary, revalidates_to) VALUES (?, ?, ?, ?, NULL)')
       .run(bundle.evidence.id, evidenceCandidateId, bundle.evidence.polarity, bundle.evidence.summary);
+    return true;
   }
 
-  private insertIncrementalEvidence(input: NonNullable<IncrementalCaptureAppend['evidence']>, transition: IncrementalCaptureAppend['transition']): void {
+  private insertIncrementalEvidence(input: NonNullable<IncrementalCaptureAppend['evidence']>, transition: IncrementalCaptureAppend['transition']): boolean {
     const resolvedCandidateId = input.candidateId ?? this.candidateIdForKnowledge(transition?.knowledgeId);
     const evidence: Evidence = {
       id: input.id as EvidenceId, candidateId: resolvedCandidateId as CandidateLessonId,
@@ -710,9 +836,26 @@ export class ExperienceStore {
     }
     const candidate = this.database.prepare('SELECT id FROM candidates WHERE id = ?').get(evidence.candidateId);
     if (candidate === undefined) throw new TypeError('Incremental evidence references a missing candidate.');
+    const existingEvidence = this.database.prepare('SELECT candidate_id, polarity, summary, revalidates_to FROM evidence WHERE id = ?').get(evidence.id) as { candidate_id: string; polarity: string; summary: string; revalidates_to: string | null } | undefined;
+    if (existingEvidence !== undefined) {
+      if (existingEvidence.candidate_id !== evidence.candidateId || existingEvidence.polarity !== evidence.polarity
+        || existingEvidence.summary !== evidence.summary || existingEvidence.revalidates_to !== (evidence.revalidatesTo ?? null)) {
+        throw new TypeError('Conflicting duplicate incremental evidence.');
+      }
+      if (transition !== undefined) {
+        const attached = this.database.prepare('SELECT 1 AS found FROM knowledge_evidence WHERE knowledge_id = ? AND evidence_id = ?').get(transition.knowledgeId, evidence.id);
+        if (attached === undefined) throw new TypeError('Conflicting duplicate incremental evidence side effect.');
+        if (transition.target !== undefined) {
+          const history = this.database.prepare('SELECT to_state, occurred_at FROM knowledge_transition_history WHERE knowledge_id = ? AND evidence_id = ?').get(transition.knowledgeId, evidence.id) as { to_state: string; occurred_at: string } | undefined;
+          if (history?.to_state !== transition.target || history.occurred_at !== transition.occurredAt) throw new TypeError('Conflicting duplicate incremental transition.');
+        }
+        if (evidence.polarity === 'contradicts') return this.maybeCreateRevalidationProposal(transition.knowledgeId, transition.occurredAt);
+      }
+      return false;
+    }
     this.database.prepare('INSERT INTO evidence (id, candidate_id, polarity, summary, revalidates_to) VALUES (?, ?, ?, ?, ?)')
       .run(evidence.id, evidence.candidateId, evidence.polarity, evidence.summary, evidence.revalidatesTo ?? null);
-    if (transition === undefined) return;
+    if (transition === undefined) return true;
     assertCanonicalTimestamp(transition.occurredAt);
     const row = this.database.prepare(`
       SELECT k.id, k.candidate_id, k.state, k.statement, m.created_at
@@ -755,6 +898,7 @@ export class ExperienceStore {
         .run(row.id, item.from, item.to, item.evidenceId, transition.occurredAt);
     }
     if (evidence.polarity === 'contradicts') this.maybeCreateRevalidationProposal(row.id, transition.occurredAt);
+    return true;
   }
 
   private candidateIdForKnowledge(knowledgeId: string | undefined): string {
@@ -764,16 +908,17 @@ export class ExperienceStore {
     return row.candidate_id;
   }
 
-  private maybeCreateRevalidationProposal(knowledgeId: string, occurredAt: string): void {
+  private maybeCreateRevalidationProposal(knowledgeId: string, occurredAt: string): boolean {
     const count = (this.database.prepare(`
       SELECT COUNT(*) AS count FROM knowledge_evidence ke JOIN evidence e ON e.id = ke.evidence_id
       WHERE ke.knowledge_id = ? AND e.polarity = 'contradicts'
     `).get(knowledgeId) as { count: number }).count;
-    if (count < 2) return;
+    if (count < 2) return false;
     const id = createHash('sha256').update('ael:revalidation-proposal:v1\0').update(knowledgeId).digest('hex');
-    this.database.prepare(`INSERT INTO revalidation_proposals (id, knowledge_id, created_at, contradiction_count, status)
+    const result = this.database.prepare(`INSERT INTO revalidation_proposals (id, knowledge_id, created_at, contradiction_count, status)
       VALUES (?, ?, ?, ?, 'proposed') ON CONFLICT (knowledge_id) DO NOTHING`)
       .run(id, knowledgeId, occurredAt, count);
+    return Number(result.changes) > 0;
   }
 
   private domainEvent(event: CapturedEventRecord): Event {
@@ -939,12 +1084,101 @@ function assertIncrementalCandidateResources(bundle: NonNullable<IncrementalCapt
   }
 }
 
+function assertIncrementalEvidenceResources(evidence: NonNullable<IncrementalCaptureAppend['evidence']>): void {
+  if (!evidence || typeof evidence !== 'object') throw new TypeError('Incremental evidence is invalid.');
+  assertOnlyIncrementalKeys(evidence as unknown as Record<string, unknown>, ['id', 'candidateId', 'polarity', 'summary', 'revalidatesTo']);
+  if (typeof evidence.id !== 'string' || !canonicalIncrementalIdentifier.test(evidence.id)) throw new TypeError('Incremental evidence id is invalid.');
+  if (evidence.candidateId !== undefined && (typeof evidence.candidateId !== 'string' || !canonicalIncrementalIdentifier.test(evidence.candidateId))) {
+    throw new TypeError('Incremental evidence candidate id is invalid.');
+  }
+  if (evidence.polarity !== 'confirms' && evidence.polarity !== 'contradicts') throw new TypeError('Incremental evidence polarity is invalid.');
+  if (typeof evidence.summary !== 'string' || evidence.summary.length < 1 || evidence.summary.length > 2_048 || evidence.summary !== evidence.summary.trim()
+    || /[\u0000-\u001F\u007F]/.test(evidence.summary)) throw new TypeError('Incremental evidence summary is invalid or exceeds its resource limit.');
+  if (evidence.revalidatesTo !== undefined && !['observed', 'confirmed', 'verified'].includes(evidence.revalidatesTo)) throw new TypeError('Incremental evidence revalidation target is invalid.');
+  for (const [field, value] of [['id', evidence.id], ['candidate id', evidence.candidateId], ['summary', evidence.summary]] as const) {
+    if (value === undefined) continue;
+    try {
+      assertDurableTextSafe(value);
+    } catch {
+      throw new TypeError(`Incremental evidence ${field} contains private or credential-like material.`);
+    }
+  }
+}
+
 function assertOnlyIncrementalKeys(value: Record<string, unknown>, allowed: readonly string[]): void {
   const unexpected = Object.keys(value).find((key) => !allowed.includes(key));
   if (unexpected !== undefined) throw new TypeError(`Unsupported incremental field: ${unexpected}.`);
 }
 
 const canonicalIncrementalIdentifier = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,511}$/;
+
+function checkedEnforcementSnapshot(input: unknown): CaptureEnforcementSnapshot {
+  if (!input || typeof input !== 'object') throw new TypeError('Capture enforcement snapshot is invalid.');
+  assertOnlyIncrementalKeys(input as unknown as Record<string, unknown>, ['inputBinding', 'enforcingReferences', 'overrideReferences']);
+  const value = input as { inputBinding?: unknown; enforcingReferences?: unknown; overrideReferences?: unknown };
+  if (typeof value.inputBinding !== 'string' || !canonicalIncrementalIdentifier.test(value.inputBinding)) throw new TypeError('Capture input binding is invalid.');
+  assertSnapshotIdentifierSafe(value.inputBinding, 'input binding');
+  const checkReferences = (value: unknown, field: string): readonly { ruleId: string; knowledgeId: string }[] => {
+    if (!Array.isArray(value) || value.length > 256) throw new TypeError(`Capture ${field} references exceed their resource limit.`);
+    const seen = new Set<string>();
+    const checked = value.map((item) => {
+      if (!item || typeof item !== 'object') throw new TypeError(`Capture ${field} reference is invalid.`);
+      assertOnlyIncrementalKeys(item as Record<string, unknown>, ['ruleId', 'knowledgeId']);
+      const { ruleId, knowledgeId } = item as { ruleId?: unknown; knowledgeId?: unknown };
+      if (typeof ruleId !== 'string' || typeof knowledgeId !== 'string' || !canonicalIncrementalIdentifier.test(ruleId) || !canonicalIncrementalIdentifier.test(knowledgeId)) {
+        throw new TypeError(`Capture ${field} reference is invalid.`);
+      }
+      assertSnapshotIdentifierSafe(ruleId, `${field} rule reference`);
+      assertSnapshotIdentifierSafe(knowledgeId, `${field} knowledge reference`);
+      const identity = `${ruleId}\0${knowledgeId}`;
+      if (seen.has(identity)) throw new TypeError(`Capture ${field} references contain duplicates.`);
+      seen.add(identity);
+      return Object.freeze({ ruleId, knowledgeId });
+    });
+    const sorted = [...checked].sort((left, right) => compareText(left.ruleId, right.ruleId) || compareText(left.knowledgeId, right.knowledgeId));
+    if (JSON.stringify(checked) !== JSON.stringify(sorted)) throw new TypeError(`Capture ${field} references are not canonical.`);
+    return Object.freeze(checked);
+  };
+  return Object.freeze({
+    inputBinding: value.inputBinding,
+    enforcingReferences: checkReferences(value.enforcingReferences, 'enforcing'),
+    overrideReferences: checkReferences(value.overrideReferences, 'override')
+  });
+}
+
+function assertSnapshotIdentifierSafe(value: string, field: string): void {
+  try {
+    assertDurableTextSafe(value);
+  } catch {
+    throw new TypeError(`Capture ${field} contains private or credential-like material.`);
+  }
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function canonicalEffectBundle(input: IncrementalCaptureAppend): string | undefined {
+  if (input.candidate === undefined && input.evidence === undefined && input.evidenceUpdates === undefined) return undefined;
+  const value = {
+    ...(input.candidate === undefined ? {} : { candidate: input.candidate }),
+    ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
+    ...(input.transition === undefined ? {} : { transition: input.transition }),
+    ...(input.evidenceUpdates === undefined ? {} : { evidenceUpdates: input.evidenceUpdates })
+  };
+  return createHash('sha256').update('ael:capture-effect-bundle:v1\0').update(stableJson(value)).digest('hex');
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
 
 function assertIncrementalSession(session: Session): void {
   if (!session || typeof session !== 'object') throw new TypeError('Incremental session is invalid.');

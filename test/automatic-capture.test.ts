@@ -34,7 +34,7 @@ function seededStore(): ExperienceStore {
   return target;
 }
 
-function capture(eventId: string, kind: 'pre_action' | 'post_result', outcome?: 'succeeded', relatedEventId = 'pre-1') {
+function capture(eventId: string, kind: 'pre_action' | 'post_result', outcome?: 'succeeded' | 'failed' | 'unknown', relatedEventId = 'pre-1') {
   return adaptCodexCapture({ event_id: eventId, session_id: 'runtime-session', event_kind: kind, occurred_at: now, tool: 'git', action: 'push', arguments: ['--force'], cwd: '/work/repo', summary: outcome ? 'Reviewed force push succeeded.' : 'Attempt force push.', ...(kind === 'post_result' ? { outcome, exit_status: 0, related_event_id: relatedEventId } : {}) });
 }
 
@@ -103,9 +103,37 @@ test('captures contradiction only for enforcing or explicitly overridden rule re
   };
   const service = createCaptureService({ store: target, session: { id: 'runtime-session' as SessionId, source: 'codex', startedAt: now } });
   service.capture(capture('pre-scope', 'pre_action'), decision);
-  service.capture(capture('post-scope', 'post_result', 'succeeded', 'pre-scope'), decision);
+  assert.deepEqual(target.loadCaptureEnforcementSnapshot('codex', 'pre-scope'), {
+    inputBinding: 'binding-1',
+    enforcingReferences: [{ ruleId: 'rule-1', knowledgeId: 'knowledge-1' }],
+    overrideReferences: []
+  });
+  const fabricatedPostDecision = { ...decision, references: [decision.references[1]!] };
+  service.capture(capture('post-scope', 'post_result', 'succeeded', 'pre-scope'), fabricatedPostDecision);
   assert.equal(target.inspect('knowledge-1' as KnowledgeEntry['id'])?.state, 'disputed');
   assert.deepEqual(target.inspect('context-knowledge' as KnowledgeEntry['id'])?.evidenceIds, ['context-evidence']);
+  target.close();
+});
+
+test('rejects a post-result whose decision binding differs from the persisted pre-action snapshot', () => {
+  const target = seededStore();
+  const service = createCaptureService({ store: target, session: { id: 'runtime-session' as SessionId, source: 'codex', startedAt: now } });
+  service.capture(capture('pre-stale', 'pre_action'), learningDecision);
+  const result = service.capture(capture('post-stale', 'post_result', 'succeeded', 'pre-stale'), { ...learningDecision, inputBinding: 'different-binding' });
+  assert.equal(result.status, 'degraded');
+  assert.deepEqual(capturedPhases(target), ['pre-action']);
+  assert.equal(target.inspect('knowledge-1' as KnowledgeEntry['id'])?.state, 'verified');
+  target.close();
+});
+
+test('unknown post-result persists the event without lifecycle evidence or state changes', () => {
+  const target = seededStore();
+  const service = createCaptureService({ store: target, session: { id: 'runtime-session' as SessionId, source: 'codex', startedAt: now } });
+  service.capture(capture('pre-unknown', 'pre_action'), learningDecision);
+  assert.equal(service.capture(capture('post-unknown', 'post_result', 'unknown', 'pre-unknown'), learningDecision).status, 'captured');
+  assert.equal(target.inspect('knowledge-1' as KnowledgeEntry['id'])?.state, 'verified');
+  assert.deepEqual(target.inspect('knowledge-1' as KnowledgeEntry['id'])?.evidenceIds, ['seed-evidence']);
+  assert.deepEqual(capturedPhases(target), ['pre-action', 'post-result']);
   target.close();
 });
 

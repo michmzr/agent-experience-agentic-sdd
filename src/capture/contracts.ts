@@ -73,9 +73,21 @@ export interface IncrementalEvidenceCapture {
   readonly revalidatesTo?: 'observed' | 'confirmed' | 'verified';
 }
 
+export interface CaptureEnforcementReference {
+  readonly ruleId: string;
+  readonly knowledgeId: string;
+}
+
+export interface CaptureEnforcementSnapshot {
+  readonly inputBinding: string;
+  readonly enforcingReferences: readonly CaptureEnforcementReference[];
+  readonly overrideReferences: readonly CaptureEnforcementReference[];
+}
+
 export interface IncrementalCaptureAppend {
   readonly session?: Session;
   readonly event?: NormalizedCaptureEvent;
+  readonly enforcementSnapshot?: CaptureEnforcementSnapshot;
   readonly candidate?: IncrementalCandidateCapture;
   readonly evidence?: IncrementalEvidenceCapture;
   readonly transition?: {

@@ -26,7 +26,8 @@ const credentialPatterns: readonly RegExp[] = [
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
   /\bsk-[A-Za-z0-9_-]{20,}\b/,
   /\bBearer(?:[_-]?token)?\s*(?:=|:)?\s*\S+/i,
-  /\b(?:token|api[_-]?key|password|passwd|secret|client[_-]?secret)\s*[:=]\s*\S+/i,
+  /\bBasic\s+\S+/i,
+  /\b(?:token|access[_-]?token|refresh[_-]?token|api[_-]?key|private[_-]?key|password|passwd|secret|client[_-]?secret)\s*[:=]\s*\S+/i,
   /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@/i
 ];
 
@@ -110,11 +111,13 @@ function normalizeSignature(input: MappedCaptureRecord, phase: CapturePhase): Ru
   }
 
   if (input.verb !== undefined || input.target !== undefined) throw new TypeError('Intent fields are not allowed for action capture.');
-  const args = input.arguments === undefined ? undefined : stringArray(input.arguments, 'arguments');
+  const tool = safeToken(input.tool, 'tool');
+  const action = safeToken(input.action, 'action');
+  const args = input.arguments === undefined ? undefined : stringArray(input.arguments, tool, action);
   return Object.freeze({
     kind: 'action' as const,
-    tool: safeToken(input.tool, 'tool'),
-    action: safeToken(input.action, 'action'),
+    tool,
+    action,
     ...(args === undefined ? {} : { arguments: Object.freeze(args) }),
     ...(path === undefined ? {} : { path })
   });
@@ -173,10 +176,10 @@ function safeStructuredText(value: unknown, field: string): string {
   return value;
 }
 
-function stringArray(value: unknown, field: string): string[] {
-  if (!Array.isArray(value) || value.length > MAX_CAPTURE_ARGUMENTS) throw new TypeError(`Capture ${field} exceed its resource limit.`);
+function stringArray(value: unknown, tool: string, action: string): string[] {
+  if (!Array.isArray(value) || value.length > MAX_CAPTURE_ARGUMENTS) throw new TypeError('Capture arguments exceed their resource limit.');
   let total = 0;
-  return value.map((item) => {
+  const arguments_ = value.map((item) => {
     const argument = safeStructuredText(item, 'argument');
     total += argument.length;
     if (argument.length > MAX_CAPTURE_ARGUMENT_LENGTH || total > MAX_CAPTURE_ARGUMENT_TEXT || !argumentPattern.test(argument)) {
@@ -184,6 +187,22 @@ function stringArray(value: unknown, field: string): string[] {
     }
     return argument;
   });
+  const joined = arguments_.join(' ');
+  assertNoCredentialMaterial(joined, 'arguments');
+  const sensitiveValueFlag = /^--(?:password|passwd|token|access[-_]?token|refresh[-_]?token|api[-_]?key|private[-_]?key|secret|client[-_]?secret|authorization|auth)(?:[-_](?:file|stdin))?$/i;
+  const sensitiveKey = /^(?:[A-Z][A-Z0-9_]*_)?(?:PASSWORD|PASSWD|TOKEN|KEY|API_KEY|APIKEY|SECRET|CLIENT_SECRET|AUTHORIZATION)$/i;
+  const shortPasswordTool = /^(?:mysql|mariadb)$/.test(tool === 'shell' ? action : tool);
+  if (shortPasswordTool && arguments_.some((argument) => /^-p.+/.test(argument))) {
+    throw new TypeError('Capture arguments contain credential-like or private material.');
+  }
+  for (let index = 0; index < arguments_.length - 1; index += 1) {
+    const argument = arguments_[index]!;
+    if (sensitiveValueFlag.test(argument) || sensitiveKey.test(argument)
+      || (argument === '-p' && shortPasswordTool)) {
+      throw new TypeError('Capture arguments contain credential-like or private material.');
+    }
+  }
+  return arguments_;
 }
 
 function optionalExitStatus(value: unknown): number | undefined {

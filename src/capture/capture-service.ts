@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import type { Session } from '../domain/types.js';
 import type { GateDecision } from '../runtime/gate.js';
 import type {
+  CaptureEnforcementSnapshot,
   CaptureDiagnostic,
   IncrementalCaptureAppend,
   NormalizedCaptureEvent
@@ -10,6 +11,7 @@ import type {
 
 export interface CaptureAppendStore {
   appendIncremental(input: IncrementalCaptureAppend): { readonly inserted: boolean };
+  loadCaptureEnforcementSnapshot?(source: NormalizedCaptureEvent['source'], sourceEventId: string): CaptureEnforcementSnapshot | undefined;
 }
 
 export interface CaptureServiceOptions {
@@ -34,7 +36,7 @@ export function createCaptureService(options: CaptureServiceOptions): CaptureSer
         return degraded(decision, event.phase);
       }
       try {
-        const append = incrementalAppend(session, event, decision);
+        const append = incrementalAppend(options.store, session, event, decision);
         const result = options.store.appendIncremental(append);
         return Object.freeze({ status: result.inserted ? 'captured' : 'duplicate', decision });
       } catch {
@@ -44,14 +46,18 @@ export function createCaptureService(options: CaptureServiceOptions): CaptureSer
   });
 }
 
-function incrementalAppend(session: Session, event: NormalizedCaptureEvent, decision: GateDecision): IncrementalCaptureAppend {
+function incrementalAppend(store: CaptureAppendStore, session: Session, event: NormalizedCaptureEvent, decision: GateDecision): IncrementalCaptureAppend {
+  if (event.phase === 'pre-action') return { session, event, enforcementSnapshot: enforcementSnapshot(decision) };
   if (event.phase !== 'post-result') return { session, event };
+  if (event.relatedEventId === undefined) throw new TypeError('Post-result capture requires its pre-action snapshot.');
+  const snapshot = store.loadCaptureEnforcementSnapshot?.(event.source, event.relatedEventId);
+  if (snapshot === undefined || snapshot.inputBinding !== decision.inputBinding) throw new TypeError('Post-result decision does not match its pre-action snapshot.');
 
-  const references = uniqueKnowledgeReferences(decision);
+  if (event.outcome === 'unknown') return { session, event };
+
+  const references = uniqueSnapshotKnowledgeReferences(snapshot);
   if (references.length > 0) {
-    const polarity = event.outcome === 'succeeded' && (decision.outcome !== 'ALLOW' || decision.override !== undefined)
-      ? 'contradicts'
-      : 'confirms';
+    const polarity = event.outcome === 'succeeded' ? 'contradicts' : 'confirms';
     return {
       session,
       event,
@@ -90,17 +96,32 @@ function incrementalAppend(session: Session, event: NormalizedCaptureEvent, deci
   return { session, event };
 }
 
-function uniqueKnowledgeReferences(decision: GateDecision): Array<{ knowledgeId: string }> {
+function enforcementSnapshot(decision: GateDecision): CaptureEnforcementSnapshot {
   const enforcingRuleIds = new Set(decision.explanations
     .filter(({ outcome, ruleId }) => outcome !== 'ALLOW' && ruleId !== undefined)
     .map(({ ruleId }) => ruleId!));
-  for (const ruleId of decision.override?.overriddenRuleIds ?? []) enforcingRuleIds.add(ruleId);
-  const unique = new Map<string, { knowledgeId: string }>();
+  const overrideRuleIds = new Set(decision.override?.overriddenRuleIds ?? []);
+  const enforcing = new Map<string, { ruleId: string; knowledgeId: string }>();
+  const overrides = new Map<string, { ruleId: string; knowledgeId: string }>();
   for (const reference of decision.references) {
-    if (!enforcingRuleIds.has(reference.ruleId)) continue;
-    unique.set(reference.knowledgeId, { knowledgeId: reference.knowledgeId });
+    const value = { ruleId: reference.ruleId, knowledgeId: reference.knowledgeId };
+    if (enforcingRuleIds.has(reference.ruleId)) enforcing.set(`${reference.ruleId}\0${reference.knowledgeId}`, value);
+    if (overrideRuleIds.has(reference.ruleId)) overrides.set(`${reference.ruleId}\0${reference.knowledgeId}`, value);
   }
-  return [...unique.values()].sort((left, right) => left.knowledgeId.localeCompare(right.knowledgeId));
+  const sort = (values: Iterable<{ ruleId: string; knowledgeId: string }>) => Object.freeze([...values]
+    .sort((left, right) => compareText(left.ruleId, right.ruleId) || compareText(left.knowledgeId, right.knowledgeId))
+    .map((value) => Object.freeze(value)));
+  return Object.freeze({ inputBinding: decision.inputBinding, enforcingReferences: sort(enforcing.values()), overrideReferences: sort(overrides.values()) });
+}
+
+function uniqueSnapshotKnowledgeReferences(snapshot: CaptureEnforcementSnapshot): Array<{ knowledgeId: string }> {
+  const unique = new Map<string, { knowledgeId: string }>();
+  for (const reference of [...snapshot.enforcingReferences, ...snapshot.overrideReferences]) unique.set(reference.knowledgeId, { knowledgeId: reference.knowledgeId });
+  return [...unique.values()].sort((left, right) => compareText(left.knowledgeId, right.knowledgeId));
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function boundedEvidenceSummary(event: NormalizedCaptureEvent, polarity: 'confirms' | 'contradicts'): string {
