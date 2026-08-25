@@ -193,17 +193,32 @@ function stringArray(value: unknown, tool: string, action: string): string[] {
   return arguments_;
 }
 
-const sensitiveNameFragments = [
-  'authorization', 'credential', 'password', 'userinfo', 'passwd', 'cookie', 'session', 'secret', 'token', 'auth', 'key'
-] as const;
+const sensitiveNameTokens = new Set([
+  'auth', 'authorization', 'token', 'secret', 'password', 'passwd', 'passphrase', 'credential', 'credentials', 'cookie', 'userinfo'
+]);
 
 function assertArgumentsClassifiedSafe(arguments_: readonly string[], tool: string, action: string): void {
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index]!;
-    if (argument.startsWith('--') && sensitiveName(argument.slice(2).split('=', 1)[0]!)) rejectClassifiedArguments();
-    if (/^[A-Za-z][A-Za-z0-9_]*$/.test(argument) && sensitiveName(argument) && arguments_[index + 1] !== undefined) rejectClassifiedArguments();
+    if (argument.startsWith('--')) {
+      const [name, attached] = argument.slice(2).split('=', 2);
+      if (sensitiveOptionName(name!)) rejectClassifiedArguments();
+      if (userValueOption(name!) && ((attached?.length ?? 0) > 0 || (arguments_[index + 1] !== undefined && !arguments_[index + 1]!.startsWith('-')))) {
+        rejectClassifiedArguments();
+      }
+    }
+    if (/^[A-Za-z][A-Za-z0-9_]*$/.test(argument) && arguments_[index + 1] !== undefined
+      && (sensitiveOptionName(argument) || userValueOption(argument) || (looksLikeEnvironmentName(argument) && sensitiveEnvironmentSuffix(argument)))) {
+      rejectClassifiedArguments();
+    }
     const equals = argument.indexOf('=');
-    if (equals > 0 && sensitiveName(argument.slice(0, equals).replace(/^-+/, ''))) rejectClassifiedArguments();
+    if (equals > 0) {
+      const assignmentName = argument.slice(0, equals).replace(/^-+/, '');
+      if (sensitiveOptionName(assignmentName) || userValueOption(assignmentName)
+        || (looksLikeEnvironmentName(assignmentName) && sensitiveEnvironmentSuffix(assignmentName))) {
+        rejectClassifiedArguments();
+      }
+    }
     if (sensitiveHeaderName(argument)) rejectClassifiedArguments();
     if (/^(?:-H|--header)$/i.test(argument) && arguments_[index + 1] !== undefined && sensitiveHeaderName(arguments_[index + 1]!)) {
       rejectClassifiedArguments();
@@ -221,11 +236,40 @@ function assertArgumentsClassifiedSafe(arguments_: readonly string[], tool: stri
     rejectClassifiedArguments();
   }
   if (command === 'curl' && arguments_.some((argument) => /^(?:--user|--proxy-user)(?:=|$)/i.test(argument))) rejectClassifiedArguments();
+  if (command === 'redis-cli' && arguments_.some((argument) => {
+    const normalized = argument.toLowerCase();
+    return normalized === '--pass' || normalized.startsWith('--pass=') || (normalized.startsWith('--pass') && normalized[6] !== '-');
+  })) rejectClassifiedArguments();
 }
 
-function sensitiveName(value: string): boolean {
-  const normalized = value.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-  return sensitiveNameFragments.some((fragment) => normalized.includes(fragment));
+function nameTokens(value: string): readonly string[] {
+  return value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+function sensitiveOptionName(value: string): boolean {
+  const tokens = nameTokens(value);
+  if (tokens.some((token) => sensitiveNameTokens.has(token))) return true;
+  return hasAdjacent(tokens, 'api', 'key') || hasAdjacent(tokens, 'secret', 'key') || hasAdjacent(tokens, 'private', 'key')
+    || hasAdjacent(tokens, 'session', 'token') || hasAdjacent(tokens, 'user', 'info');
+}
+
+function userValueOption(value: string): boolean {
+  const normalized = nameTokens(value).join('-');
+  return normalized === 'user' || normalized === 'username';
+}
+
+function sensitiveEnvironmentSuffix(value: string): boolean {
+  const tokens = nameTokens(value);
+  const suffix = tokens.at(-1) ?? '';
+  return suffix === 'key' ? tokens.length > 1 : ['token', 'secret', 'password'].includes(suffix);
+}
+
+function looksLikeEnvironmentName(value: string): boolean {
+  return value.includes('_') || value === value.toUpperCase();
+}
+
+function hasAdjacent(tokens: readonly string[], left: string, right: string): boolean {
+  return tokens.some((token, index) => token === left && tokens[index + 1] === right);
 }
 
 function sensitiveHeaderName(value: string): boolean {
@@ -233,7 +277,7 @@ function sensitiveHeaderName(value: string): boolean {
   if (colon < 0) return false;
   const prefix = value.slice(0, colon);
   const name = prefix.slice(Math.max(prefix.lastIndexOf('='), prefix.lastIndexOf('/')) + 1).replace(/^(?:-H|--header=?)/i, '');
-  return sensitiveName(name);
+  return sensitiveOptionName(name);
 }
 
 function rejectClassifiedArguments(): never {

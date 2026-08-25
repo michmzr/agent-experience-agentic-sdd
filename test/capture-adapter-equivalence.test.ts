@@ -87,6 +87,9 @@ test('classifies credential-bearing options contextually without leaking their v
   const cases = [
     { tool: 'redis-cli', action: 'connect', arguments: ['-a', marker] },
     { tool: 'redis-cli', action: 'connect', arguments: [`-a${marker}`] },
+    { tool: 'redis-cli', action: 'connect', arguments: ['--pass', marker] },
+    { tool: 'redis-cli', action: 'connect', arguments: [`--pass=${marker}`] },
+    { tool: 'redis-cli', action: 'connect', arguments: [`--pass${marker}`] },
     { tool: 'docker', action: 'login', arguments: ['-p', marker] },
     { tool: 'docker', action: 'login', arguments: [`-p${marker}`] },
     { tool: 'gh', action: 'auth', arguments: ['login', '--with-token'] },
@@ -96,13 +99,30 @@ test('classifies credential-bearing options contextually without leaking their v
     { tool: 'curl', action: 'request', arguments: ['-b', marker] },
     { tool: 'curl', action: 'request', arguments: [`-c${marker}`] },
     { tool: 'curl', action: 'request', arguments: ['-H', `X-API-Key:${marker}`] },
-    { tool: 'git', action: 'config', arguments: [`SESSION_CREDENTIAL=${marker}`] }
+    { tool: 'git', action: 'config', arguments: [`SESSION_CREDENTIAL=${marker}`] },
+    { tool: 'tool', action: 'run', arguments: ['--username', marker] },
+    { tool: 'tool', action: 'run', arguments: [`user=${marker}`] }
   ];
   for (const item of cases) {
     assert.throws(
       () => adaptCodexCapture({ ...base, ...item }),
       (error: unknown) => error instanceof Error && /credential|private/i.test(error.message) && !error.message.includes(marker)
     );
+  }
+});
+
+test('retains benign key, author, monkey, and sessionize arguments', () => {
+  const base = { session_id: 'session-1', event_kind: 'pre_action', occurred_at: timestamp, summary: 'Run action.' };
+  const cases = [
+    { event_id: 'benign-sort', tool: 'sort', action: 'sort', arguments: ['--key=1', 'file.txt'] },
+    { event_id: 'benign-ssh', tool: 'ssh', action: 'connect', arguments: ['-o', 'StrictHostKeyChecking=yes', 'host'] },
+    { event_id: 'benign-jq', tool: 'jq', action: 'query', arguments: ['key', 'value'] },
+    { event_id: 'benign-substrings', tool: 'tool', action: 'run', arguments: ['--monkey=banana', '--author=alice', '--sessionize=yes'] }
+  ];
+  for (const item of cases) {
+    const captured = adaptCodexCapture({ ...base, ...item });
+    assert.equal(captured.signature.kind, 'action');
+    if (captured.signature.kind === 'action') assert.deepEqual(captured.signature.arguments, item.arguments);
   }
 });
 
