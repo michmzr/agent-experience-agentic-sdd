@@ -24,12 +24,19 @@ export const overrideAuditMigration = `
     post_action_outcome TEXT CHECK (post_action_outcome IN ('succeeded', 'failed', 'unknown')),
     CHECK ((phase = 'authorized' AND post_action_outcome IS NULL) OR (phase = 'completed' AND post_action_outcome IS NOT NULL))
   );
-  CREATE UNIQUE INDEX IF NOT EXISTS runtime_override_audit_once_per_phase
-    ON runtime_override_audit (override_id, phase);
+`;
+
+export const overrideAuditUseMigration = `
+  ALTER TABLE runtime_override_audit ADD COLUMN use_id TEXT;
+  UPDATE runtime_override_audit SET use_id = 'legacy' WHERE use_id IS NULL;
+  DROP INDEX IF EXISTS runtime_override_audit_once_per_phase;
+  CREATE UNIQUE INDEX IF NOT EXISTS runtime_override_audit_once_per_use_phase
+    ON runtime_override_audit (override_id, use_id, phase);
 `;
 
 interface OverrideAuditRow {
   id: string;
+  use_id: string | null;
   override_id: string;
   phase: OverrideAuditEntry['phase'];
   scope_json: string;
@@ -46,7 +53,7 @@ export class OverrideStore {
 
   constructor(databasePath?: string) {
     this.#database = openExperienceDatabase(databasePath);
-    this.#database.exec(overrideAuditMigration);
+    migrateOverrideAudit(this.#database);
   }
 
   append(input: OverrideAuditEntry): void {
@@ -60,8 +67,8 @@ export class OverrideStore {
     try {
       const authorized = this.#database.prepare(`
         SELECT * FROM runtime_override_audit
-        WHERE override_id = ? AND phase = 'authorized'
-      `).get(entry.override.id) as unknown as OverrideAuditRow | undefined;
+        WHERE override_id = ? AND use_id = ? AND phase = 'authorized'
+      `).get(entry.override.id, entry.useId) as unknown as OverrideAuditRow | undefined;
       if (authorized === undefined) throw new TypeError('Completion audit requires a prior authorization row.');
       if (!sameAuthorization(authorized, entry)) throw new TypeError('Completion audit must match its authorization decision.');
       if (entry.recordedAt < authorized.recorded_at) throw new TypeError('Completion audit cannot precede its authorization.');
@@ -76,12 +83,13 @@ export class OverrideStore {
   #insert(entry: OverrideAuditEntry): void {
     this.#database.prepare(`
       INSERT INTO runtime_override_audit (
-        id, override_id, phase, scope_json, reason, created_at, expires_at,
+        id, override_id, use_id, phase, scope_json, reason, created_at, expires_at,
         recorded_at, decision_references_json, post_action_outcome
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       entry.id,
       entry.override.id,
+      entry.useId,
       entry.phase,
       JSON.stringify(entry.override.scope),
       entry.override.reason,
@@ -99,6 +107,7 @@ export class OverrideStore {
       : this.#database.prepare('SELECT * FROM runtime_override_audit WHERE override_id = ? ORDER BY sequence').all(overrideId)) as unknown as OverrideAuditRow[];
     return Object.freeze(rows.map((row) => validateOverrideAuditEntry({
       id: row.id,
+      useId: checkedUseId(row.use_id),
       override: parseRuntimeOverride({
         id: row.override_id,
         scope: parseJson(row.scope_json, 'override scope'),
@@ -124,6 +133,33 @@ function sameAuthorization(row: OverrideAuditRow, completion: OverrideAuditEntry
     && row.created_at === completion.override.createdAt
     && row.expires_at === (completion.override.expiresAt ?? null)
     && row.decision_references_json === JSON.stringify(completion.decisionReferences);
+}
+
+function migrateOverrideAudit(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    database.exec(overrideAuditMigration);
+    ensureOverrideAuditUseMigration(database);
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+export function ensureOverrideAuditUseMigration(database: DatabaseSync): void {
+  const columns = database.prepare("SELECT name FROM pragma_table_info('runtime_override_audit')").all() as Array<{ name: string }>;
+  if (!columns.some(({ name }) => name === 'use_id')) database.exec(overrideAuditUseMigration);
+  else {
+    database.exec('DROP INDEX IF EXISTS runtime_override_audit_once_per_phase');
+    database.exec(`CREATE UNIQUE INDEX IF NOT EXISTS runtime_override_audit_once_per_use_phase
+      ON runtime_override_audit (override_id, use_id, phase)`);
+  }
+}
+
+function checkedUseId(value: string | null): string {
+  if (value === null) throw new TypeError('Stored override audit use identity is missing.');
+  return value;
 }
 
 function parseJson(value: string, field: string): unknown {

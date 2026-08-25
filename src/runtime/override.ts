@@ -51,6 +51,7 @@ export type PostActionOutcome = 'succeeded' | 'failed' | 'unknown';
 
 export interface OverrideAuditEntry {
   readonly id: string;
+  readonly useId: string;
   readonly override: RuntimeOverride;
   readonly phase: 'authorized' | 'completed';
   readonly recordedAt: string;
@@ -62,10 +63,12 @@ export interface OverrideLearningEvidence {
   readonly ruleId: string;
   readonly polarity: 'contradicts';
   readonly successfulOverrideIds: readonly string[];
+  readonly successfulUseIds: readonly string[];
   readonly revalidationRequired: true;
 }
 
 const signatureHashPattern = /^[a-f0-9]{64}$/;
+const canonicalIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:@-]*$/;
 const MAX_IDENTIFIER_LENGTH = 512;
 const MAX_TEXT_LENGTH = 4_096;
 const MAX_REFERENCES = 100;
@@ -146,53 +149,63 @@ export function applyRuntimeOverride(input: ApplyRuntimeOverrideInput): Override
 
 /** Produces evidence proposals only. It never changes or removes knowledge. */
 export function deriveOverrideLearningEvidence(entries: readonly OverrideAuditEntry[]): readonly OverrideLearningEvidence[] {
-  const successes = new Map<string, Set<string>>();
+  const successes = new Map<string, Map<string, string>>();
   const authorized = new Map<string, string>();
   for (const entry of entries) {
     const validated = validateOverrideAuditEntry(entry);
+    const useKey = overrideUseKey(validated);
     if (entry.phase === 'authorized') {
-      authorized.set(entry.override.id, auditBinding(validated));
+      authorized.set(useKey, auditBinding(validated));
       continue;
     }
-    if (entry.postActionOutcome !== 'succeeded' || authorized.get(entry.override.id) !== auditBinding(validated)) continue;
+    if (entry.postActionOutcome !== 'succeeded' || authorized.get(useKey) !== auditBinding(validated)) continue;
     const scopedRuleId = entry.override.scope.kind === 'rule' ? entry.override.scope.ruleId : undefined;
     const references = scopedRuleId === undefined
       ? entry.decisionReferences
       : entry.decisionReferences.filter(({ ruleId }) => ruleId === scopedRuleId);
     for (const reference of references) {
-      const overrideIds = successes.get(reference.ruleId) ?? new Set<string>();
-      overrideIds.add(entry.override.id);
-      successes.set(reference.ruleId, overrideIds);
+      const uses = successes.get(reference.ruleId) ?? new Map<string, string>();
+      uses.set(useKey, entry.override.id);
+      successes.set(reference.ruleId, uses);
     }
   }
   const evidence = [...successes.entries()]
-    .filter(([, ids]) => ids.size >= 2)
+    .filter(([, uses]) => uses.size >= 2)
     .sort(([left], [right]) => left.localeCompare(right))
-    .map(([ruleId, ids]) => Object.freeze({
+    .map(([ruleId, uses]) => {
+      const orderedUses = [...uses.entries()].sort(([left], [right]) => left.localeCompare(right));
+      return Object.freeze({
       ruleId,
       polarity: 'contradicts' as const,
-      successfulOverrideIds: Object.freeze([...ids].sort()),
+      successfulOverrideIds: Object.freeze(orderedUses.map(([, overrideId]) => overrideId)),
+      successfulUseIds: Object.freeze(orderedUses.map(([key]) => key.slice(key.indexOf('\0') + 1))),
       revalidationRequired: true as const
-    }));
+      });
+    });
   return Object.freeze(evidence);
 }
 
 export function validateOverrideAuditEntry(value: OverrideAuditEntry): OverrideAuditEntry {
-  if (!isRecord(value) || !onlyKeys(value, ['decisionReferences', 'id', 'override', 'phase', 'postActionOutcome', 'recordedAt'])
+  if (!isRecord(value) || !onlyKeys(value, ['decisionReferences', 'id', 'override', 'phase', 'postActionOutcome', 'recordedAt', 'useId'])
     || typeof value.id !== 'string' || (value.phase !== 'authorized' && value.phase !== 'completed')
-    || typeof value.recordedAt !== 'string' || !Array.isArray(value.decisionReferences)) {
+    || typeof value.useId !== 'string' || typeof value.recordedAt !== 'string' || !Array.isArray(value.decisionReferences)) {
     throw new TypeError('Invalid override audit entry.');
   }
-  assertNonEmpty(value.id, 'audit id');
-  assertBounded(value.id, 'audit id', MAX_IDENTIFIER_LENGTH);
+  const id = checkedIdentifier(value.id, 'audit id');
+  const useId = checkedIdentifier(value.useId, 'override use id');
   assertTimestamp(value.recordedAt);
   const override = parseRuntimeOverride(value.override);
   if (value.phase === 'authorized' && value.postActionOutcome !== undefined) throw new TypeError('Authorization audit rows cannot contain a post-action outcome.');
   if (value.phase === 'completed' && !isPostActionOutcome(value.postActionOutcome)) throw new TypeError('Completion audit rows require a post-action outcome.');
+  if (value.phase === 'authorized' && (value.recordedAt < override.createdAt
+    || (override.expiresAt !== undefined && value.recordedAt >= override.expiresAt))) {
+    throw new TypeError('Override authorization time is outside the grant validity window.');
+  }
   const references = value.decisionReferences.map(parseReference);
   if (references.length > MAX_REFERENCES) throw new TypeError('Override decision reference limit exceeded.');
   return Object.freeze({
-    id: value.id,
+    id,
+    useId,
     override,
     phase: value.phase,
     recordedAt: value.recordedAt,
@@ -229,17 +242,14 @@ function parseReference(value: unknown): DecisionReference {
     || typeof value.ruleId !== 'string' || typeof value.knowledgeId !== 'string'
     || !Array.isArray(value.evidenceIds) || !value.evidenceIds.every((id) => typeof id === 'string')
     || (value.source !== undefined && typeof value.source !== 'string')) throw new TypeError('Invalid override decision reference.');
-  assertNonEmpty(value.ruleId, 'rule id');
-  assertNonEmpty(value.knowledgeId, 'knowledge id');
-  assertBounded(value.ruleId, 'rule id', MAX_IDENTIFIER_LENGTH);
-  assertBounded(value.knowledgeId, 'knowledge id', MAX_IDENTIFIER_LENGTH);
+  const ruleId = checkedIdentifier(value.ruleId, 'rule id');
+  const knowledgeId = checkedIdentifier(value.knowledgeId, 'knowledge id');
   if (value.evidenceIds.length > MAX_REFERENCES) throw new TypeError('Override evidence reference limit exceeded.');
   for (const evidenceId of value.evidenceIds) {
-    assertNonEmpty(evidenceId, 'evidence id');
-    assertBounded(evidenceId, 'evidence id', MAX_IDENTIFIER_LENGTH);
+    checkedIdentifier(evidenceId, 'evidence id');
   }
-  if (value.source !== undefined) assertBounded(value.source, 'reference source', MAX_TEXT_LENGTH);
-  return Object.freeze({ ruleId: value.ruleId, knowledgeId: value.knowledgeId, evidenceIds: Object.freeze([...value.evidenceIds] as string[]), ...(value.source === undefined ? {} : { source: value.source }) });
+  const source = value.source === undefined ? undefined : checkedPersistedText(value.source, 'reference source');
+  return Object.freeze({ ruleId, knowledgeId, evidenceIds: Object.freeze([...value.evidenceIds] as string[]), ...(source === undefined ? {} : { source }) });
 }
 
 function hashSignature(signature: RuntimeInput['signature']): string {
@@ -263,6 +273,16 @@ function checkedIdentifier(value: string, field: string): string {
   assertNonEmpty(value, field);
   assertBounded(value, field, MAX_IDENTIFIER_LENGTH);
   if (value !== value.trim()) throw new TypeError(`${field} must not contain surrounding whitespace.`);
+  assertDurableTextSafe(value);
+  if (!canonicalIdentifierPattern.test(value)) throw new TypeError(`${field} is not a canonical identifier.`);
+  return value;
+}
+
+function checkedPersistedText(value: string, field: string): string {
+  assertNonEmpty(value, field);
+  assertBounded(value, field, MAX_TEXT_LENGTH);
+  if (value !== value.trim()) throw new TypeError(`${field} must not contain surrounding whitespace.`);
+  assertDurableTextSafe(value);
   return value;
 }
 
@@ -284,6 +304,10 @@ function validateActionSignatureResources(signature: RuntimeInput['signature']):
 
 function auditBinding(entry: OverrideAuditEntry): string {
   return JSON.stringify({ override: entry.override, decisionReferences: entry.decisionReferences });
+}
+
+function overrideUseKey(entry: OverrideAuditEntry): string {
+  return `${entry.override.id}\0${entry.useId}`;
 }
 
 function isPostActionOutcome(value: unknown): value is PostActionOutcome {
