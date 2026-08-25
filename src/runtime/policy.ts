@@ -40,7 +40,11 @@ function basePolicy(match: RuleMatch): { outcome: DecisionOutcome; code: Runtime
   if (rule.state === 'verified' && strength === 'exact') {
     return { outcome: 'BLOCK', code: 'VERIFIED_EXACT_CONFLICT' };
   }
-  if (rule.state === 'verified') return { outcome: 'WARN', code: 'VERIFIED_METADATA_CONFLICT' };
+  if (rule.state === 'verified') {
+    return strength === 'metadata'
+      ? { outcome: 'WARN', code: 'VERIFIED_METADATA_CONFLICT' }
+      : { outcome: 'WARN', code: 'VERIFIED_TAG_CONFLICT' };
+  }
   if (rule.state === 'confirmed') return { outcome: 'WARN', code: 'CONFIRMED_CONFLICT' };
 
   return { outcome: 'ALLOW', code: 'CONTEXT_ONLY' };
@@ -76,6 +80,7 @@ function explanationMessage(code: RuntimeExplanationCode): string {
   switch (code) {
     case 'VERIFIED_EXACT_CONFLICT': return 'A verified authoritative rule exactly conflicts with the operation.';
     case 'VERIFIED_METADATA_CONFLICT': return 'A verified authoritative rule conflicts through structured metadata.';
+    case 'VERIFIED_TAG_CONFLICT': return 'A verified authoritative rule conflicts through matching tags.';
     case 'CONFIRMED_CONFLICT': return 'A confirmed authoritative rule conflicts with the operation.';
     case 'INACTIVE_RULE': return 'The rule lifecycle state is not active for runtime enforcement.';
     case 'HARD_BLOCKING_DISABLED': return 'The active profile converts hard blocking to a warning.';

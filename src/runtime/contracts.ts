@@ -74,6 +74,7 @@ export interface RuntimeProfile {
 export type RuntimeExplanationCode =
   | 'VERIFIED_EXACT_CONFLICT'
   | 'VERIFIED_METADATA_CONFLICT'
+  | 'VERIFIED_TAG_CONFLICT'
   | 'CONFIRMED_CONFLICT'
   | 'CONTEXT_ONLY'
   | 'INACTIVE_RULE'

@@ -72,6 +72,15 @@ test('verified metadata conflicts and confirmed authoritative conflicts warn', (
   assert.equal(evaluateRule(rule({ state: 'confirmed' }), normalProfile).outcome, 'WARN');
 });
 
+test('verified authoritative tag-only conflicts warn with a truthful tag reason in every enforcing profile', () => {
+  for (const profile of [normalProfile, learningProfile]) {
+    const decision = evaluateRule(rule({ match: 'tags' }), profile);
+
+    assert.equal(decision.outcome, 'WARN');
+    assert.equal(decision.explanation.code, 'VERIFIED_TAG_CONFLICT');
+  }
+});
+
 test('observed and disputed rules are contextual only', () => {
   for (const state of ['observed', 'disputed'] as const) {
     const decision = evaluateRule(rule({ state }), normalProfile);
