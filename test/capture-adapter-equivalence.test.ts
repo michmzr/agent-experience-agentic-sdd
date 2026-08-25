@@ -101,7 +101,16 @@ test('classifies credential-bearing options contextually without leaking their v
     { tool: 'curl', action: 'request', arguments: ['-H', `X-API-Key:${marker}`] },
     { tool: 'git', action: 'config', arguments: [`SESSION_CREDENTIAL=${marker}`] },
     { tool: 'tool', action: 'run', arguments: ['--username', marker] },
-    { tool: 'tool', action: 'run', arguments: [`user=${marker}`] }
+    { tool: 'tool', action: 'run', arguments: [`user=${marker}`] },
+    { tool: 'tool', action: 'run', arguments: ['--apiKey', marker] },
+    { tool: 'tool', action: 'run', arguments: [`--apikey=${marker}`] },
+    { tool: 'tool', action: 'run', arguments: [`OPENAI_APIKEY=${marker}`] },
+    { tool: 'tool', action: 'run', arguments: [`PREFIX_CLIENTSECRET=${marker}`] },
+    { tool: 'tool', action: 'run', arguments: [`--sessionToken=${marker}`] },
+    { tool: 'tool', action: 'run', arguments: ['--access-key', marker] },
+    { tool: 'tool', action: 'run', arguments: [`--oauth2Bearer=${marker}`] },
+    { tool: 'tool', action: 'run', arguments: ['--refreshToken', marker] },
+    { tool: 'tool', action: 'run', arguments: ['--bearer', marker] }
   ];
   for (const item of cases) {
     assert.throws(

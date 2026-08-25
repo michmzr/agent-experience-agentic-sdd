@@ -194,7 +194,11 @@ function stringArray(value: unknown, tool: string, action: string): string[] {
 }
 
 const sensitiveNameTokens = new Set([
-  'auth', 'authorization', 'token', 'secret', 'password', 'passwd', 'passphrase', 'credential', 'credentials', 'cookie', 'userinfo'
+  'auth', 'authorization', 'bearer', 'token', 'secret', 'password', 'passwd', 'passphrase', 'credential', 'credentials', 'cookie', 'userinfo'
+]);
+const sensitiveCollapsedTokens = new Set([
+  'apikey', 'accesskey', 'secretkey', 'privatekey', 'clientsecret', 'sessiontoken',
+  'accesstoken', 'refreshtoken', 'authtoken', 'oauth2bearer'
 ]);
 
 function assertArgumentsClassifiedSafe(arguments_: readonly string[], tool: string, action: string): void {
@@ -243,14 +247,21 @@ function assertArgumentsClassifiedSafe(arguments_: readonly string[], tool: stri
 }
 
 function nameTokens(value: string): readonly string[] {
-  return value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1-$2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
 }
 
 function sensitiveOptionName(value: string): boolean {
   const tokens = nameTokens(value);
-  if (tokens.some((token) => sensitiveNameTokens.has(token))) return true;
+  const collapsed = value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  if (sensitiveNameTokens.has(collapsed) || sensitiveCollapsedTokens.has(collapsed)) return true;
+  if (tokens.some((token) => sensitiveNameTokens.has(token) || sensitiveCollapsedTokens.has(token))) return true;
   return hasAdjacent(tokens, 'api', 'key') || hasAdjacent(tokens, 'secret', 'key') || hasAdjacent(tokens, 'private', 'key')
-    || hasAdjacent(tokens, 'session', 'token') || hasAdjacent(tokens, 'user', 'info');
+    || hasAdjacent(tokens, 'access', 'key') || hasAdjacent(tokens, 'session', 'token') || hasAdjacent(tokens, 'user', 'info');
 }
 
 function userValueOption(value: string): boolean {
@@ -261,7 +272,7 @@ function userValueOption(value: string): boolean {
 function sensitiveEnvironmentSuffix(value: string): boolean {
   const tokens = nameTokens(value);
   const suffix = tokens.at(-1) ?? '';
-  return suffix === 'key' ? tokens.length > 1 : ['token', 'secret', 'password'].includes(suffix);
+  return sensitiveCollapsedTokens.has(suffix) || (suffix === 'key' ? tokens.length > 1 : ['token', 'secret', 'password'].includes(suffix));
 }
 
 function looksLikeEnvironmentName(value: string): boolean {
