@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { RuntimeService, RuntimeServiceError } from '../src/application/runtime-service.js';
+import { runtimeTargetSnapshotDirectory, RuntimeService, RuntimeServiceError } from '../src/application/runtime-service.js';
 import { runCli } from '../src/cli.js';
 import type { RuntimeRule } from '../src/runtime/contracts.js';
 import { compileRuntimeSnapshot } from '../src/runtime/snapshot.js';
@@ -98,8 +98,9 @@ test('retains circuit state per profile and opens after repeated unavailable loa
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-runtime-status-'));
   const input = join(dataDir, 'action.json');
   try {
-    mkdirSync(join(dataDir, 'runtime'));
-    writeFileSync(join(dataDir, 'runtime', 'manifest.json'), '{"corrupt":true}', { mode: 0o600 });
+    const runtimeDirectory = runtimeTargetSnapshotDirectory(dataDir, 'repo-a');
+    mkdirSync(runtimeDirectory, { recursive: true, mode: 0o700 });
+    writeFileSync(join(runtimeDirectory, 'manifest.json'), '{"corrupt":true}', { mode: 0o600 });
     writeFileSync(input, JSON.stringify(action));
     const service = new RuntimeService({ dataDir });
 
@@ -177,5 +178,53 @@ test('replaces every profile cache for a target only after successful explicit r
     assert.equal(refreshed.outcome, 'ALLOW');
     assert.equal(refreshed.status.fallbackSource, 'memory');
     assert.equal(service.evaluate({ inputPath: input, profileId: 'learning' }).outcome, 'ALLOW');
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('validates the target cache capacity bounds', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-runtime-status-'));
+  try {
+    for (const runtimeTargetCapacity of [0, -1, 1.5, 257, Number.NaN]) {
+      assert.throws(() => new RuntimeService({ dataDir, runtimeTargetCapacity }), /capacity/i);
+    }
+    assert.doesNotThrow(() => new RuntimeService({ dataDir, runtimeTargetCapacity: 1 }));
+    assert.doesNotThrow(() => new RuntimeService({ dataDir, runtimeTargetCapacity: 256 }));
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('evicts targets in deterministic LRU order and reloads evicted snapshots durably', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-runtime-status-'));
+  const inputs = ['repo-a', 'repo-b', 'repo-c'].map((repositoryId) => {
+    const path = join(dataDir, `${repositoryId}.json`);
+    writeFileSync(path, JSON.stringify({ ...action, repositoryId }));
+    return { repositoryId, path };
+  });
+  try {
+    const service = new RuntimeService({ dataDir, runtimeTargetCapacity: 2, refreshSnapshot: (input, current) => current ?? blockingSnapshot(input.repositoryId) });
+    assert.equal(service.evaluate({ inputPath: inputs[0]!.path }).status.fallbackSource, 'memory');
+    assert.equal(service.evaluate({ inputPath: inputs[1]!.path }).status.fallbackSource, 'memory');
+    assert.equal(service.evaluate({ inputPath: inputs[0]!.path }).status.fallbackSource, 'memory');
+    assert.equal(service.evaluate({ inputPath: inputs[2]!.path }).status.fallbackSource, 'memory');
+
+    assert.equal(service.evaluate({ inputPath: inputs[0]!.path }).status.fallbackSource, 'memory');
+    const reloaded = service.evaluate({ inputPath: inputs[1]!.path });
+    assert.equal(reloaded.outcome, 'BLOCK');
+    assert.equal(reloaded.status.fallbackSource, 'snapshot');
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('counts all profiles for one repository as one LRU target', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-runtime-status-'));
+  const inputA = join(dataDir, 'repo-a.json');
+  const inputB = join(dataDir, 'repo-b.json');
+  try {
+    writeFileSync(inputA, JSON.stringify(action));
+    writeFileSync(inputB, JSON.stringify({ ...action, repositoryId: 'repo-b' }));
+    const service = new RuntimeService({ dataDir, runtimeTargetCapacity: 2, refreshSnapshot: (input, current) => current ?? blockingSnapshot(input.repositoryId) });
+    service.evaluate({ inputPath: inputA, profileId: 'normal' });
+    service.evaluate({ inputPath: inputB, profileId: 'normal' });
+    service.evaluate({ inputPath: inputA, profileId: 'learning' });
+
+    assert.equal(service.evaluate({ inputPath: inputB, profileId: 'normal' }).status.fallbackSource, 'memory');
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });

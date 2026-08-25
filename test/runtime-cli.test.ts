@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { runCli } from '../src/cli.js';
-import { createLocalGitContentAdapter, RuntimeService } from '../src/application/runtime-service.js';
+import { createLocalGitContentAdapter, runtimeTargetSnapshotDirectory, RuntimeService } from '../src/application/runtime-service.js';
 import type { RuntimeRule } from '../src/runtime/contracts.js';
 import { compileRuntimeSnapshot } from '../src/runtime/snapshot.js';
 import { RuntimeSnapshotStore } from '../src/storage/runtime-snapshot-store.js';
@@ -75,15 +75,39 @@ test('rebuilds a validated snapshot for a different repository without serving c
 
   assert.equal(service.evaluate({ inputPath: inputA }).outcome, 'BLOCK');
   assert.equal(service.evaluate({ inputPath: inputB }).outcome, 'ALLOW');
-  assert.equal(new RuntimeSnapshotStore(join(dataDir, 'runtime'), { clock: Date.now }).loadCurrent().repositoryId, 'repo-b');
+  const restarted = new RuntimeService({ dataDir });
+  assert.equal(restarted.evaluate({ inputPath: inputA }).outcome, 'BLOCK');
+  assert.equal(new RuntimeSnapshotStore(runtimeTargetSnapshotDirectory(dataDir, 'repo-1'), { clock: Date.now }).loadCurrent().repositoryId, 'repo-1');
+  assert.equal(new RuntimeSnapshotStore(runtimeTargetSnapshotDirectory(dataDir, 'repo-b'), { clock: Date.now }).loadCurrent().repositoryId, 'repo-b');
+}));
+
+test('corrupt target state cannot affect another repository after restart', () => withDirectory((dataDir) => {
+  const inputA = join(dataDir, 'repo-a.json');
+  const inputB = join(dataDir, 'repo-b.json');
+  writeFileSync(inputA, JSON.stringify(action));
+  writeFileSync(inputB, JSON.stringify({ ...action, repositoryId: 'repo-b', operationClass: 'normal' }));
+  new RuntimeSnapshotStore(join(dataDir, 'runtime'), { clock: Date.now }).publish(compileRuntimeSnapshot({
+    repositoryId: 'repo-1', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [{
+      id: 'repo-a-only', state: 'verified', authoritative: true, effect: 'conflict', signature: action.signature,
+      applicability: { scope: 'repository', repositoryId: 'repo-1' }, reference: { knowledgeId: 'repo-a-only', evidenceIds: [] }
+    }]
+  }));
+  const service = new RuntimeService({ dataDir });
   assert.equal(service.evaluate({ inputPath: inputA }).outcome, 'BLOCK');
-  assert.equal(new RuntimeSnapshotStore(join(dataDir, 'runtime'), { clock: Date.now }).loadCurrent().repositoryId, 'repo-1');
+  assert.equal(service.evaluate({ inputPath: inputB }).outcome, 'ALLOW');
+  writeFileSync(join(runtimeTargetSnapshotDirectory(dataDir, 'repo-1'), 'manifest.json'), '{"corrupt":true}', { mode: 0o600 });
+
+  const restarted = new RuntimeService({ dataDir });
+  const repositoryB = restarted.evaluate({ inputPath: inputB });
+  assert.equal(repositoryB.outcome, 'ALLOW');
+  assert.notEqual(repositoryB.status.health, 'degraded');
+  assert.equal(restarted.evaluate({ inputPath: inputA }).status.health, 'degraded');
 }));
 
 test('does not overwrite corrupt existing snapshot state without explicit refresh', () => withDirectory((dataDir) => {
   const input = join(dataDir, 'action.json');
-  const runtimeDirectory = join(dataDir, 'runtime');
-  mkdirSync(runtimeDirectory);
+  const runtimeDirectory = runtimeTargetSnapshotDirectory(dataDir, 'repo-1');
+  mkdirSync(runtimeDirectory, { recursive: true, mode: 0o700 });
   writeFileSync(join(runtimeDirectory, 'manifest.json'), '{"corrupt":true}', { mode: 0o600 });
   writeFileSync(input, JSON.stringify(action));
 

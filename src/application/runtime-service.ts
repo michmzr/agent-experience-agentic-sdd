@@ -1,5 +1,9 @@
+import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from 'node:fs';
+import {
+  chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync,
+  mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync
+} from 'node:fs';
 import { join } from 'node:path';
 
 import { resolveProfileTarget, type ResolvedProfileTarget } from '../config/profile-resolver.js';
@@ -17,6 +21,9 @@ import { RuntimeSnapshotStore, RuntimeSnapshotStorageError, type RuntimeSnapshot
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_GIT_LIST_BYTES = 1024 * 1024;
 const MAX_GIT_PATHS = 1_002;
+const DEFAULT_RUNTIME_TARGET_CAPACITY = 32;
+const MAX_RUNTIME_TARGET_CAPACITY = 256;
+const ACTIVE_TARGET_MAX_BYTES = 1_024;
 const profileIds = new Set(['normal', 'learning', 'observe-only'] as const);
 const operationClasses = new Set(['normal', 'caution', 'protected'] as const);
 
@@ -34,6 +41,8 @@ export interface RuntimeServiceOptions {
   readonly gitAdapter?: (repository: string) => GitContentAdapter;
   readonly refreshSnapshot?: (input: RuntimeInput, current: RuntimeSnapshotV1 | undefined) => RuntimeSnapshotV1;
   readonly snapshotStore?: RuntimeSnapshotPersistence;
+  readonly snapshotStoreFactory?: (targetHash: string) => RuntimeSnapshotPersistence;
+  readonly runtimeTargetCapacity?: number;
 }
 
 export interface RuntimeSnapshotPersistence {
@@ -41,6 +50,12 @@ export interface RuntimeSnapshotPersistence {
   publish(snapshot: RuntimeSnapshotV1): RuntimeSnapshotV1;
   loadCurrent(): RuntimeSnapshotV1;
   loadLastKnownGood(): RuntimeSnapshotV1;
+}
+
+interface RuntimeTarget {
+  readonly kind: 'global' | 'repository';
+  readonly snapshotRepositoryId: string;
+  readonly hash: string;
 }
 
 export interface PublicGateDecision extends Omit<GateDecision, 'references'> {
@@ -66,19 +81,36 @@ export class RuntimeServiceError extends Error {
 }
 
 export class RuntimeService {
-  readonly #store: RuntimeSnapshotPersistence;
+  readonly #dataDir: string;
+  readonly #legacyStore?: RuntimeSnapshotPersistence;
+  readonly #usesProductionTargetStores: boolean;
+  readonly #storeFactory: (targetHash: string) => RuntimeSnapshotPersistence;
+  readonly #targetCapacity: number;
   readonly #knowledgeStateRoot: string;
   readonly #clock: () => Date;
   readonly #gitAdapter: (repository: string) => GitContentAdapter;
   readonly #refreshSnapshot: (input: RuntimeInput, current: RuntimeSnapshotV1 | undefined) => RuntimeSnapshotV1;
   readonly #runtimes = new Map<string, { readonly runtime: ResilientRuntime; readonly snapshotChecksum?: string }>();
   readonly #snapshotsByTarget = new Map<string, RuntimeSnapshotV1>();
+  readonly #targetLru = new Map<string, RuntimeTarget>();
   #activeRuntimeKey?: string;
-  #activeTarget?: string;
+  #activeTarget?: RuntimeTarget;
 
   constructor(options: RuntimeServiceOptions) {
     this.#clock = options.clock ?? (() => new Date());
-    this.#store = options.snapshotStore ?? new RuntimeSnapshotStore(join(options.dataDir, 'runtime'), { clock: () => this.#clock().getTime() });
+    this.#dataDir = options.dataDir;
+    this.#targetCapacity = validateTargetCapacity(options.runtimeTargetCapacity ?? DEFAULT_RUNTIME_TARGET_CAPACITY);
+    if (options.snapshotStore !== undefined && options.snapshotStoreFactory !== undefined) throw new TypeError('Configure one runtime snapshot store injection boundary.');
+    this.#usesProductionTargetStores = options.snapshotStore === undefined && options.snapshotStoreFactory === undefined;
+    this.#legacyStore = options.snapshotStore ?? (options.snapshotStoreFactory === undefined
+      ? new RuntimeSnapshotStore(join(options.dataDir, 'runtime'), { clock: () => this.#clock().getTime() })
+      : undefined);
+    this.#storeFactory = options.snapshotStore !== undefined
+      ? () => options.snapshotStore!
+      : options.snapshotStoreFactory ?? ((targetHash) => {
+          ensurePrivateDirectory(join(options.dataDir, 'runtime', 'targets'));
+          return new RuntimeSnapshotStore(join(options.dataDir, 'runtime', 'targets', targetHash), { clock: () => this.#clock().getTime() });
+        });
     this.#knowledgeStateRoot = join(options.dataDir, 'repository-knowledge');
     this.#gitAdapter = options.gitAdapter ?? createLocalGitContentAdapter;
     this.#refreshSnapshot = options.refreshSnapshot ?? ((input, current) => compileRuntimeSnapshot({
@@ -99,36 +131,42 @@ export class RuntimeService {
   evaluate(options: RuntimeEvaluationOptions): PublicGateDecision {
     const input = this.#readRuntimeInput(options.inputPath);
     const profile = runtimeProfile(options.profileId ?? 'normal');
-    const target = input.repositoryId ?? 'global';
-    const key = runtimeKey(profile.id, target);
+    const target = runtimeTarget(input.repositoryId);
+    this.#touchTarget(target);
+    const key = runtimeKey(profile.id, target.hash);
     const cached = this.#runtimes.get(key);
-    if (options.refresh !== true && this.#activeTarget === target && cached !== undefined) {
+    if (options.refresh !== true && this.#activeTarget?.hash === target.hash && cached !== undefined) {
       this.#activeRuntimeKey = key;
       const resolution = cached.runtime.resolve(input.operationClass);
       const gate = createRuntimeGate({ profile, status: resolution.status, ...(resolution.index === undefined ? {} : { index: resolution.index }) });
       return publicDecision(gate.evaluate(input));
     }
-    const snapshotAbsent = !existsSync(this.#store.paths.manifest);
-    const current = this.#optionalCurrent();
-    if (current !== undefined) this.#snapshotsByTarget.set(current.repositoryId, current);
-    const targetMismatch = current !== undefined && current.repositoryId !== target;
-    let activeChecksum = current?.repositoryId === target ? current.checksum : undefined;
-    if (options.refresh === true || snapshotAbsent || targetMismatch) {
+    const store = this.#storeFor(target);
+    this.#migrateLegacySnapshot(target, store);
+    const snapshotAbsent = !existsSync(store.paths.manifest);
+    const current = this.#optionalCurrent(store);
+    if (current !== undefined && current.repositoryId !== target.snapshotRepositoryId) {
+      throw new RuntimeServiceError('RUNTIME_UNAVAILABLE', 'Runtime snapshot target identity is invalid.');
+    }
+    if (current !== undefined) this.#snapshotsByTarget.set(target.hash, current);
+    let activeChecksum = current?.checksum;
+    if (options.refresh === true || snapshotAbsent) {
       let published: RuntimeSnapshotV1;
       try {
-        const candidate = this.#refreshSnapshot(input, current?.repositoryId === target ? current : this.#snapshotsByTarget.get(target));
-        if (candidate.repositoryId !== target) throw new TypeError('Runtime snapshot compiler returned the wrong repository.');
-        published = this.#store.publish(candidate);
+        const candidate = this.#refreshSnapshot(input, current ?? this.#snapshotsByTarget.get(target.hash));
+        if (candidate.repositoryId !== target.snapshotRepositoryId) throw new TypeError('Runtime snapshot compiler returned the wrong repository.');
+        published = store.publish(candidate);
       }
       catch { throw new RuntimeServiceError('RUNTIME_UNAVAILABLE', 'Runtime snapshot refresh failed.'); }
-      this.#snapshotsByTarget.set(target, published);
-      this.#replaceTargetRuntimes(target, profile, createRuleIndex(published), published.checksum);
+      this.#snapshotsByTarget.set(target.hash, published);
+      this.#replaceTargetRuntimes(target, profile, store, createRuleIndex(published), published.checksum);
       activeChecksum = published.checksum;
     }
 
-    const runtime = this.#runtimeFor(profile, target, undefined, activeChecksum);
+    const runtime = this.#runtimeFor(profile, target, store, undefined, activeChecksum);
     this.#activeRuntimeKey = key;
     this.#activeTarget = target;
+    this.#recordActiveTarget(target);
     const resolution = runtime.resolve(input.operationClass);
     const gate = createRuntimeGate({ profile, status: resolution.status, ...(resolution.index === undefined ? {} : { index: resolution.index }) });
     return publicDecision(gate.evaluate(input));
@@ -139,12 +177,18 @@ export class RuntimeService {
       const active = this.#runtimes.get(this.#activeRuntimeKey);
       if (active !== undefined) return active.runtime.resolve('normal').status;
     }
-    const current = this.#optionalCurrent();
-    const target = current?.repositoryId ?? 'global';
-    if (current !== undefined) this.#snapshotsByTarget.set(target, current);
+    const target = this.#readActiveTarget() ?? runtimeTarget(undefined);
+    this.#touchTarget(target);
+    const store = this.#storeFor(target);
+    this.#migrateLegacySnapshot(target, store);
+    const current = this.#optionalCurrent(store);
+    if (current !== undefined && current.repositoryId !== target.snapshotRepositoryId) {
+      throw new RuntimeServiceError('RUNTIME_UNAVAILABLE', 'Runtime snapshot target identity is invalid.');
+    }
+    if (current !== undefined) this.#snapshotsByTarget.set(target.hash, current);
     const profile = BUILT_IN_RUNTIME_PROFILES.normal;
-    const runtime = this.#runtimeFor(profile, target, undefined, current?.checksum);
-    this.#activeRuntimeKey = runtimeKey(profile.id, target);
+    const runtime = this.#runtimeFor(profile, target, store, undefined, current?.checksum);
+    this.#activeRuntimeKey = runtimeKey(profile.id, target.hash);
     this.#activeTarget = target;
     return runtime.resolve('normal').status;
   }
@@ -183,35 +227,89 @@ export class RuntimeService {
     }
   }
 
-  #runtimeFor(profile: RuntimeProfile, target: string, currentIndex?: RuleIndex, snapshotChecksum?: string): ResilientRuntime {
-    const key = runtimeKey(profile.id, target);
+  #runtimeFor(profile: RuntimeProfile, target: RuntimeTarget, store: RuntimeSnapshotPersistence, currentIndex?: RuleIndex, snapshotChecksum?: string): ResilientRuntime {
+    const key = runtimeKey(profile.id, target.hash);
     const existing = this.#runtimes.get(key);
     if (existing !== undefined && (snapshotChecksum === undefined || existing.snapshotChecksum === snapshotChecksum)) return existing.runtime;
     const runtime = new ResilientRuntime({
       profile,
       ...(currentIndex === undefined ? {} : { currentIndex }),
       clock: () => this.#clock().getTime(),
-      loadCurrent: () => snapshotForTarget(this.#store.loadCurrent(), target, snapshotChecksum),
-      loadLastKnownGood: () => snapshotForTarget(this.#store.loadLastKnownGood(), target)
+      loadCurrent: () => snapshotForTarget(store.loadCurrent(), target.snapshotRepositoryId, snapshotChecksum),
+      loadLastKnownGood: () => snapshotForTarget(store.loadLastKnownGood(), target.snapshotRepositoryId)
     });
     this.#runtimes.set(key, { runtime, ...(snapshotChecksum === undefined ? {} : { snapshotChecksum }) });
     return runtime;
   }
 
-  #replaceTargetRuntimes(target: string, profile: RuntimeProfile, index: RuleIndex, checksum: string): void {
+  #replaceTargetRuntimes(target: RuntimeTarget, profile: RuntimeProfile, store: RuntimeSnapshotPersistence, index: RuleIndex, checksum: string): void {
     for (const key of this.#runtimes.keys()) {
-      if (key.endsWith(`\u0000${target}`)) this.#runtimes.delete(key);
+      if (key.endsWith(`\u0000${target.hash}`)) this.#runtimes.delete(key);
     }
-    this.#runtimeFor(profile, target, index, checksum);
+    this.#runtimeFor(profile, target, store, index, checksum);
   }
 
-  #optionalCurrent(): RuntimeSnapshotV1 | undefined {
-    if (!existsSync(this.#store.paths.manifest)) return undefined;
-    try { return this.#store.loadCurrent(); }
+  #optionalCurrent(store: RuntimeSnapshotPersistence): RuntimeSnapshotV1 | undefined {
+    if (!existsSync(store.paths.manifest)) return undefined;
+    try { return store.loadCurrent(); }
     catch (error) {
       if (error instanceof RuntimeSnapshotStorageError) return undefined;
       throw error;
     }
+  }
+
+  #storeFor(target: RuntimeTarget): RuntimeSnapshotPersistence {
+    return this.#storeFactory(target.hash);
+  }
+
+  #migrateLegacySnapshot(target: RuntimeTarget, store: RuntimeSnapshotPersistence): void {
+    if (!this.#usesProductionTargetStores || this.#legacyStore === undefined || existsSync(store.paths.manifest)
+      || !existsSync(this.#legacyStore.paths.manifest) || target.kind !== 'repository' || target.snapshotRepositoryId === 'global') return;
+    let legacy: RuntimeSnapshotV1 | undefined;
+    try { legacy = this.#legacyStore.loadCurrent(); }
+    catch (error) {
+      if (error instanceof RuntimeSnapshotStorageError) return;
+      throw error;
+    }
+    if (legacy.repositoryId !== target.snapshotRepositoryId) return;
+    store.publish(legacy);
+  }
+
+  #touchTarget(target: RuntimeTarget): void {
+    this.#targetLru.delete(target.hash);
+    this.#targetLru.set(target.hash, target);
+    while (this.#targetLru.size > this.#targetCapacity) {
+      const evictedHash = this.#targetLru.keys().next().value as string | undefined;
+      if (evictedHash === undefined) return;
+      this.#targetLru.delete(evictedHash);
+      this.#snapshotsByTarget.delete(evictedHash);
+      for (const key of this.#runtimes.keys()) {
+        if (key.endsWith(`\u0000${evictedHash}`)) this.#runtimes.delete(key);
+      }
+      if (this.#activeTarget?.hash === evictedHash) {
+        this.#activeTarget = undefined;
+        this.#activeRuntimeKey = undefined;
+      }
+    }
+  }
+
+  #recordActiveTarget(target: RuntimeTarget): void {
+    if (!this.#usesProductionTargetStores) return;
+    try { writeActiveTarget(this.#dataDir, target); }
+    catch (error) {
+      if (!isExpectedFilesystemError(error)) throw error;
+    }
+  }
+
+  #readActiveTarget(): RuntimeTarget | undefined {
+    if (!this.#usesProductionTargetStores) return undefined;
+    const pointer = readActiveTarget(this.#dataDir);
+    if (pointer === undefined) return undefined;
+    const store = this.#storeFactory(pointer.hash);
+    const current = this.#optionalCurrent(store);
+    if (current === undefined) return undefined;
+    const target = runtimeTarget(pointer.kind === 'global' ? undefined : current.repositoryId);
+    return target.hash === pointer.hash ? target : undefined;
   }
 
   #readRuntimeInput(path: string): RuntimeInput {
@@ -231,8 +329,30 @@ function runtimeProfile(id: BuiltInRuntimeProfileId): RuntimeProfile {
   return BUILT_IN_RUNTIME_PROFILES[id];
 }
 
-function runtimeKey(profileId: string, target: string): string {
-  return `${profileId}\u0000${target}`;
+function validateTargetCapacity(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_RUNTIME_TARGET_CAPACITY) {
+    throw new TypeError(`Runtime target cache capacity must be an integer from 1 through ${MAX_RUNTIME_TARGET_CAPACITY}.`);
+  }
+  return value;
+}
+
+function runtimeTarget(repositoryId: string | undefined): RuntimeTarget {
+  const kind = repositoryId === undefined ? 'global' : 'repository';
+  const snapshotRepositoryId = repositoryId ?? 'global';
+  const canonicalIdentity = `${kind}\u0000${snapshotRepositoryId}`;
+  return Object.freeze({
+    kind,
+    snapshotRepositoryId,
+    hash: createHash('sha256').update('ael:runtime-target:v1\0').update(canonicalIdentity).digest('hex')
+  });
+}
+
+export function runtimeTargetSnapshotDirectory(dataDir: string, repositoryId?: string): string {
+  return join(dataDir, 'runtime', 'targets', runtimeTarget(repositoryId).hash);
+}
+
+function runtimeKey(profileId: string, targetHash: string): string {
+  return `${profileId}\u0000${targetHash}`;
 }
 
 function snapshotForTarget(snapshot: RuntimeSnapshotV1, target: string, checksum?: string): RuntimeSnapshotV1 {
@@ -333,6 +453,73 @@ function git(repository: string, args: readonly string[], maxBytes: number): str
   return execFileSync('git', ['-C', repository, ...args], {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, maxBuffer: maxBytes + 1
   });
+}
+
+function writeActiveTarget(dataDir: string, target: RuntimeTarget): void {
+  const root = join(dataDir, 'runtime');
+  ensurePrivateDirectory(root);
+  const destination = join(root, 'active-target.json');
+  const candidate = join(root, `.active-target-${randomUUID()}`);
+  const serialized = `${JSON.stringify({ version: 1, kind: target.kind, hash: target.hash })}\n`;
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(candidate, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    writeFileSync(descriptor, serialized, 'utf8');
+    fchmodSync(descriptor, 0o600);
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    if (existsSync(destination)) assertOwnerFile(destination, ACTIVE_TARGET_MAX_BYTES);
+    renameSync(candidate, destination);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+    try { unlinkSync(candidate); } catch (error) { if (!isMissingFilesystemEntry(error)) throw error; }
+  }
+}
+
+function readActiveTarget(dataDir: string): { readonly kind: RuntimeTarget['kind']; readonly hash: string } | undefined {
+  const path = join(dataDir, 'runtime', 'active-target.json');
+  let descriptor: number | undefined;
+  try {
+    assertOwnerFile(path, ACTIVE_TARGET_MAX_BYTES);
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile() || stat.size > ACTIVE_TARGET_MAX_BYTES) return undefined;
+    const value = JSON.parse(readFileSync(descriptor, 'utf8')) as unknown;
+    if (!isRecord(value) || !onlyKeys(value, ['hash', 'kind', 'version']) || value.version !== 1
+      || (value.kind !== 'global' && value.kind !== 'repository') || typeof value.hash !== 'string' || !/^[a-f0-9]{64}$/.test(value.hash)) return undefined;
+    return { kind: value.kind, hash: value.hash };
+  } catch (error) {
+    if (isMissingFilesystemEntry(error) || error instanceof SyntaxError) return undefined;
+    throw error;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function ensurePrivateDirectory(path: string): void {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new RuntimeSnapshotStorageError('Runtime target directory is unsafe.');
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) throw new RuntimeSnapshotStorageError('Runtime target directory has a different owner.');
+  chmodSync(path, 0o700);
+}
+
+function assertOwnerFile(path: string, maxBytes: number): void {
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxBytes || (stat.mode & 0o077) !== 0) {
+    throw new RuntimeSnapshotStorageError('Runtime active-target metadata is unsafe.');
+  }
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) throw new RuntimeSnapshotStorageError('Runtime active-target metadata has a different owner.');
+}
+
+function isMissingFilesystemEntry(error: unknown): boolean {
+  return isRecord(error) && error.code === 'ENOENT';
+}
+
+function isExpectedFilesystemError(error: unknown): boolean {
+  return isRecord(error) && typeof error.code === 'string'
+    && ['EACCES', 'EDQUOT', 'EIO', 'EMFILE', 'ENFILE', 'ENOSPC', 'EPERM', 'EROFS'].includes(error.code);
 }
 
 function isMissingGitPath(error: unknown): boolean {
