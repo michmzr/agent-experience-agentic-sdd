@@ -5,6 +5,7 @@ import {
   mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync
 } from 'node:fs';
 import { join } from 'node:path';
+import { getSystemErrorName } from 'node:util';
 
 import { resolveProfileTarget, type ResolvedProfileTarget } from '../config/profile-resolver.js';
 import { BUILT_IN_RUNTIME_PROFILES } from '../config/runtime-profile.js';
@@ -12,7 +13,7 @@ import type { RuntimeInput, RuntimeProfile } from '../runtime/contracts.js';
 import { createRuntimeGate, type GateDecision } from '../runtime/gate.js';
 import { ResilientRuntime, RuntimeSnapshotUnavailableError, type RuntimeStatus } from '../runtime/resilience.js';
 import { createRuleIndex, type RuleIndex } from '../runtime/rule-index.js';
-import { compileRuntimeSnapshot, type RuntimeSnapshotV1 } from '../runtime/snapshot.js';
+import { compileRuntimeSnapshot, RuntimeSnapshotValidationError, type RuntimeSnapshotV1 } from '../runtime/snapshot.js';
 import { activateGitKnowledge, type GitContentAdapter } from '../shared-knowledge/git-activation.js';
 import { promoteKnowledge } from '../shared-knowledge/promotion-policy.js';
 import type { SharedKnowledgeDocument } from '../shared-knowledge/repository.js';
@@ -42,18 +43,27 @@ export interface RuntimeServiceOptions {
   readonly refreshSnapshot?: (input: RuntimeInput, current: RuntimeSnapshotV1 | undefined) => RuntimeSnapshotV1;
   readonly snapshotStore?: RuntimeSnapshotPersistence;
   readonly snapshotStoreFactory?: (targetHash: string) => RuntimeSnapshotPersistence;
+  readonly activeTargetPointer?: RuntimeActiveTargetPointerPersistence;
   readonly runtimeTargetCapacity?: number;
 }
+
+export interface RuntimeActiveTargetPointerPersistence {
+  read(): unknown;
+  write(pointer: { readonly version: 1; readonly kind: RuntimeTargetKind; readonly hash: string }): void;
+}
+
+type RuntimeTargetKind = 'global' | 'repository';
 
 export interface RuntimeSnapshotPersistence {
   readonly paths: RuntimeSnapshotPaths;
   publish(snapshot: RuntimeSnapshotV1): RuntimeSnapshotV1;
+  recover?(snapshot: RuntimeSnapshotV1): RuntimeSnapshotV1;
   loadCurrent(): RuntimeSnapshotV1;
   loadLastKnownGood(): RuntimeSnapshotV1;
 }
 
 interface RuntimeTarget {
-  readonly kind: 'global' | 'repository';
+  readonly kind: RuntimeTargetKind;
   readonly snapshotRepositoryId: string;
   readonly hash: string;
 }
@@ -80,12 +90,19 @@ export class RuntimeServiceError extends Error {
   }
 }
 
+export class RuntimeActiveTargetPointerError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'RuntimeActiveTargetPointerError';
+  }
+}
+
 export class RuntimeService {
-  readonly #dataDir: string;
   readonly #legacyStore?: RuntimeSnapshotPersistence;
   readonly #usesProductionTargetStores: boolean;
   readonly #storeFactory: (targetHash: string) => RuntimeSnapshotPersistence;
   readonly #targetCapacity: number;
+  readonly #activeTargetPointer?: RuntimeActiveTargetPointerPersistence;
   readonly #knowledgeStateRoot: string;
   readonly #clock: () => Date;
   readonly #gitAdapter: (repository: string) => GitContentAdapter;
@@ -98,10 +115,13 @@ export class RuntimeService {
 
   constructor(options: RuntimeServiceOptions) {
     this.#clock = options.clock ?? (() => new Date());
-    this.#dataDir = options.dataDir;
     this.#targetCapacity = validateTargetCapacity(options.runtimeTargetCapacity ?? DEFAULT_RUNTIME_TARGET_CAPACITY);
     if (options.snapshotStore !== undefined && options.snapshotStoreFactory !== undefined) throw new TypeError('Configure one runtime snapshot store injection boundary.');
     this.#usesProductionTargetStores = options.snapshotStore === undefined && options.snapshotStoreFactory === undefined;
+    this.#activeTargetPointer = options.activeTargetPointer ?? (this.#usesProductionTargetStores ? {
+      read: () => readActiveTarget(options.dataDir),
+      write: (pointer) => writeActiveTarget(options.dataDir, pointer)
+    } : undefined);
     this.#legacyStore = options.snapshotStore ?? (options.snapshotStoreFactory === undefined
       ? new RuntimeSnapshotStore(join(options.dataDir, 'runtime'), { clock: () => this.#clock().getTime() })
       : undefined);
@@ -155,7 +175,9 @@ export class RuntimeService {
       try {
         const candidate = this.#refreshSnapshot(input, current ?? this.#snapshotsByTarget.get(target.hash));
         if (candidate.repositoryId !== target.snapshotRepositoryId) throw new TypeError('Runtime snapshot compiler returned the wrong repository.');
-        published = store.publish(candidate);
+        published = current === undefined && !snapshotAbsent && store.recover !== undefined
+          ? store.recover(candidate)
+          : store.publish(candidate);
       }
       catch { throw new RuntimeServiceError('RUNTIME_UNAVAILABLE', 'Runtime snapshot refresh failed.'); }
       this.#snapshotsByTarget.set(target.hash, published);
@@ -253,7 +275,15 @@ export class RuntimeService {
     if (!existsSync(store.paths.manifest)) return undefined;
     try { return store.loadCurrent(); }
     catch (error) {
-      if (error instanceof RuntimeSnapshotStorageError) return undefined;
+      if (isSnapshotAvailabilityError(error)) return undefined;
+      throw error;
+    }
+  }
+
+  #optionalLastKnownGood(store: RuntimeSnapshotPersistence): RuntimeSnapshotV1 | undefined {
+    try { return store.loadLastKnownGood(); }
+    catch (error) {
+      if (isSnapshotAvailabilityError(error)) return undefined;
       throw error;
     }
   }
@@ -268,7 +298,7 @@ export class RuntimeService {
     let legacy: RuntimeSnapshotV1 | undefined;
     try { legacy = this.#legacyStore.loadCurrent(); }
     catch (error) {
-      if (error instanceof RuntimeSnapshotStorageError) return;
+      if (isSnapshotAvailabilityError(error)) return;
       throw error;
     }
     if (legacy.repositoryId !== target.snapshotRepositoryId) return;
@@ -294,22 +324,32 @@ export class RuntimeService {
   }
 
   #recordActiveTarget(target: RuntimeTarget): void {
-    if (!this.#usesProductionTargetStores) return;
-    try { writeActiveTarget(this.#dataDir, target); }
+    if (this.#activeTargetPointer === undefined) return;
+    try { this.#activeTargetPointer.write({ version: 1, kind: target.kind, hash: target.hash }); }
     catch (error) {
-      if (!isExpectedFilesystemError(error)) throw error;
+      if (!isPointerAvailabilityError(error)) throw error;
     }
   }
 
   #readActiveTarget(): RuntimeTarget | undefined {
-    if (!this.#usesProductionTargetStores) return undefined;
-    const pointer = readActiveTarget(this.#dataDir);
+    if (this.#activeTargetPointer === undefined) return undefined;
+    let pointer: { readonly kind: RuntimeTargetKind; readonly hash: string } | undefined;
+    try { pointer = parseActiveTargetPointer(this.#activeTargetPointer.read()); }
+    catch (error) {
+      if (isPointerAvailabilityError(error)) return undefined;
+      throw error;
+    }
     if (pointer === undefined) return undefined;
-    const store = this.#storeFactory(pointer.hash);
-    const current = this.#optionalCurrent(store);
-    if (current === undefined) return undefined;
-    const target = runtimeTarget(pointer.kind === 'global' ? undefined : current.repositoryId);
-    return target.hash === pointer.hash ? target : undefined;
+    try {
+      const store = this.#storeFactory(pointer.hash);
+      const snapshot = this.#optionalCurrent(store) ?? this.#optionalLastKnownGood(store);
+      if (snapshot === undefined) return undefined;
+      const target = runtimeTarget(pointer.kind === 'global' ? undefined : snapshot.repositoryId);
+      return target.hash === pointer.hash ? target : undefined;
+    } catch (error) {
+      if (isSnapshotAvailabilityError(error)) return undefined;
+      throw error;
+    }
   }
 
   #readRuntimeInput(path: string): RuntimeInput {
@@ -455,7 +495,10 @@ function git(repository: string, args: readonly string[], maxBytes: number): str
   });
 }
 
-function writeActiveTarget(dataDir: string, target: RuntimeTarget): void {
+function writeActiveTarget(
+  dataDir: string,
+  target: { readonly version: 1; readonly kind: RuntimeTargetKind; readonly hash: string }
+): void {
   const root = join(dataDir, 'runtime');
   ensurePrivateDirectory(root);
   const destination = join(root, 'active-target.json');
@@ -477,20 +520,19 @@ function writeActiveTarget(dataDir: string, target: RuntimeTarget): void {
   }
 }
 
-function readActiveTarget(dataDir: string): { readonly kind: RuntimeTarget['kind']; readonly hash: string } | undefined {
+function readActiveTarget(dataDir: string): { readonly version: 1; readonly kind: RuntimeTargetKind; readonly hash: string } | undefined {
   const path = join(dataDir, 'runtime', 'active-target.json');
   let descriptor: number | undefined;
   try {
     assertOwnerFile(path, ACTIVE_TARGET_MAX_BYTES);
     descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const stat = fstatSync(descriptor);
-    if (!stat.isFile() || stat.size > ACTIVE_TARGET_MAX_BYTES) return undefined;
+    if (!stat.isFile() || stat.size > ACTIVE_TARGET_MAX_BYTES) throw new RuntimeActiveTargetPointerError('Runtime active-target metadata is unsafe.');
     const value = JSON.parse(readFileSync(descriptor, 'utf8')) as unknown;
-    if (!isRecord(value) || !onlyKeys(value, ['hash', 'kind', 'version']) || value.version !== 1
-      || (value.kind !== 'global' && value.kind !== 'repository') || typeof value.hash !== 'string' || !/^[a-f0-9]{64}$/.test(value.hash)) return undefined;
-    return { kind: value.kind, hash: value.hash };
+    return parseActiveTargetPointer(value)!;
   } catch (error) {
-    if (isMissingFilesystemEntry(error) || error instanceof SyntaxError) return undefined;
+    if (isMissingFilesystemEntry(error)) return undefined;
+    if (error instanceof SyntaxError) throw new RuntimeActiveTargetPointerError('Runtime active-target metadata is malformed.', { cause: error });
     throw error;
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
@@ -508,18 +550,43 @@ function ensurePrivateDirectory(path: string): void {
 function assertOwnerFile(path: string, maxBytes: number): void {
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxBytes || (stat.mode & 0o077) !== 0) {
-    throw new RuntimeSnapshotStorageError('Runtime active-target metadata is unsafe.');
+    throw new RuntimeActiveTargetPointerError('Runtime active-target metadata is unsafe.');
   }
-  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) throw new RuntimeSnapshotStorageError('Runtime active-target metadata has a different owner.');
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) throw new RuntimeActiveTargetPointerError('Runtime active-target metadata has a different owner.');
+}
+
+function parseActiveTargetPointer(value: unknown): { readonly version: 1; readonly kind: RuntimeTargetKind; readonly hash: string } | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value) || !onlyKeys(value, ['hash', 'kind', 'version']) || value.version !== 1
+    || (value.kind !== 'global' && value.kind !== 'repository') || typeof value.hash !== 'string' || !/^[a-f0-9]{64}$/.test(value.hash)) {
+    throw new RuntimeActiveTargetPointerError('Runtime active-target metadata is malformed.');
+  }
+  return Object.freeze({ version: 1, kind: value.kind, hash: value.hash });
 }
 
 function isMissingFilesystemEntry(error: unknown): boolean {
-  return isRecord(error) && error.code === 'ENOENT';
+  return hasTrustedFilesystemCode(error, ['ENOENT']);
 }
 
 function isExpectedFilesystemError(error: unknown): boolean {
-  return isRecord(error) && typeof error.code === 'string'
-    && ['EACCES', 'EDQUOT', 'EIO', 'EMFILE', 'ENFILE', 'ENOSPC', 'EPERM', 'EROFS'].includes(error.code);
+  return hasTrustedFilesystemCode(error, ['EACCES', 'EDQUOT', 'EIO', 'EMFILE', 'ENFILE', 'ENOSPC', 'EPERM', 'EROFS']);
+}
+
+function hasTrustedFilesystemCode(error: unknown, allowedCodes: readonly string[]): error is NodeJS.ErrnoException {
+  if (!(error instanceof Error) || error instanceof TypeError || error instanceof SyntaxError) return false;
+  const systemError = error as NodeJS.ErrnoException;
+  if (typeof systemError.errno !== 'number' || typeof systemError.syscall !== 'string') return false;
+  try {
+    return getSystemErrorName(systemError.errno) === systemError.code && allowedCodes.includes(systemError.code ?? '');
+  } catch { return false; }
+}
+
+function isSnapshotAvailabilityError(error: unknown): boolean {
+  return error instanceof RuntimeSnapshotStorageError || error instanceof RuntimeSnapshotValidationError;
+}
+
+function isPointerAvailabilityError(error: unknown): boolean {
+  return error instanceof RuntimeActiveTargetPointerError || isExpectedFilesystemError(error);
 }
 
 function isMissingGitPath(error: unknown): boolean {

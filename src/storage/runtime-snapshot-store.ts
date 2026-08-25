@@ -8,7 +8,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 import { getSystemErrorName } from 'node:util';
 
 import {
-  MAX_RUNTIME_SNAPSHOT_BYTES, parseSerializedRuntimeSnapshot, serializeRuntimeSnapshot,
+  MAX_RUNTIME_SNAPSHOT_BYTES, parseSerializedRuntimeSnapshot, RuntimeSnapshotValidationError, serializeRuntimeSnapshot,
   type RuntimeSnapshotV1
 } from '../runtime/snapshot.js';
 
@@ -121,12 +121,28 @@ export class RuntimeSnapshotStore {
   }
 
   publish(snapshot: RuntimeSnapshotV1): RuntimeSnapshotV1 { return this.publishSerialized(serializeRuntimeSnapshot(snapshot)); }
+  recover(snapshot: RuntimeSnapshotV1): RuntimeSnapshotV1 { return this.recoverSerialized(serializeRuntimeSnapshot(snapshot)); }
   rebuild(compiler: () => RuntimeSnapshotV1): RuntimeSnapshotV1 { return this.publish(compiler()); }
 
   publishSerialized(serialized: string): RuntimeSnapshotV1 {
     const expected = parseSerializedRuntimeSnapshot(serialized);
     this.#ensurePrivateDirectory();
     return this.#withWriterLock(() => this.#publishLocked(serialized, expected));
+  }
+
+  recoverSerialized(serialized: string): RuntimeSnapshotV1 {
+    const expected = parseSerializedRuntimeSnapshot(serialized);
+    this.#ensurePrivateDirectory();
+    return this.#withWriterLock(() => {
+      try {
+        const manifest = this.#readOptionalManifest();
+        if (manifest !== undefined) this.#readSnapshotFile(resolveReference(this.paths.root, manifest.current), manifest.current.checksum);
+      } catch (error) {
+        if (!isRecoverableSnapshotError(error)) throw error;
+        this.#restoreLastKnownGoodManifest();
+      }
+      return this.#publishLocked(serialized, expected);
+    });
   }
 
   #publishLocked(serialized: string, expected: RuntimeSnapshotV1): RuntimeSnapshotV1 {
@@ -220,6 +236,42 @@ export class RuntimeSnapshotStore {
     if (hadPriorManifest) renameSync(this.paths.rollbackManifest, this.paths.manifest);
     else this.#removeCandidate(this.paths.manifest);
     this.#syncDirectory();
+  }
+
+  #restoreLastKnownGoodManifest(): void {
+    let referenceToRecover: ManifestReference | undefined;
+    try {
+      const rollback = this.#readOptionalRollbackManifest();
+      if (rollback !== undefined) {
+        this.#readSnapshotFile(resolveReference(this.paths.root, rollback.current), rollback.current.checksum);
+        referenceToRecover = rollback.current;
+      }
+    } catch (error) {
+      if (!isRecoverableSnapshotError(error)) throw error;
+    }
+    if (referenceToRecover === undefined) {
+      try {
+        const manifest = this.#readOptionalManifest();
+        if (manifest?.lastKnownGood !== undefined) {
+          this.#readSnapshotFile(resolveReference(this.paths.root, manifest.lastKnownGood), manifest.lastKnownGood.checksum);
+          referenceToRecover = manifest.lastKnownGood;
+        }
+      } catch (error) {
+        if (!isRecoverableSnapshotError(error)) throw error;
+      }
+    }
+    if (referenceToRecover === undefined) throw new RuntimeSnapshotStorageError('No valid last-known-good runtime snapshot is available for recovery.');
+
+    const priorFingerprint = this.#manifestFingerprint();
+    const candidate = this.#candidate('recovery-manifest');
+    try {
+      this.#writeFsyncedCandidate(candidate, serializeManifest({ version: 1, current: referenceToRecover }), MAX_MANIFEST_BYTES);
+      this.#readManifestFile(candidate);
+      this.#assertSafeTarget(this.paths.manifest, MAX_MANIFEST_BYTES, true);
+      if (this.#manifestFingerprint() !== priorFingerprint) throw new RuntimeSnapshotConflictError('Runtime snapshot manifest changed during recovery.');
+      renameSync(candidate, this.paths.manifest);
+      this.#syncDirectory();
+    } finally { this.#removeCandidate(candidate); }
   }
 
   #cleanupAfterCommit(manifest: RuntimeSnapshotManifestV1): void {
@@ -664,6 +716,10 @@ function isPidAlive(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0) return true;
   try { process.kill(pid, 0); return true; }
   catch (error) { return !hasTrustedNodeErrorCode(error, ['ESRCH']); }
+}
+
+function isRecoverableSnapshotError(error: unknown): boolean {
+  return error instanceof RuntimeSnapshotStorageError || error instanceof RuntimeSnapshotValidationError;
 }
 
 function blockingWait(milliseconds: number): void {

@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { runtimeTargetSnapshotDirectory, RuntimeService, RuntimeServiceError } from '../src/application/runtime-service.js';
+import {
+  runtimeTargetSnapshotDirectory, RuntimeActiveTargetPointerError, RuntimeService, RuntimeServiceError
+} from '../src/application/runtime-service.js';
 import { runCli } from '../src/cli.js';
 import type { RuntimeRule } from '../src/runtime/contracts.js';
-import { compileRuntimeSnapshot } from '../src/runtime/snapshot.js';
+import { compileRuntimeSnapshot, RuntimeSnapshotValidationError } from '../src/runtime/snapshot.js';
 import { RuntimeSnapshotStore } from '../src/storage/runtime-snapshot-store.js';
 
 const action = {
@@ -226,5 +228,112 @@ test('counts all profiles for one repository as one LRU target', () => {
     service.evaluate({ inputPath: inputA, profileId: 'learning' });
 
     assert.equal(service.evaluate({ inputPath: inputB, profileId: 'normal' }).status.fallbackSource, 'memory');
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('restart defers corrupt current recovery to last-known-good for status and evaluation', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-runtime-status-'));
+  const input = join(dataDir, 'action.json');
+  try {
+    writeFileSync(input, JSON.stringify(action));
+    let empty = false;
+    const emptySnapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:01.000Z' });
+    const service = new RuntimeService({ dataDir, refreshSnapshot: (runtimeInput) => empty
+      ? emptySnapshot
+      : blockingSnapshot(runtimeInput.repositoryId) });
+    assert.equal(service.evaluate({ inputPath: input }).outcome, 'BLOCK');
+    empty = true;
+    const current = service.evaluate({ inputPath: input, refresh: true });
+    assert.equal(current.outcome, 'ALLOW');
+    const store = new RuntimeSnapshotStore(runtimeTargetSnapshotDirectory(dataDir, 'repo-a'), { clock: Date.now });
+    writeFileSync(store.generationPath(emptySnapshot.checksum), '{"corrupt":true}', { mode: 0o600 });
+
+    const restarted = new RuntimeService({ dataDir });
+    assert.equal(restarted.status().fallbackSource, 'last-known-good');
+    const recovered = new RuntimeService({ dataDir }).evaluate({ inputPath: input });
+    assert.equal(recovered.outcome, 'BLOCK');
+    assert.equal(recovered.status.fallbackSource, 'last-known-good');
+
+    const refreshed = new RuntimeService({
+      dataDir,
+      refreshSnapshot: () => compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:02.000Z' })
+    }).evaluate({ inputPath: input, refresh: true });
+    assert.equal(refreshed.outcome, 'ALLOW');
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('explicit refresh proceeds when orchestration cannot validate current', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-runtime-status-'));
+  const input = join(dataDir, 'action.json');
+  try {
+    writeFileSync(input, JSON.stringify(action));
+    const snapshot = blockingSnapshot();
+    let published = false;
+    const store = {
+      paths: { root: join(dataDir, 'runtime'), manifest: join(dataDir, 'runtime', 'manifest.json'), rollbackManifest: join(dataDir, 'runtime', 'rollback-manifest.json') },
+      loadCurrent: () => { throw new RuntimeSnapshotValidationError('corrupt current'); },
+      loadLastKnownGood: () => snapshot,
+      publish: (candidate: typeof snapshot) => { published = true; return candidate; }
+    };
+    mkdirSync(store.paths.root);
+    writeFileSync(store.paths.manifest, '{}', { mode: 0o600 });
+    const service = new RuntimeService({ dataDir, snapshotStore: store, refreshSnapshot: (runtimeInput, current) => {
+      assert.equal(current, undefined);
+      return compileRuntimeSnapshot({ repositoryId: runtimeInput.repositoryId!, generatedAt: '2026-08-25T00:00:02.000Z' });
+    } });
+
+    assert.equal(service.evaluate({ inputPath: input, refresh: true }).outcome, 'ALLOW');
+    assert.equal(published, true);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('active-target pointer corruption and unsafe metadata cannot alter runtime decisions', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-runtime-status-'));
+  const input = join(dataDir, 'action.json');
+  const pointer = join(dataDir, 'runtime', 'active-target.json');
+  try {
+    writeFileSync(input, JSON.stringify(action));
+    assert.equal(new RuntimeService({ dataDir, refreshSnapshot: () => blockingSnapshot() }).evaluate({ inputPath: input }).outcome, 'BLOCK');
+    for (const mutate of [
+      () => writeFileSync(pointer, '{bad json', { mode: 0o600 }),
+      () => writeFileSync(pointer, 'x'.repeat(2_000), { mode: 0o600 }),
+      () => { writeFileSync(pointer, '{}', { mode: 0o644 }); chmodSync(pointer, 0o644); },
+      () => symlinkSync(input, pointer)
+    ]) {
+      try { unlinkSync(pointer); } catch {}
+      mutate();
+      assert.equal(new RuntimeService({ dataDir }).status().health, 'degraded');
+      assert.equal(new RuntimeService({ dataDir }).evaluate({ inputPath: input }).outcome, 'BLOCK');
+    }
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('pointer failures are classified narrowly and never block evaluation or refresh', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-runtime-status-'));
+  const input = join(dataDir, 'action.json');
+  try {
+    writeFileSync(input, JSON.stringify(action));
+    const snapshot = blockingSnapshot();
+    const store = {
+      paths: { root: dataDir, manifest: join(dataDir, 'manifest.json'), rollbackManifest: join(dataDir, 'rollback-manifest.json') },
+      loadCurrent: () => snapshot,
+      loadLastKnownGood: () => snapshot,
+      publish: (candidate: typeof snapshot) => candidate
+    };
+    writeFileSync(store.paths.manifest, '{}', { mode: 0o600 });
+    const classified = new RuntimeService({ dataDir, snapshotStore: store, activeTargetPointer: {
+      read: () => { throw new RuntimeActiveTargetPointerError('unavailable'); },
+      write: () => { throw new RuntimeActiveTargetPointerError('unavailable'); }
+    }, refreshSnapshot: () => snapshot });
+    assert.equal(classified.evaluate({ inputPath: input, refresh: true }).outcome, 'BLOCK');
+
+    const programming = new RuntimeService({ dataDir, snapshotStore: store, activeTargetPointer: {
+      read: () => { throw new TypeError('programming failure'); }, write: () => undefined
+    } });
+    assert.throws(() => programming.status(), TypeError);
+    const shaped = new RuntimeService({ dataDir, snapshotStore: store, activeTargetPointer: {
+      read: () => { throw Object.assign(new Error('not a system error'), { code: 'EIO' }); }, write: () => undefined
+    } });
+    assert.throws(() => shaped.status(), /not a system error/);
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
