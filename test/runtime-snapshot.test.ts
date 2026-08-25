@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -281,6 +281,14 @@ test('streaming recovery cleanup bounds attacker-controlled directory reads', ()
   assert.doesNotThrow(() => recovering.recover(second, 'repo-a'));
   assert.equal(entriesRead, 259);
   assert.equal(store(root).loadCurrent().rules[0]?.id, 'second');
+});
+
+test('streaming recovery cleanup preserves a checksum-shaped symlink at the entry boundary', () => {
+  assertChecksumShapedArtifactSurvivesBoundary('symlink');
+});
+
+test('streaming recovery cleanup preserves a checksum-shaped directory at the entry boundary', () => {
+  assertChecksumShapedArtifactSurvivesBoundary('directory');
 });
 
 test('failed candidate validation and symlink state paths preserve current', () => {
@@ -676,6 +684,26 @@ test('stale reclaim claim release suppresses filesystem errors and propagates pr
     clock: () => 100_000, staleLockMs: 10, beforeReclaimClaimRelease: () => { throw new TypeError('claim release type bug'); }
   }).publish(snapshot), TypeError);
 });
+
+function assertChecksumShapedArtifactSurvivesBoundary(kind: 'symlink' | 'directory'): void {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
+  const third = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:02:00.000Z', repositoryRules: [rule('third')] });
+  const snapshotStore = store(root);
+  snapshotStore.publish(first);
+  writeFileSync(snapshotStore.paths.manifest, '{broken', { mode: 0o600 });
+  for (let index = 0; index < 253; index += 1) writeFileSync(join(root, `unrelated-${String(index).padStart(3, '0')}`), 'x');
+  const artifact = join(root, `generation-${'f'.repeat(64)}.json`);
+  if (kind === 'symlink') symlinkSync(join(root, 'unrelated-000'), artifact);
+  else mkdirSync(artifact, { mode: 0o700 });
+
+  snapshotStore.recover(second, 'repo-a');
+  assert.equal(kind === 'symlink' ? lstatSync(artifact).isSymbolicLink() : lstatSync(artifact).isDirectory(), true);
+  writeFileSync(snapshotStore.paths.manifest, '{broken-again', { mode: 0o600 });
+  assert.doesNotThrow(() => snapshotStore.recover(third, 'repo-a'));
+  assert.equal(kind === 'symlink' ? lstatSync(artifact).isSymbolicLink() : lstatSync(artifact).isDirectory(), true);
+}
 
 async function waitForFile(path: string): Promise<void> {
   const deadline = Date.now() + 5_000;

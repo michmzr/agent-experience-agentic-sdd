@@ -369,8 +369,10 @@ export class RuntimeSnapshotStore {
         entriesRead += 1;
         this.#onDirectoryEntryRead('state');
         if (entry.name === '.writer-lock') ownedWriterLockObserved = true;
-        if (generationPattern.test(entry.name) && !retained.has(entry.name)) {
-          this.#removeCandidate(resolve(this.paths.root, entry.name));
+        const artifact = resolve(this.paths.root, entry.name);
+        if (generationPattern.test(entry.name) && !retained.has(entry.name)
+          && this.#isOwnerSafeGenerationFile(artifact, entry)) {
+          this.#removeCandidate(artifact);
           removed += 1;
         }
         if (entriesRead > MAX_STATE_DIRECTORY_ENTRIES + MAX_RECOVERY_CLEANUP_TRANSIENT_ENTRIES) {
@@ -382,6 +384,24 @@ export class RuntimeSnapshotStore {
     if (steadyStateEntries > MAX_STATE_DIRECTORY_ENTRIES) {
       throw new RuntimeSnapshotDirectoryLimitError('state', 'Runtime snapshot state directory entry limit exceeded.');
     }
+  }
+
+  #isOwnerSafeGenerationFile(path: string, entry: Dirent): boolean {
+    if (!entry.isFile()) return false;
+    let descriptor: number | undefined;
+    try {
+      const observed = lstatSync(path);
+      if (!observed.isFile() || observed.isSymbolicLink() || observed.size > MAX_RUNTIME_SNAPSHOT_BYTES
+        || (observed.mode & 0o077) !== 0 || (typeof process.getuid === 'function' && observed.uid !== process.getuid())) return false;
+      descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const reopened = fstatSync(descriptor);
+      return reopened.isFile() && reopened.dev === observed.dev && reopened.ino === observed.ino
+        && reopened.size <= MAX_RUNTIME_SNAPSHOT_BYTES && (reopened.mode & 0o077) === 0
+        && (typeof process.getuid !== 'function' || reopened.uid === process.getuid());
+    } catch (error) {
+      if (isMissing(error) || hasTrustedNodeErrorCode(error, ['ENOENT', 'ELOOP'])) return false;
+      throw error;
+    } finally { if (descriptor !== undefined) closeSync(descriptor); }
   }
 
   #readOptionalRollbackManifest(): RuntimeSnapshotManifestV1 | undefined {
