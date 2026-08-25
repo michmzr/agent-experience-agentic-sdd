@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import type { KnowledgeState, LessonKind } from '../domain/types.js';
+import { assertStructuredArgumentsSafe } from '../privacy/structured-arguments.js';
 import { assertDurableTextSafe } from '../review/sanitizer.js';
 import type { RuntimeSignature } from '../runtime/contracts.js';
 import { normalizeRuntimePath } from '../runtime/matcher.js';
@@ -202,9 +203,14 @@ function parseDirectiveSignature(value: unknown): RuntimeSignature {
       || (value.path !== undefined && !canonicalDirectivePath(value.path))) {
       throw new Error('Invalid runtime action directive.');
     }
+    const arguments_ = value.arguments === undefined ? undefined : [...value.arguments] as string[];
+    if (arguments_ !== undefined) {
+      try { assertStructuredArgumentsSafe(arguments_, value.tool as string, value.action as string); }
+      catch { throw new Error('Runtime directive arguments contain credential-like or private material.'); }
+    }
     return deepFreeze({
       kind: 'action', tool: value.tool as string, action: value.action as string,
-      ...(value.arguments === undefined ? {} : { arguments: [...value.arguments] as string[] }),
+      ...(arguments_ === undefined ? {} : { arguments: arguments_ }),
       ...(value.path === undefined ? {} : { path: value.path as string })
     });
   }

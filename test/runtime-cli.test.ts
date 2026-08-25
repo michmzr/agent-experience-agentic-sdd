@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 import { runCli } from '../src/cli.js';
-import { createLocalGitContentAdapter, runtimeTargetSnapshotDirectory, RuntimeService } from '../src/application/runtime-service.js';
+import { createLocalGitContentAdapter, parseGitTreeListing, runtimeTargetSnapshotDirectory, RuntimeService } from '../src/application/runtime-service.js';
 import type { RuntimeRule } from '../src/runtime/contracts.js';
 import { compileRuntimeSnapshot } from '../src/runtime/snapshot.js';
 import { RuntimeSnapshotStore } from '../src/storage/runtime-snapshot-store.js';
@@ -290,3 +290,53 @@ test('preflights trusted Git blob sizes and path counts before reading content',
   assert.throws(() => adapter.listFiles(commit, '.', 1), /path limit/i);
   assert.equal(adapter.readFile(commit, 'two.txt', 10), 'second');
 }));
+
+test('rejects trusted-ref symlink modes for the index and Markdown before materializing blobs', () => withDirectory((directory) => {
+  for (const target of ['index', 'markdown'] as const) {
+    const repository = join(directory, `repository-${target}`);
+    const input = join(directory, `${target}-knowledge.json`);
+    mkdirSync(repository);
+    writeFileSync(input, JSON.stringify({
+      identity: 'fact', repositoryScope: 'repository:one', kind: 'project-fact', state: 'verified',
+      applicability: { paths: [], tags: [], tools: [] }, instructionOrigin: 'code-tool-confirmed', supersedes: [],
+      title: 'Trusted fact', context: 'Repository context.', lesson: 'Use trusted files.',
+      recommendedBehavior: 'Keep trusted files regular.', evidenceSummary: 'Verified by repository tests.',
+      evidence: [{ kind: 'code-or-tool', summary: 'Repository tests passed.', deterministic: true }]
+    }));
+    assert.equal(runCli(['knowledge', 'promote', '--repository', repository, '--input', input, '--data-dir', directory]).exitCode, 0);
+    execFileSync('git', ['init'], { cwd: repository });
+    execFileSync('git', ['config', 'user.email', 'test@example.test'], { cwd: repository });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repository });
+    const path = target === 'index'
+      ? join(repository, 'agent-experience', 'index.json')
+      : join(repository, 'agent-experience', 'knowledge', 'fact.md');
+    rmSync(path);
+    symlinkSync(target === 'index' ? '../outside-index' : '../../outside-markdown', path);
+    execFileSync('git', ['add', 'agent-experience'], { cwd: repository });
+    execFileSync('git', ['commit', '-m', `add symlinked ${target}`], { cwd: repository });
+    const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim();
+    rmSync(join(repository, 'agent-experience'), { recursive: true, force: true });
+
+    assert.equal(existsSync(join(repository, 'agent-experience')), false);
+    assert.throws(() => createLocalGitContentAdapter(repository).listFiles(commit, 'agent-experience', 1_002), /mode|blob|entry|unsafe/i);
+    const result = runCli(['knowledge', 'validate', '--repository', repository, '--trusted-ref', 'HEAD', '--json', '--data-dir', directory]);
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      error: { code: 'KNOWLEDGE_VALIDATION_FAILED', message: 'Repository knowledge validation failed.' }
+    });
+  }
+}));
+
+test('rejects non-blob, duplicate, unsafe, and excess bounded Git tree metadata', () => {
+  const object = 'a'.repeat(40);
+  const regular = `100644 blob ${object}\tagent-experience/index.json\0`;
+  assert.deepEqual(parseGitTreeListing(regular, 1).map(({ path }) => path), ['agent-experience/index.json']);
+  for (const listing of [
+    `120000 blob ${object}\tagent-experience/index.json\0`,
+    `160000 commit ${object}\tagent-experience/knowledge/fact.md\0`,
+    `040000 tree ${object}\tagent-experience/knowledge/fact.md\0`,
+    `100644 blob ${object}\t../agent-experience/index.json\0`,
+    `${regular}${regular}`
+  ]) assert.throws(() => parseGitTreeListing(listing, 2), /blob|duplicate|unsafe|mode/i);
+  assert.throws(() => parseGitTreeListing(`${regular}${regular.replace('index', 'other')}`, 1), /limit/i);
+});

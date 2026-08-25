@@ -525,13 +525,17 @@ export function createLocalGitContentAdapter(repository: string): GitContentAdap
     },
     readFile(commit: string, path: string, maxBytes: number): string | undefined {
       if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > MAX_INPUT_BYTES) throw new Error('Invalid Git knowledge file limit.');
-      const object = `${commit}:${path}`;
+      assertGitCommit(commit);
+      if (!safeGitPath(path)) throw new Error('Git knowledge path is unsafe.');
+      const entry = gitTreeEntries(repository, commit, path, 2).find((candidate) => candidate.path === path);
+      if (entry === undefined) return undefined;
+      assertExpectedGitBlob(entry);
       try {
-        const rawSize = git(repository, ['cat-file', '-s', object], 128).trim();
+        const rawSize = git(repository, ['cat-file', '-s', entry.object], 128).trim();
         if (!/^(?:0|[1-9]\d*)$/.test(rawSize) || Number(rawSize) > maxBytes) {
           throw new Error('Git knowledge file resource limit exceeded.');
         }
-        const content = git(repository, ['cat-file', 'blob', object], maxBytes);
+        const content = git(repository, ['cat-file', 'blob', entry.object], maxBytes);
         if (Buffer.byteLength(content, 'utf8') > maxBytes) throw new Error('Git knowledge file resource limit exceeded.');
         return content;
       }
@@ -539,12 +543,62 @@ export function createLocalGitContentAdapter(repository: string): GitContentAdap
     },
     listFiles(commit: string, prefix: string, maxPaths: number): readonly string[] {
       if (!Number.isSafeInteger(maxPaths) || maxPaths < 0 || maxPaths > MAX_GIT_PATHS) throw new Error('Invalid Git knowledge path limit.');
-      const paths = git(repository, ['ls-tree', '-r', '--name-only', commit, ...(prefix ? ['--', prefix] : [])], MAX_GIT_LIST_BYTES)
-        .split('\n').filter(Boolean);
-      if (paths.length > maxPaths) throw new Error('Git knowledge path limit exceeded.');
-      return paths;
+      assertGitCommit(commit);
+      const normalizedPrefix = prefix.endsWith('/') ? prefix.slice(0, -1) : prefix;
+      if (normalizedPrefix !== '' && normalizedPrefix !== '.' && !safeGitPath(normalizedPrefix)) throw new Error('Git knowledge prefix is unsafe.');
+      return gitTreeEntries(repository, commit, normalizedPrefix, maxPaths).map(({ path }) => path);
     }
   };
+}
+
+export interface GitTreeEntry {
+  readonly mode: string;
+  readonly type: string;
+  readonly object: string;
+  readonly path: string;
+}
+
+function gitTreeEntries(repository: string, commit: string, prefix: string, maxPaths: number): readonly GitTreeEntry[] {
+  const output = git(repository, [
+    'ls-tree', '-r', '-z', '--full-tree', commit, ...(prefix && prefix !== '.' ? ['--', prefix] : [])
+  ], MAX_GIT_LIST_BYTES);
+  return parseGitTreeListing(output, maxPaths);
+}
+
+export function parseGitTreeListing(output: string, maxPaths: number): readonly GitTreeEntry[] {
+  if (!Number.isSafeInteger(maxPaths) || maxPaths < 0 || maxPaths > MAX_GIT_PATHS) throw new Error('Invalid Git knowledge path limit.');
+  if (Buffer.byteLength(output, 'utf8') > MAX_GIT_LIST_BYTES) throw new Error('Git tree output resource limit exceeded.');
+  if (output.length === 0) return [];
+  if (!output.endsWith('\0')) throw new Error('Git tree output is malformed.');
+  const records = output.slice(0, -1).split('\0');
+  if (records.length > maxPaths) throw new Error('Git knowledge path limit exceeded.');
+  const paths = new Set<string>();
+  return records.map((record) => {
+    const match = /^([0-9]{6}) ([a-z]+) ([a-f0-9]{40,64})\t([^\0]+)$/.exec(record);
+    if (match === null) throw new Error('Git tree output is malformed.');
+    const entry = { mode: match[1]!, type: match[2]!, object: match[3]!, path: match[4]! };
+    if (!safeGitPath(entry.path) || paths.has(entry.path)) throw new Error('Git tree contains an unsafe or duplicate path.');
+    paths.add(entry.path);
+    assertExpectedGitBlob(entry);
+    return Object.freeze(entry);
+  });
+}
+
+function assertExpectedGitBlob(entry: GitTreeEntry): void {
+  if (entry.type !== 'blob' || !/^(?:100644|100755)$/.test(entry.mode)) {
+    throw new Error('Git knowledge tree contains a non-regular blob entry.');
+  }
+  if ((entry.path === 'agent-experience/index.json' || /^agent-experience\/knowledge\/[^/]+\.md$/.test(entry.path))
+    && entry.mode !== '100644') throw new Error('Git knowledge file mode is invalid.');
+}
+
+function assertGitCommit(value: string): void {
+  if (!/^[a-f0-9]{40,64}$/.test(value)) throw new Error('Git knowledge commit is invalid.');
+}
+
+function safeGitPath(value: string): boolean {
+  return value.length > 0 && Buffer.byteLength(value, 'utf8') <= 512 && !value.startsWith('/') && !value.includes('\\')
+    && !/[\u0000-\u001F\u007F]/.test(value) && value.split('/').every((part) => part !== '' && part !== '.' && part !== '..');
 }
 
 function git(repository: string, args: readonly string[], maxBytes: number): string {

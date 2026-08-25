@@ -89,6 +89,66 @@ test('rejects malformed, noncanonical, private, and oversized runtime directives
   }
 });
 
+test('uses capture-equivalent structured argv credential classification for runtime directives', () => {
+  const cases = [
+    { tool: 'tool', action: 'run', arguments: ['--token', 'value'] },
+    { tool: 'tool', action: 'run', arguments: ['--token=value'] },
+    { tool: 'tool', action: 'run', arguments: ['--password'] },
+    { tool: 'tool', action: 'run', arguments: ['--apiKey', 'value'] },
+    { tool: 'tool', action: 'run', arguments: ['--apikey=value'] },
+    { tool: 'tool', action: 'run', arguments: ['OPENAI_API_KEY=value'] },
+    { tool: 'tool', action: 'run', arguments: ['PREFIX_CLIENTSECRET=value'] },
+    { tool: 'curl', action: 'request', arguments: ['-H', 'Authorization:Bearer value'] },
+    { tool: 'redis-cli', action: 'connect', arguments: ['-avalue'] },
+    { tool: 'redis-cli', action: 'connect', arguments: ['--passvalue'] },
+    { tool: 'docker', action: 'login', arguments: ['-pvalue'] },
+    { tool: 'curl', action: 'request', arguments: ['-uuser:value'] },
+    { tool: 'mysql', action: 'connect', arguments: ['-pvalue'] }
+  ];
+  for (const signature of cases) {
+    const repository = root();
+    assert.throws(
+      () => writeSharedKnowledge(repository, [{
+        ...document(), applicability: { paths: [], tags: [], tools: [signature.tool] },
+        runtimeDirective: { effect: 'conflict', signature: { kind: 'action', ...signature } }
+      }]),
+      (error: unknown) => error instanceof Error && /credential|private/i.test(error.message) && !error.message.includes('value')
+    );
+  }
+});
+
+test('round-trips benign structured argv controls without weakening credential classification', () => {
+  const cases = [
+    { identity: 'jq-key', tool: 'jq', action: 'query', arguments: ['key', 'value'] },
+    { identity: 'sort-key', tool: 'sort', action: 'sort', arguments: ['--key=1', 'file.txt'] },
+    { identity: 'ssh-control', tool: 'ssh', action: 'connect', arguments: ['-o', 'StrictHostKeyChecking=yes', 'host'] }
+  ];
+  const repository = root();
+  const documents = cases.map(({ identity, tool, action, arguments: arguments_ }) => ({
+    ...document(), identity, applicability: { paths: [], tags: [], tools: [tool] },
+    runtimeDirective: { effect: 'context' as const, signature: { kind: 'action' as const, tool, action, arguments: arguments_ } }
+  }));
+  writeSharedKnowledge(repository, documents);
+  assert.deepEqual(readSharedKnowledge(repository), documents);
+});
+
+test('rejects credential-bearing structured argv when reading an existing version 3 generation', () => {
+  const repository = root();
+  writeSharedKnowledge(repository, [{
+    ...document(), applicability: { paths: [], tags: [], tools: ['tool'] },
+    runtimeDirective: { effect: 'conflict', signature: { kind: 'action', tool: 'tool', action: 'run', arguments: ['--safe'] } }
+  }]);
+  const indexPath = join(repository, 'agent-experience', 'index.json');
+  const index = JSON.parse(readFileSync(indexPath, 'utf8')) as { entries: Array<{ runtimeDirective: { signature: { arguments: string[] } } }> };
+  index.entries[0]!.runtimeDirective.signature.arguments = ['--token', 'read-secret-marker'];
+  writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`);
+
+  assert.throws(
+    () => readSharedKnowledge(repository),
+    (error: unknown) => error instanceof Error && /credential|private/i.test(error.message) && !error.message.includes('read-secret-marker')
+  );
+});
+
 test('reads a version 1 index and legacy Markdown', () => {
   const repository = root();
   const base = join(repository, 'agent-experience');

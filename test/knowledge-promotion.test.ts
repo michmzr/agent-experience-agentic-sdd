@@ -71,6 +71,21 @@ test('promotion preserves a validated structured runtime directive without deriv
   assert.equal(entries.find(({ identity }) => identity === 'prose-only')?.runtimeDirective, undefined);
 });
 
+test('promotion rejects credential-bearing structured argv without leaking its value', () => {
+  const repository = mkdtempSync(join(tmpdir(), 'ael-promotion-'));
+  const marker = 'promotion-secret-marker';
+  assert.throws(
+    () => promoteKnowledge(repository, candidate({
+      applicability: { paths: [], tags: [], tools: ['curl'] },
+      runtimeDirective: {
+        effect: 'conflict',
+        signature: { kind: 'action', tool: 'curl', action: 'request', arguments: ['--header', `Authorization:Bearer ${marker}`] }
+      }
+    })),
+    (error: unknown) => error instanceof Error && /credential|private/i.test(error.message) && !error.message.includes(marker)
+  );
+});
+
 test('promotion upserts without removing existing branch-local review files', () => {
   const repository = mkdtempSync(join(tmpdir(), 'ael-promotion-'));
   promoteKnowledge(repository, candidate({ identity: 'first' }));

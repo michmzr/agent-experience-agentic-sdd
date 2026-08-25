@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import type { SessionId } from '../domain/types.js';
+import { assertStructuredArgumentsSafe, containsCredentialMaterial } from '../privacy/structured-arguments.js';
 import type { RuntimeSignature } from '../runtime/contracts.js';
 import { normalizeRuntimePath } from '../runtime/matcher.js';
 import { assertDurableTextSafe } from '../review/sanitizer.js';
@@ -19,17 +20,6 @@ const signatureTokenPattern = /^[a-z0-9][a-z0-9._:/-]{0,127}$/;
 const argumentPattern = /^[A-Za-z0-9_./:@%+=,~\\-]+$/;
 const MAX_CAPTURE_ARGUMENT_LENGTH = 512;
 const MAX_CAPTURE_ARGUMENT_TEXT = 8_192;
-const credentialPatterns: readonly RegExp[] = [
-  /-----BEGIN (?:[A-Z0-9 ]* )?PRIVATE KEY(?: BLOCK)?-----/i,
-  /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/,
-  /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
-  /\bsk-[A-Za-z0-9_-]{20,}\b/,
-  /\bBearer(?:[_-]?token)?\s*(?:=|:)?\s*\S+/i,
-  /\bBasic\s+\S+/i,
-  /\b(?:token|access[_-]?token|refresh[_-]?token|api[_-]?key|private[_-]?key|password|passwd|secret|client[_-]?secret)\s*[:=]\s*\S+/i,
-  /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@/i
-];
 
 export function normalizeMappedCapture(input: MappedCaptureRecord): NormalizedCaptureEvent {
   if (input.source !== 'codex' && input.source !== 'claude-code' && input.source !== 'cursor') throw new TypeError('Unsupported capture source.');
@@ -187,112 +177,9 @@ function stringArray(value: unknown, tool: string, action: string): string[] {
     }
     return argument;
   });
-  const joined = arguments_.join(' ');
-  assertNoCredentialMaterial(joined, 'arguments');
-  assertArgumentsClassifiedSafe(arguments_, tool, action);
+  try { assertStructuredArgumentsSafe(arguments_, tool, action); }
+  catch { throw new TypeError('Capture arguments contain credential-like or private material.'); }
   return arguments_;
-}
-
-const sensitiveNameTokens = new Set([
-  'auth', 'authorization', 'bearer', 'token', 'secret', 'password', 'passwd', 'passphrase', 'credential', 'credentials', 'cookie', 'userinfo'
-]);
-const sensitiveCollapsedTokens = new Set([
-  'apikey', 'accesskey', 'secretkey', 'privatekey', 'clientsecret', 'sessiontoken',
-  'accesstoken', 'refreshtoken', 'authtoken', 'oauth2bearer'
-]);
-
-function assertArgumentsClassifiedSafe(arguments_: readonly string[], tool: string, action: string): void {
-  for (let index = 0; index < arguments_.length; index += 1) {
-    const argument = arguments_[index]!;
-    if (argument.startsWith('--')) {
-      const [name, attached] = argument.slice(2).split('=', 2);
-      if (sensitiveOptionName(name!)) rejectClassifiedArguments();
-      if (userValueOption(name!) && ((attached?.length ?? 0) > 0 || (arguments_[index + 1] !== undefined && !arguments_[index + 1]!.startsWith('-')))) {
-        rejectClassifiedArguments();
-      }
-    }
-    if (/^[A-Za-z][A-Za-z0-9_]*$/.test(argument) && arguments_[index + 1] !== undefined
-      && (sensitiveOptionName(argument) || userValueOption(argument) || (looksLikeEnvironmentName(argument) && sensitiveEnvironmentSuffix(argument)))) {
-      rejectClassifiedArguments();
-    }
-    const equals = argument.indexOf('=');
-    if (equals > 0) {
-      const assignmentName = argument.slice(0, equals).replace(/^-+/, '');
-      if (sensitiveOptionName(assignmentName) || userValueOption(assignmentName)
-        || (looksLikeEnvironmentName(assignmentName) && sensitiveEnvironmentSuffix(assignmentName))) {
-        rejectClassifiedArguments();
-      }
-    }
-    if (sensitiveHeaderName(argument)) rejectClassifiedArguments();
-    if (/^(?:-H|--header)$/i.test(argument) && arguments_[index + 1] !== undefined && sensitiveHeaderName(arguments_[index + 1]!)) {
-      rejectClassifiedArguments();
-    }
-  }
-
-  const command = tool === 'shell' ? action : tool;
-  const subcommand = tool === 'shell' ? arguments_[0]?.toLowerCase() : action;
-  const sensitiveShortOptions = command === 'redis-cli' ? ['-a']
-    : command === 'curl' ? ['-u', '-b', '-c']
-      : /^(?:mysql|mariadb)$/.test(command) ? ['-p']
-        : command === 'docker' && subcommand === 'login' ? ['-p']
-          : [];
-  if (arguments_.some((argument) => sensitiveShortOptions.some((option) => argument === option || argument.startsWith(option)))) {
-    rejectClassifiedArguments();
-  }
-  if (command === 'curl' && arguments_.some((argument) => /^(?:--user|--proxy-user)(?:=|$)/i.test(argument))) rejectClassifiedArguments();
-  if (command === 'redis-cli' && arguments_.some((argument) => {
-    const normalized = argument.toLowerCase();
-    return normalized === '--pass' || normalized.startsWith('--pass=') || (normalized.startsWith('--pass') && normalized[6] !== '-');
-  })) rejectClassifiedArguments();
-}
-
-function nameTokens(value: string): readonly string[] {
-  return value
-    .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1-$2')
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter(Boolean);
-}
-
-function sensitiveOptionName(value: string): boolean {
-  const tokens = nameTokens(value);
-  const collapsed = value.toLowerCase().replace(/[^a-z0-9]+/g, '');
-  if (sensitiveNameTokens.has(collapsed) || sensitiveCollapsedTokens.has(collapsed)) return true;
-  if (tokens.some((token) => sensitiveNameTokens.has(token) || sensitiveCollapsedTokens.has(token))) return true;
-  return hasAdjacent(tokens, 'api', 'key') || hasAdjacent(tokens, 'secret', 'key') || hasAdjacent(tokens, 'private', 'key')
-    || hasAdjacent(tokens, 'access', 'key') || hasAdjacent(tokens, 'session', 'token') || hasAdjacent(tokens, 'user', 'info');
-}
-
-function userValueOption(value: string): boolean {
-  const normalized = nameTokens(value).join('-');
-  return normalized === 'user' || normalized === 'username';
-}
-
-function sensitiveEnvironmentSuffix(value: string): boolean {
-  const tokens = nameTokens(value);
-  const suffix = tokens.at(-1) ?? '';
-  return sensitiveCollapsedTokens.has(suffix) || (suffix === 'key' ? tokens.length > 1 : ['token', 'secret', 'password'].includes(suffix));
-}
-
-function looksLikeEnvironmentName(value: string): boolean {
-  return value.includes('_') || value === value.toUpperCase();
-}
-
-function hasAdjacent(tokens: readonly string[], left: string, right: string): boolean {
-  return tokens.some((token, index) => token === left && tokens[index + 1] === right);
-}
-
-function sensitiveHeaderName(value: string): boolean {
-  const colon = value.indexOf(':');
-  if (colon < 0) return false;
-  const prefix = value.slice(0, colon);
-  const name = prefix.slice(Math.max(prefix.lastIndexOf('='), prefix.lastIndexOf('/')) + 1).replace(/^(?:-H|--header=?)/i, '');
-  return sensitiveOptionName(name);
-}
-
-function rejectClassifiedArguments(): never {
-  throw new TypeError('Capture arguments contain credential-like or private material.');
 }
 
 function optionalExitStatus(value: unknown): number | undefined {
@@ -302,7 +189,7 @@ function optionalExitStatus(value: unknown): number | undefined {
 }
 
 function assertNoCredentialMaterial(value: string, field: string): void {
-  if (credentialPatterns.some((pattern) => pattern.test(value))) {
+  if (containsCredentialMaterial(value)) {
     throw new TypeError(`Capture ${field} contains credential-like or private material.`);
   }
 }
