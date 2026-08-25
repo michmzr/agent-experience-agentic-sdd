@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { readSharedKnowledge, writeSharedKnowledge, type SharedKnowledgeDocument } from '../src/shared-knowledge/repository.js';
+import { readSharedKnowledge, readSharedKnowledgeContent, RepositoryKnowledgeConfigurationError, RepositoryKnowledgeConflictError, writeSharedKnowledge, type SharedKnowledgeDocument } from '../src/shared-knowledge/repository.js';
+import { repositoryLockDirectory } from '../src/shared-knowledge/repository-lock.js';
 
 process.env.AEL_DATA_DIR = mkdtempSync(join(tmpdir(), 'ael-shared-state-'));
 
@@ -92,7 +93,7 @@ test('rejects missing and orphan Markdown documents', () => {
   writeSharedKnowledge(nested, [document()]);
   mkdirSync(join(nested, 'agent-experience', 'knowledge', 'nested'));
   writeFileSync(join(nested, 'agent-experience', 'knowledge', 'nested', 'orphan.md'), '# Orphan');
-  assert.throws(() => readSharedKnowledge(nested), /orphan/i);
+  assert.throws(() => readSharedKnowledge(nested), /orphan|unrecognized/i);
 });
 
 test('rejects Markdown identity and content mismatches', () => {
@@ -250,12 +251,61 @@ test('preserves an external primary edit when CAS fails before publication mutat
   assert.deepEqual(readFileSync(markdown), externallyEdited);
 });
 
+test('preflights publication device identity without mutating primary or recovery', () => {
+  const repository = root();
+  const stateRoot = mkdtempSync(join(tmpdir(), 'ael-private-state-'));
+  writeSharedKnowledge(repository, [{ ...document(), lesson: 'generation one' }], { stateRoot });
+  writeSharedKnowledge(repository, [{ ...document(), lesson: 'generation two' }], { stateRoot });
+  const digest = createHash('sha256').update(realpathSync.native(repository)).digest('hex');
+  const primaryIndex = join(repository, 'agent-experience', 'index.json');
+  const primaryMarkdown = join(repository, 'agent-experience', 'knowledge', 'safe-reset.md');
+  const recoveryIndex = join(stateRoot, digest, 'recovery', 'index.json');
+  const recoveryMarkdown = join(stateRoot, digest, 'recovery', 'knowledge', 'safe-reset.md');
+  const primaryBefore = [readFileSync(primaryIndex), readFileSync(primaryMarkdown)];
+  const recoveryBefore = [readFileSync(recoveryIndex), readFileSync(recoveryMarkdown)];
+
+  let publicationError: unknown;
+  try {
+    writeSharedKnowledge(repository, [{ ...document(), lesson: 'must not publish' }], {
+      stateRoot,
+      deviceStat: (path: string) => path.includes('stage-') ? 2 : 1
+    });
+  } catch (error) { publicationError = error; }
+  assert.ok(publicationError instanceof RepositoryKnowledgeConfigurationError);
+  assert.match(publicationError.message, /filesystem|publication configuration/i);
+  assert.equal(publicationError.message.includes(repository), false);
+  assert.equal(publicationError.message.includes(stateRoot), false);
+  assert.deepEqual([readFileSync(primaryIndex), readFileSync(primaryMarkdown)], primaryBefore);
+  assert.deepEqual([readFileSync(recoveryIndex), readFileSync(recoveryMarkdown)], recoveryBefore);
+});
+
+test('preserves a human edit made after stage publication instead of rolling it back', () => {
+  const repository = root();
+  const stateRoot = mkdtempSync(join(tmpdir(), 'ael-private-state-'));
+  writeSharedKnowledge(repository, [{ ...document(), lesson: 'stable generation' }], { stateRoot });
+  const markdown = join(repository, 'agent-experience', 'knowledge', 'safe-reset.md');
+  let humanBytes = Buffer.alloc(0);
+
+  let publicationError: unknown;
+  try {
+    writeSharedKnowledge(repository, [{ ...document(), lesson: 'published generation' }], {
+      stateRoot,
+      afterPrimaryPublished: () => {
+        humanBytes = Buffer.concat([readFileSync(markdown), Buffer.from('human edit after publish\n')]);
+        writeFileSync(markdown, humanBytes);
+      }
+    });
+  } catch (error) { publicationError = error; }
+  assert.ok(publicationError instanceof RepositoryKnowledgeConflictError);
+  assert.match(publicationError.message, /conflict|changed after publication/i);
+  assert.deepEqual(readFileSync(markdown), humanBytes);
+});
+
 test('recovers a stale dead-owner lock but never deletes a live-owner lock', () => {
   const repository = root();
   const stateRoot = mkdtempSync(join(tmpdir(), 'ael-private-state-'));
   readSharedKnowledge(repository, { stateRoot });
-  const digest = createHash('sha256').update(realpathSync.native(repository)).digest('hex');
-  const lock = join(stateRoot, digest, 'lock');
+  const lock = join(repositoryLockDirectory(repository), 'lock');
   mkdirSync(lock, { mode: 0o700 });
   writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 999_999_999, timestamp: 0, token: 'dead-owner' }));
   assert.deepEqual(readSharedKnowledge(repository, { stateRoot, clock: () => 100_000, wait: () => {} }), []);
@@ -274,8 +324,7 @@ test('recovers a stale dead-owner lock but never deletes a live-owner lock', () 
 test('publishes only fully prepared locks and ages out abandoned candidates separately', () => {
   const repository = root();
   const stateRoot = mkdtempSync(join(tmpdir(), 'ael-private-state-'));
-  const digest = createHash('sha256').update(realpathSync.native(repository)).digest('hex');
-  const privateDirectory = join(stateRoot, digest);
+  const privateDirectory = repositoryLockDirectory(repository);
   const lock = join(privateDirectory, 'lock');
   let probed = false;
 
@@ -338,6 +387,46 @@ test('rejects canonical sensitive durable text and pre-parse resource excess', (
   mkdirSync(join(base, 'knowledge'), { recursive: true });
   writeFileSync(join(base, 'index.json'), ' '.repeat(1_048_577));
   assert.throws(() => readSharedKnowledge(repository), /resource|size|limit/i);
+});
+
+test('enforces a closed-world generation and never deletes unrecognized content', () => {
+  const repository = root();
+  writeSharedKnowledge(repository, [document()]);
+  const extra = join(repository, 'agent-experience', 'notes.txt');
+  writeFileSync(extra, 'must remain');
+  assert.throws(() => readSharedKnowledge(repository), /unrecognized|generation|closed/i);
+  assert.throws(() => writeSharedKnowledge(repository, [{ ...document(), lesson: 'replacement' }]), /unrecognized|generation|closed/i);
+  assert.equal(readFileSync(extra, 'utf8'), 'must remain');
+
+  const nestedRepository = root();
+  writeSharedKnowledge(nestedRepository, [document()]);
+  const nested = join(nestedRepository, 'agent-experience', 'knowledge', 'nested');
+  mkdirSync(nested);
+  writeFileSync(join(nested, 'ignored.txt'), 'unknown nesting');
+  assert.throws(() => readSharedKnowledge(nestedRepository), /unrecognized|nesting|generation/i);
+});
+
+test('bounds local and adapter reads before accepting index or Markdown content', () => {
+  const oversizedMarkdown = root();
+  writeSharedKnowledge(oversizedMarkdown, [document()]);
+  writeFileSync(join(oversizedMarkdown, 'agent-experience', 'knowledge', 'safe-reset.md'), 'x'.repeat(65_537));
+  assert.throws(() => readSharedKnowledge(oversizedMarkdown), /resource|size|limit/i);
+
+  const oversizedUnknown = root();
+  writeSharedKnowledge(oversizedUnknown, [document()]);
+  writeFileSync(join(oversizedUnknown, 'agent-experience', 'unknown.bin'), Buffer.alloc(1_048_577));
+  assert.throws(() => readSharedKnowledge(oversizedUnknown), /unrecognized|resource|generation/i);
+
+  const requestedLimits: Array<[string, number | undefined]> = [];
+  const index = JSON.stringify({ version: 1, entries: [] });
+  assert.deepEqual(readSharedKnowledgeContent({
+    readFile: (path: string, maxBytes?: number) => {
+      requestedLimits.push([path, maxBytes]);
+      return path === 'index.json' ? index : undefined;
+    },
+    listFiles: (prefix) => prefix === '' ? ['index.json'] : []
+  }), []);
+  assert.deepEqual(requestedLimits, [['index.json', 1_048_576]]);
 });
 
 test('keeps superseded knowledge and its replacement linked and inspectable', () => {

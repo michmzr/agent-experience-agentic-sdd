@@ -1,10 +1,11 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { cpSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 import type { KnowledgeState, LessonKind } from '../domain/types.js';
 import { assertDurableTextSafe } from '../review/sanitizer.js';
-import { resolvePrivateDataDirectory } from '../storage/database.js';
+import { assertPublicationDevice, cleanupPrivateCandidates, createLocalGenerationSource, fsyncDirectory, fsyncTree, generationFingerprint, MAX_INDEX_BYTES, MAX_MARKDOWN_BYTES, publishRename, RepositoryKnowledgeConfigurationError, RepositoryKnowledgeValidationError, resolvePrivateGenerationPaths, safeGenerationBase, securePrivateTree, type PrivateGenerationPaths } from './generation-store.js';
+import { withRepositoryLock } from './repository-lock.js';
 import { assertIdentity, assertSafeExportValue, compare, contentHash, parseKnowledgeIndex, serializeKnowledgeIndex, type InstructionOrigin, type KnowledgeApplicability, type KnowledgeApproval, type KnowledgeIndexEntryV2, type KnowledgeIndexV2, type KnowledgeVerification } from './schema.js';
 
 export interface PromotionEvidence {
@@ -34,13 +35,14 @@ export interface SharedKnowledgeDocument {
 }
 
 export interface KnowledgeContentSource {
-  readonly readFile: (path: string) => string | undefined;
+  readonly readFile: (path: string, maxBytes?: number) => string | undefined;
   readonly listFiles: (prefix: string) => readonly string[];
 }
 
 export interface PublicationHooks {
   readonly beforePrimaryPublication?: () => void;
   readonly afterPrimaryRemoved?: () => void;
+  readonly afterPrimaryPublished?: () => void;
 }
 
 export interface RepositoryKnowledgeOptions extends PublicationHooks {
@@ -50,52 +52,34 @@ export interface RepositoryKnowledgeOptions extends PublicationHooks {
   readonly lockTimeoutMs?: number;
   readonly staleLockMs?: number;
   readonly afterLockCandidatePrepared?: (candidate: string) => void;
+  readonly deviceStat?: (path: string) => number | bigint;
 }
 
-export class RepositoryKnowledgeValidationError extends Error {
-  readonly code = 'INVALID_REPOSITORY_KNOWLEDGE';
+export { RepositoryKnowledgeConfigurationError, RepositoryKnowledgeValidationError } from './generation-store.js';
+
+export class RepositoryKnowledgeConflictError extends Error {
+  readonly code = 'REPOSITORY_KNOWLEDGE_CONFLICT';
 
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
-    this.name = 'RepositoryKnowledgeValidationError';
+    this.name = 'RepositoryKnowledgeConflictError';
   }
 }
 
-const MAX_INDEX_BYTES = 1_048_576;
-const MAX_MARKDOWN_BYTES = 65_536;
-const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
-const DEFAULT_STALE_LOCK_MS = 30_000;
-
 export function readSharedKnowledge(repositoryRoot: string, options: RepositoryKnowledgeOptions = {}): SharedKnowledgeDocument[] {
-  return withRepositoryKnowledgeLock(repositoryRoot, () => readSharedKnowledgeUnlocked(repositoryRoot, privatePaths(repositoryRoot, options)), options);
+  return withRepositoryKnowledgeLock(repositoryRoot, () => readSharedKnowledgeUnlocked(repositoryRoot, privatePaths(repositoryRoot, options), options), options);
 }
 
-function readSharedKnowledgeUnlocked(repositoryRoot: string, paths: PrivatePaths): SharedKnowledgeDocument[] {
-  const base = safeBase(repositoryRoot);
-  assertNotSymlink(resolve(repositoryRoot));
+function readSharedKnowledgeUnlocked(repositoryRoot: string, paths: PrivatePaths, options: RepositoryKnowledgeOptions): SharedKnowledgeDocument[] {
+  const base = safeGenerationBase(repositoryRoot);
   if (existsSync(base)) return readGeneration(repositoryRoot, base);
-  recoverAbsentPrimary(repositoryRoot, base, paths);
+  recoverAbsentPrimary(repositoryRoot, base, paths, options);
   return existsSync(base) ? readGeneration(repositoryRoot, base) : [];
 }
 
 function readGeneration(repositoryRoot: string, base: string): SharedKnowledgeDocument[] {
   try {
-    assertNoSymlinkPath(repositoryRoot, base);
-    const source: KnowledgeContentSource = {
-      readFile: (path) => {
-        const target = safeChild(base, path);
-        try { assertNotSymlink(target); return readFileSync(target, 'utf8'); }
-        catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT' && path !== 'index.json') return undefined;
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-            if (listMarkdownFiles(base, 'knowledge').length > 0) throw new Error('Orphan knowledge documents exist without an index.');
-            throw new Error('Repository knowledge generation is unavailable.');
-          }
-          throw error;
-        }
-      },
-      listFiles: (prefix) => listMarkdownFiles(base, prefix)
-    };
+    const source: KnowledgeContentSource = createLocalGenerationSource(repositoryRoot, base);
     return readSharedKnowledgeContent(source);
   } catch (error) {
     if (error instanceof RepositoryKnowledgeValidationError) throw error;
@@ -104,23 +88,32 @@ function readGeneration(repositoryRoot: string, base: string): SharedKnowledgeDo
 }
 
 export function readSharedKnowledgeContent(source: KnowledgeContentSource): SharedKnowledgeDocument[] {
-  const rawIndex = source.readFile('index.json');
+  const allPaths = source.listFiles('');
+  if (allPaths.length > 1_002) throw new RepositoryKnowledgeValidationError('Repository knowledge generation path limit exceeded.');
+  if (new Set(allPaths).size !== allPaths.length) throw new RepositoryKnowledgeValidationError('Repository knowledge generation contains duplicate paths.');
+  for (const path of allPaths) {
+    if (Buffer.byteLength(path, 'utf8') > 512) throw new RepositoryKnowledgeValidationError('Repository knowledge generation path-length limit exceeded.');
+    if (path === 'index.json' || /^knowledge\/[^/]+\.md$/.test(path)) continue;
+    throw new RepositoryKnowledgeValidationError('Repository knowledge generation contains an unrecognized path or nesting.');
+  }
+  const rawIndex = source.readFile('index.json', MAX_INDEX_BYTES);
   if (rawIndex === undefined) {
     if (source.listFiles('knowledge').some((path) => path.endsWith('.md'))) throw new Error('Orphan knowledge documents exist without an index.');
     return [];
   }
+  if (!allPaths.includes('index.json')) throw new RepositoryKnowledgeValidationError('Repository knowledge index listing is inconsistent.');
   if (Buffer.byteLength(rawIndex, 'utf8') > MAX_INDEX_BYTES) throw new RepositoryKnowledgeValidationError('Repository knowledge index resource limit exceeded.');
   let index;
   try { index = parseKnowledgeIndex(JSON.parse(rawIndex) as unknown); }
   catch (error) { throw new RepositoryKnowledgeValidationError(`Repository knowledge index is invalid: ${errorMessage(error)}`, { cause: error }); }
   assertDurableTextSafe(JSON.stringify(index));
   const expected = new Set(index.entries.map((entry) => `knowledge/${entry.identity}.md`));
-  const actual = source.listFiles('knowledge').filter((path) => path.endsWith('.md'));
+  const actual = allPaths.filter((path) => path.startsWith('knowledge/') && path.endsWith('.md'));
   const orphan = actual.find((path) => !expected.has(path));
   if (orphan) throw new Error(`Orphan knowledge document: ${orphan}.`);
   if (index.version === 1) return index.entries.map((entry) => {
     const path = `knowledge/${entry.identity}.md`;
-    const rawMarkdown = source.readFile(path);
+    const rawMarkdown = source.readFile(path, MAX_MARKDOWN_BYTES);
     if (rawMarkdown === undefined) throw new Error(`Missing knowledge document: ${path}.`);
     if (Buffer.byteLength(rawMarkdown, 'utf8') > MAX_MARKDOWN_BYTES) throw new RepositoryKnowledgeValidationError('Knowledge Markdown resource limit exceeded.');
     const markdown = normalizeLineEndings(rawMarkdown);
@@ -133,7 +126,7 @@ export function readSharedKnowledgeContent(source: KnowledgeContentSource): Shar
     };
   });
   return index.entries.map((entry) => {
-    const rawMarkdown = source.readFile(entry.document);
+    const rawMarkdown = source.readFile(entry.document, MAX_MARKDOWN_BYTES);
     if (rawMarkdown === undefined) throw new Error(`Missing knowledge document: ${entry.document}.`);
     if (Buffer.byteLength(rawMarkdown, 'utf8') > MAX_MARKDOWN_BYTES) throw new RepositoryKnowledgeValidationError('Knowledge Markdown resource limit exceeded.');
     const markdown = normalizeLineEndings(rawMarkdown);
@@ -156,14 +149,14 @@ export function updateSharedKnowledge(
 ): SharedKnowledgeDocument[] {
   return withRepositoryKnowledgeLock(repositoryRoot, () => {
     const paths = privatePaths(repositoryRoot, options);
-    const existing = readSharedKnowledgeUnlocked(repositoryRoot, paths);
+    const existing = readSharedKnowledgeUnlocked(repositoryRoot, paths, options);
     const updated = [...update(existing)];
     writeSharedKnowledgeUnlocked(repositoryRoot, updated, paths, options);
     return updated;
   }, options);
 }
 
-function writeSharedKnowledgeUnlocked(repositoryRoot: string, documents: readonly SharedKnowledgeDocument[], paths: PrivatePaths, hooks: PublicationHooks): void {
+function writeSharedKnowledgeUnlocked(repositoryRoot: string, documents: readonly SharedKnowledgeDocument[], paths: PrivatePaths, hooks: RepositoryKnowledgeOptions): void {
   const normalized = documents.map(validateAndNormalize).sort((a, b) => compare(a.identity, b.identity));
   const seen = new Set<string>();
   for (const document of normalized) {
@@ -175,11 +168,11 @@ function writeSharedKnowledgeUnlocked(repositoryRoot: string, documents: readonl
     const missing = document.supersedes.find((identity) => !seen.has(identity));
     if (missing) throw new Error(`Superseded knowledge ${missing} is missing from the complete generation.`);
   }
-  const base = safeBase(repositoryRoot);
+  const base = safeGenerationBase(repositoryRoot);
   mkdirSync(dirname(base), { recursive: true });
   if (existsSync(base)) readGeneration(repositoryRoot, base);
-  else recoverAbsentPrimary(repositoryRoot, base, paths);
-  const expectedGeneration = primaryFingerprint(base);
+  else recoverAbsentPrimary(repositoryRoot, base, paths, hooks);
+  const expectedGeneration = generationFingerprint(base);
   const stage = join(paths.directory, `stage-${randomUUID()}`);
   try {
     mkdirSync(join(stage, 'knowledge'), { recursive: true, mode: 0o700 });
@@ -192,11 +185,13 @@ function writeSharedKnowledgeUnlocked(repositoryRoot: string, documents: readonl
     writeFileSync(join(stage, 'index.json'), serializeKnowledgeIndex(index), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     readGeneration(repositoryRoot, stage);
     fsyncTree(stage);
+    assertPublicationDevice(dirname(base), stage, hooks.deviceStat);
+    const expectedPublishedGeneration = generationFingerprint(stage);
     if (existsSync(base)) {
       replaceRecovery(repositoryRoot, base, paths);
     }
     hooks.beforePrimaryPublication?.();
-    publishStage(repositoryRoot, base, stage, paths, expectedGeneration, hooks);
+    publishStage(repositoryRoot, base, stage, paths, expectedGeneration, expectedPublishedGeneration, hooks);
   } finally {
     if (existsSync(stage)) rmSync(stage, { recursive: true, force: true });
   }
@@ -266,189 +261,49 @@ function toIndexEntry(document: SharedKnowledgeDocument, content: string): Knowl
     supersedes: document.supersedes, contentHash: contentHash(content) };
 }
 
-function safeBase(repositoryRoot: string): string {
-  const root = resolve(repositoryRoot);
-  const base = resolve(root, 'agent-experience');
-  if (relative(root, base).startsWith('..')) throw new Error('Repository knowledge path escapes repository root.');
-  return base;
-}
-
-function safeChild(base: string, path: string): string {
-  const target = resolve(base, path);
-  if (relative(base, target).startsWith('..')) throw new Error('Knowledge document path escapes repository root.');
-  return target;
-}
-
-function assertNoSymlinkPath(repositoryRoot: string, base: string): void {
-  assertNotSymlink(resolve(repositoryRoot));
-  if (existsSync(base)) assertNotSymlink(base);
-}
-
-function assertNotSymlink(path: string): void {
-  try { if (lstatSync(path).isSymbolicLink()) throw new Error(`Repository knowledge path is a symlink: ${path}.`); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-}
-
-interface PrivatePaths {
-  readonly directory: string;
-  readonly lock: string;
-  readonly recovery: string;
-}
+type PrivatePaths = PrivateGenerationPaths;
 
 function privatePaths(repositoryRoot: string, options: RepositoryKnowledgeOptions): PrivatePaths {
-  const canonical = realpathSync.native(resolve(repositoryRoot));
-  const digest = createHash('sha256').update(canonical).digest('hex');
-  const requestedStateRoot = resolve(options.stateRoot ?? join(resolvePrivateDataDirectory(), 'repository-knowledge'));
-  const stateRoot = canonicalizePotentialPath(requestedStateRoot);
-  if (isPathInside(canonical, stateRoot)) {
-    throw new Error('Repository knowledge private state must be outside the repository.');
-  }
-  const directory = join(stateRoot, digest);
-  if (isPathInside(canonical, canonicalizePotentialPath(directory))) {
-    throw new Error('Repository knowledge private state must be outside the repository.');
-  }
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  chmodSync(directory, 0o700);
-  return { directory, lock: join(directory, 'lock'), recovery: join(directory, 'recovery') };
-}
-
-function canonicalizePotentialPath(path: string): string {
-  let existing = resolve(path);
-  const missing: string[] = [];
-  while (!existsSync(existing)) {
-    const parent = dirname(existing);
-    if (parent === existing) break;
-    missing.unshift(basename(existing));
-    existing = parent;
-  }
-  return resolve(realpathSync.native(existing), ...missing);
-}
-
-function isPathInside(parent: string, child: string): boolean {
-  const path = relative(parent, child);
-  return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+  return resolvePrivateGenerationPaths(repositoryRoot, options.stateRoot);
 }
 
 export function withRepositoryKnowledgeLock<T>(repositoryRoot: string, action: () => T, options: RepositoryKnowledgeOptions = {}): T {
   const paths = privatePaths(repositoryRoot, options);
-  const clock = options.clock ?? Date.now;
-  const wait = options.wait ?? blockingWait;
-  const timeout = options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
-  const staleAfter = options.staleLockMs ?? DEFAULT_STALE_LOCK_MS;
-  const started = clock();
-  const token = randomUUID();
-  while (true) {
-    cleanupAbandonedLockCandidates(paths.directory, clock(), staleAfter);
-    const candidate = join(paths.directory, `lock-candidate-${token}-${randomUUID()}`);
-    try {
-      mkdirSync(candidate, { mode: 0o700 });
-      const ownerPath = join(candidate, 'owner.json');
-      writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, timestamp: clock(), token }), { mode: 0o600, flag: 'wx' });
-      fsyncPath(ownerPath);
-      fsyncDirectory(candidate);
-      options.afterLockCandidatePrepared?.(candidate);
-      if (existsSync(paths.lock)) {
-        const occupied = new Error('Repository knowledge lock is already held.') as NodeJS.ErrnoException;
-        occupied.code = 'EEXIST';
-        throw occupied;
-      }
-      renameSync(candidate, paths.lock);
-      fsyncDirectory(paths.directory);
-      break;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'EEXIST' && code !== 'ENOTEMPTY') throw error;
-      recoverStaleLock(paths.lock, clock(), staleAfter);
-      if (clock() - started >= timeout) throw new Error('Timed out waiting for repository knowledge lock.');
-      wait(Math.min(25, timeout));
-    } finally {
-      if (existsSync(candidate)) rmSync(candidate, { recursive: true, force: true });
-    }
-  }
-  try {
+  return withRepositoryLock(repositoryRoot, () => {
     cleanupPrivateCandidates(paths);
     return action();
-  }
-  finally {
-    try {
-      const owner = JSON.parse(readFileSync(join(paths.lock, 'owner.json'), 'utf8')) as { token?: string };
-      if (owner.token === token) rmSync(paths.lock, { recursive: true, force: true });
-    } catch { /* Never remove a lock whose ownership cannot be verified. */ }
-  }
+  }, options);
 }
 
-function recoverStaleLock(lock: string, now: number, staleAfter: number): void {
-  try {
-    const owner = JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')) as { pid?: number; timestamp?: number; token?: string };
-    if (typeof owner.pid !== 'number' || typeof owner.timestamp !== 'number' || typeof owner.token !== 'string') {
-      recoverMalformedStaleLock(lock, now, staleAfter);
-      return;
-    }
-    if (now - owner.timestamp <= staleAfter || isPidAlive(owner.pid)) return;
-    const confirmed = JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')) as { pid?: number; timestamp?: number; token?: string };
-    if (confirmed.pid !== owner.pid || confirmed.timestamp !== owner.timestamp || confirmed.token !== owner.token || isPidAlive(owner.pid)) return;
-    const stale = `${lock}.stale-${owner.token}`;
-    renameSync(lock, stale);
-    rmSync(stale, { recursive: true, force: true });
-  } catch { recoverMalformedStaleLock(lock, now, staleAfter); }
-}
-
-function recoverMalformedStaleLock(lock: string, now: number, staleAfter: number): void {
-  try {
-    const observed = statSync(lock);
-    if (now - observed.mtimeMs <= staleAfter) return;
-    try {
-      const owner = JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')) as { pid?: number; timestamp?: number; token?: string };
-      if (typeof owner.pid === 'number' && typeof owner.timestamp === 'number' && typeof owner.token === 'string') return;
-    } catch { /* The conservative directory age protects an incomplete legacy owner write. */ }
-    const confirmed = statSync(lock);
-    if (confirmed.dev !== observed.dev || confirmed.ino !== observed.ino || confirmed.mtimeMs !== observed.mtimeMs) return;
-    const stale = `${lock}.stale-malformed-${randomUUID()}`;
-    renameSync(lock, stale);
-    rmSync(stale, { recursive: true, force: true });
-  } catch { /* A live or concurrently changing legacy lock remains untouched. */ }
-}
-
-function cleanupAbandonedLockCandidates(directory: string, now: number, staleAfter: number): void {
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !entry.name.startsWith('lock-candidate-')) continue;
-    const candidate = join(directory, entry.name);
-    try {
-      const observed = statSync(candidate);
-      if (now - observed.mtimeMs <= staleAfter) continue;
-      const confirmed = statSync(candidate);
-      if (confirmed.dev !== observed.dev || confirmed.ino !== observed.ino || confirmed.mtimeMs !== observed.mtimeMs) continue;
-      rmSync(candidate, { recursive: true, force: true });
-    } catch { /* A concurrently changing candidate remains untouched. */ }
-  }
-}
-
-function isPidAlive(pid: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return true;
-  try { process.kill(pid, 0); return true; }
-  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
-}
-
-function blockingWait(milliseconds: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(1, milliseconds));
-}
-
-function recoverAbsentPrimary(repositoryRoot: string, base: string, paths: PrivatePaths): void {
+function recoverAbsentPrimary(repositoryRoot: string, base: string, paths: PrivatePaths, options: RepositoryKnowledgeOptions): void {
   if (existsSync(base)) return;
   if (!existsSync(paths.recovery)) return;
   readGeneration(repositoryRoot, paths.recovery);
   const stage = join(paths.directory, `stage-recovery-${randomUUID()}`);
+  let stagePublished = false;
+  let expectedPublishedGeneration = '';
   try {
     cpSync(paths.recovery, stage, { recursive: true, errorOnExist: true });
     securePrivateTree(stage);
     readGeneration(repositoryRoot, stage);
     fsyncTree(stage);
+    assertPublicationDevice(dirname(base), stage, options.deviceStat);
+    expectedPublishedGeneration = generationFingerprint(stage);
     publishRename(stage, base);
+    stagePublished = true;
+    options.afterPrimaryPublished?.();
     readGeneration(repositoryRoot, base);
     fsyncTree(base);
     fsyncDirectory(dirname(base));
   } catch (error) {
-    if (existsSync(base)) rmSync(base, { recursive: true, force: true });
+    if (stagePublished) {
+      let stillOwned = false;
+      try { stillOwned = generationFingerprint(base) === expectedPublishedGeneration; }
+      catch { /* Post-publication changes are preserved rather than treated as recovery output. */ }
+      if (!stillOwned) throw new RepositoryKnowledgeConflictError('Repository knowledge changed after publication; rollback was not applied.', { cause: error });
+      if (existsSync(base)) rmSync(base, { recursive: true, force: true });
+      fsyncDirectory(dirname(base));
+    }
     throw error;
   } finally {
     if (existsSync(stage)) rmSync(stage, { recursive: true, force: true });
@@ -471,11 +326,11 @@ function replaceRecovery(repositoryRoot: string, base: string, paths: PrivatePat
   }
 }
 
-function publishStage(repositoryRoot: string, base: string, stage: string, paths: PrivatePaths, expectedGeneration: string, hooks: PublicationHooks): void {
+function publishStage(repositoryRoot: string, base: string, stage: string, paths: PrivatePaths, expectedGeneration: string, expectedPublishedGeneration: string, hooks: PublicationHooks): void {
   let primaryRemovedByThisPublication = false;
   let stagePublishedByThisPublication = false;
   try {
-    if (primaryFingerprint(base) !== expectedGeneration) throw new Error('Repository knowledge changed during locked publication.');
+    if (generationFingerprint(base) !== expectedGeneration) throw new Error('Repository knowledge changed during locked publication.');
     if (existsSync(base)) {
       rmSync(base, { recursive: true, force: true });
       primaryRemovedByThisPublication = true;
@@ -483,12 +338,21 @@ function publishStage(repositoryRoot: string, base: string, stage: string, paths
     hooks.afterPrimaryRemoved?.();
     publishRename(stage, base);
     stagePublishedByThisPublication = true;
+    hooks.afterPrimaryPublished?.();
     readGeneration(repositoryRoot, base);
     fsyncTree(base);
     fsyncDirectory(dirname(base));
   } catch (error) {
     if (!primaryRemovedByThisPublication && !stagePublishedByThisPublication) throw error;
-    if (stagePublishedByThisPublication && existsSync(base)) rmSync(base, { recursive: true, force: true });
+    if (stagePublishedByThisPublication) {
+      let stillOwned = false;
+      try { stillOwned = generationFingerprint(base) === expectedPublishedGeneration; }
+      catch { /* Invalid or unrecognized post-publication bytes are not owned by this publication. */ }
+      if (!stillOwned) {
+        throw new RepositoryKnowledgeConflictError('Repository knowledge changed after publication; rollback was not applied.', { cause: error });
+      }
+      if (existsSync(base)) rmSync(base, { recursive: true, force: true });
+    }
     if (primaryRemovedByThisPublication && existsSync(paths.recovery)) {
       const rollback = join(paths.directory, `stage-rollback-${randomUUID()}`);
       try {
@@ -499,80 +363,12 @@ function publishStage(repositoryRoot: string, base: string, stage: string, paths
         publishRename(rollback, base);
         readGeneration(repositoryRoot, base);
         fsyncTree(base);
+        fsyncDirectory(dirname(base));
       } finally {
         if (existsSync(rollback)) rmSync(rollback, { recursive: true, force: true });
       }
     }
     throw error;
-  }
-}
-
-function publishRename(stage: string, primary: string): void {
-  try { renameSync(stage, primary); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EXDEV') {
-      throw new Error('Repository knowledge private state must share a filesystem with the repository for atomic publication.', { cause: error });
-    }
-    throw error;
-  }
-}
-
-function cleanupPrivateCandidates(paths: PrivatePaths): void {
-  for (const entry of readdirSync(paths.directory, { withFileTypes: true })) {
-    if (entry.isDirectory() && (entry.name.startsWith('stage-') || entry.name.startsWith('recovery-'))) {
-      rmSync(join(paths.directory, entry.name), { recursive: true, force: true });
-    }
-  }
-}
-
-function securePrivateTree(directory: string): void {
-  chmodSync(directory, 0o700);
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) securePrivateTree(path);
-    else if (entry.isFile()) chmodSync(path, 0o600);
-  }
-}
-
-function primaryFingerprint(base: string): string {
-  if (!existsSync(base)) return 'absent';
-  const hash = createHash('sha256');
-  const visit = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => compare(left.name, right.name))) {
-      if (entry.isSymbolicLink()) throw new RepositoryKnowledgeValidationError('Repository knowledge contains a symlink.');
-      const path = join(directory, entry.name);
-      hash.update(relative(base, path)).update('\0');
-      if (entry.isDirectory()) visit(path);
-      else if (entry.isFile()) hash.update(readFileSync(path));
-    }
-  };
-  visit(base);
-  return hash.digest('hex');
-}
-
-function fsyncTree(directory: string): void {
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) fsyncTree(path);
-    else if (entry.isFile()) fsyncPath(path);
-  }
-  fsyncDirectory(directory);
-}
-
-function fsyncPath(path: string): void {
-  const descriptor = openSync(path, 'r');
-  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
-}
-
-function fsyncDirectory(path: string): void {
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(path, 'r');
-    fsyncSync(descriptor);
-  } catch (error) {
-    if (!['EINVAL', 'ENOTSUP', 'EISDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 
@@ -586,24 +382,6 @@ function normalizeLineEndings(value: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'unknown validation error';
-}
-
-function listMarkdownFiles(base: string, prefix: string): string[] {
-  const directory = safeChild(base, prefix);
-  try {
-    assertNotSymlink(directory);
-    const files: string[] = [];
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (entry.isSymbolicLink()) throw new Error('Repository knowledge must not contain symlinks.');
-      const path = `${prefix}/${entry.name}`;
-      if (entry.isDirectory()) files.push(...listMarkdownFiles(base, path));
-      else if (entry.isFile() && path.endsWith('.md')) files.push(path);
-    }
-    return files;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-    throw error;
-  }
 }
 
 function unique(values: readonly string[]): string[] {

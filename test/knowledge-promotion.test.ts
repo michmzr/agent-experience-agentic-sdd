@@ -66,7 +66,7 @@ test('promotion upserts without removing existing branch-local review files', ()
 
 test('serializes competing child-process promotions without lost updates', async () => {
   const repository = mkdtempSync(join(tmpdir(), 'ael-promotion-'));
-  const stateRoot = mkdtempSync(join(tmpdir(), 'ael-promotion-private-'));
+  const stateRoots = [mkdtempSync(join(tmpdir(), 'ael-promotion-private-a-')), mkdtempSync(join(tmpdir(), 'ael-promotion-private-b-'))];
   const moduleUrl = new URL('../src/shared-knowledge/promotion-policy.js', import.meta.url).href;
   const script = `
     import { promoteKnowledge } from ${JSON.stringify(moduleUrl)};
@@ -79,13 +79,13 @@ test('serializes competing child-process promotions without lost updates', async
       evidence: [{ kind: 'code-or-tool', summary: 'code', deterministic: true }]
     }, { stateRoot, beforePrimaryPublication: () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 75) });
   `;
-  const run = (identity: string) => new Promise<void>((resolvePromise, reject) => {
+  const runWithState = (identity: string, stateRoot: string) => new Promise<void>((resolvePromise, reject) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', script, repository, stateRoot, identity], { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     child.stderr.on('data', (chunk) => { stderr += String(chunk); });
     child.on('exit', (code) => code === 0 ? resolvePromise() : reject(new Error(stderr)));
   });
 
-  await Promise.all([run('child-one'), run('child-two')]);
-  assert.deepEqual(readSharedKnowledge(repository, { stateRoot }).map((entry) => entry.identity), ['child-one', 'child-two']);
+  await Promise.all([runWithState('child-one', stateRoots[0]!), runWithState('child-two', stateRoots[1]!)]);
+  assert.deepEqual(readSharedKnowledge(repository, { stateRoot: stateRoots[0] }).map((entry) => entry.identity), ['child-one', 'child-two']);
 });

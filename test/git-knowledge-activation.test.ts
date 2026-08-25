@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -61,4 +61,17 @@ test('no trusted ref means no authority and merged addition activates only throu
   const activated = activateGitKnowledge(repository, adapter(repository), 'trusted');
   assert.equal(activated.entries[0]?.authoritative, true);
   assert.equal(activated.trustedCommit, featureCommit);
+});
+
+test('rejects unrecognized files in a trusted Git generation', () => {
+  const repository = mkdtempSync(join(tmpdir(), 'ael-git-activation-'));
+  initializeGitRepository(repository);
+  writeSharedKnowledge(repository, [doc('existing', 'trusted lesson')]);
+  const extra = join(repository, 'agent-experience', 'notes.txt');
+  writeFileSync(extra, 'unrecognized');
+  commit(repository, 'invalid trusted knowledge');
+  execFileSync('git', ['-C', repository, 'branch', 'trusted']);
+  rmSync(extra);
+
+  assert.throws(() => activateGitKnowledge(repository, adapter(repository), 'trusted'), /unrecognized|generation/i);
 });
