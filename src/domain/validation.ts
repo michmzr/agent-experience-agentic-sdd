@@ -177,3 +177,33 @@ export function validateImport(record: ExperienceImport): ValidationResult {
 
   return { ok: true };
 }
+
+/** Validates an evidence value before an incremental transaction touches storage. */
+export function validateIncrementalEvidence(value: unknown): ValidationResult {
+  const sensitive = hasForbiddenContent(value);
+  if (sensitive) return sensitive;
+  if (!hasOnlyAllowedKeys(value, allowedEntityKeys.evidence) || !hasValidEntityShape('evidence', value)) {
+    return invalid('INVALID_SHAPE', 'Evidence has an invalid incremental shape.');
+  }
+  const evidence = value as EvidenceImportShape;
+  if (!evidencePolarities.includes(evidence.polarity as EvidencePolarity)) return invalid('INVALID_SHAPE', 'Evidence polarity is unsupported.');
+  if (evidence.revalidatesTo !== undefined && !['observed', 'confirmed', 'verified'].includes(evidence.revalidatesTo)) {
+    return invalid('INVALID_SHAPE', 'Evidence revalidation target is unsupported.');
+  }
+  if (evidence.polarity === 'contradicts' && evidence.revalidatesTo !== undefined) {
+    return invalid('INVALID_SHAPE', 'Contradictory evidence cannot revalidate knowledge.');
+  }
+  if (evidence.id.trim().length === 0 || evidence.candidateId.trim().length === 0) return invalid('INVALID_SHAPE', 'Evidence identifiers must be non-empty.');
+  if (evidence.id.length > 512 || evidence.candidateId.length > 512 || evidence.summary.length > 2_048) {
+    return invalid('INVALID_SHAPE', 'Incremental evidence exceeds its resource limit.');
+  }
+  return { ok: true };
+}
+
+type EvidenceImportShape = {
+  readonly id: string;
+  readonly candidateId: string;
+  readonly polarity: string;
+  readonly summary: string;
+  readonly revalidatesTo?: string;
+};

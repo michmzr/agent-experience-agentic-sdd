@@ -117,6 +117,7 @@ export interface TransitionHistoryEntry {
   readonly from: KnowledgeState;
   readonly to: KnowledgeState;
   readonly evidenceId: EvidenceId;
+  readonly occurredAt?: string;
 }
 
 export interface TransitionResult {
