@@ -43,6 +43,7 @@ ael runtime evaluate --input action.json [--profile normal|learning|observe-only
 ael runtime status [--json]
 ael runtime config explain --workspace <path> [--remote <url>] [--json]
 ael knowledge validate --repository <path> [--trusted-ref <ref>] [--json]
+ael knowledge refresh-runtime --repository <path> --repository-id <id> --trusted-ref <ref> [--json]
 ael knowledge promote --repository <path> --input document.json [--json]
 ```
 
@@ -63,6 +64,8 @@ Runtime overrides have rule, action, or task-session scope. Authorization and co
 ## Shared repository knowledge
 
 `knowledge promote` writes a branch-local review artifact. Promotion cannot assert merged activation. `knowledge validate` treats branch-local content as non-authoritative context unless `--trusted-ref` names an explicit local Git ref or commit containing the validated knowledge generation. The resolved trusted commit supplies provenance, and only its entries are authoritative.
+
+`knowledge refresh-runtime` is the explicit bridge from repository knowledge to enforcement. It requires a trusted local Git ref and an exact runtime repository identifier. Only active authoritative entries from that commit with a validated structured `runtimeDirective` are compiled. Markdown prose and branch-local changes never create runtime rules. The target-specific snapshot is published atomically and later `runtime evaluate` invocations load it without Git, network, or language-model access.
 
 The local Git adapter resolves commits, bounds tree output, enforces a path-count budget, checks each blob size with `git cat-file -s`, then reads blobs within the supplied byte budget. Any injected Git or content adapter must enforce `maxBytes` and maximum path count before returning content. A production adapter must have tests demonstrating those limits before it becomes a trusted activation source.
 

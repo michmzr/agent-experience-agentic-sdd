@@ -8,7 +8,7 @@
 
 **Tech stack:** TypeScript 5.9, Node.js 22 built-ins, `node:sqlite`, `node:test`, local Git subprocesses through injected adapters, pnpm.
 
-**Execution status (2026-08-25):** Tasks 1-7 complete. Task 8 implementation and verification are complete at `8229948c7441ff131d3e3718a10a7108da125fa2`; final independent milestone reviews are pending.
+**Execution status (2026-08-25):** Tasks 1-7 complete. Task 8 implementation and verification are complete at `b44cc04ee3547d1fa9c0e25d465134192b1eeb08`; final independent milestone reviews of the production knowledge-to-runtime bridge are pending.
 
 ---
 
@@ -379,7 +379,7 @@ git commit -m "feat: expose runtime learning commands"
 
 ### Task 8: Milestone acceptance, benchmarks, and delivery evidence
 
-Status: Implementation and verification complete. Final independent milestone reviews are pending.
+Status: Implementation and verification complete at `b44cc04ee3547d1fa9c0e25d465134192b1eeb08`. Final independent milestone reviews are pending.
 
 **Files:**
 
@@ -389,12 +389,18 @@ Status: Implementation and verification complete. Final independent milestone re
 - Create: `test/milestone-2-acceptance.test.ts`
 - Create: `test/runtime-benchmark.test.ts`
 - Create: `docs/verification/2026-08-25-milestone-2-runtime-learning.md`
+- Create: `src/shared-knowledge/runtime-compiler.ts`
+- Modify: `src/shared-knowledge/schema.ts`
+- Modify: `src/application/runtime-service.ts`
+- Modify: `src/application/experience-service.ts`
+- Modify: `src/cli.ts`
+- Modify: `README.md`
 - Modify: `docs/product/roadmap.md`
 - Modify: `docs/superpowers/plans/2026-08-25-milestone-2-runtime-learning.md`
 
 - [x] **Step 1: Add failing acceptance fixtures and tests**
 
-Cover repeated invalid action prevention, reusable successful workflow retrieval, stale verified rule contradicted by success, disputed rule never blocking, task-specific instruction not promoted, learning-mode downgrade with capture active, merged repository reuse through all three adapters, ordinary degraded fail-open, protected configured fail-closed, deterministic serialization, and no network/LLM runtime dependency.
+Cover repeated invalid action prevention, reusable successful workflow retrieval, stale verified rule contradicted by success, disputed rule never blocking, task-specific instruction not promoted, learning-mode downgrade with capture active, trusted structured repository knowledge compiled and published through the public application bridge, durable reuse through all three adapters, ordinary degraded fail-open, protected configured fail-closed, deterministic serialization, and no network/LLM runtime dependency. Preserve v1/v2 knowledge reads while v3 adds a strict optional runtime directive. Never derive enforcement from Markdown prose or branch-local changes.
 
 - [x] **Step 2: Add deterministic benchmark metrics**
 
