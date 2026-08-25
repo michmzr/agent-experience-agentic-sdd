@@ -12,7 +12,7 @@ import { compileRuntimeSnapshot, type RuntimeSnapshotV1 } from '../runtime/snaps
 import { activateGitKnowledge, type GitContentAdapter } from '../shared-knowledge/git-activation.js';
 import { promoteKnowledge } from '../shared-knowledge/promotion-policy.js';
 import type { SharedKnowledgeDocument } from '../shared-knowledge/repository.js';
-import { RuntimeSnapshotStore, RuntimeSnapshotStorageError } from '../storage/runtime-snapshot-store.js';
+import { RuntimeSnapshotStore, RuntimeSnapshotStorageError, type RuntimeSnapshotPaths } from '../storage/runtime-snapshot-store.js';
 
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_GIT_LIST_BYTES = 1024 * 1024;
@@ -33,6 +33,14 @@ export interface RuntimeServiceOptions {
   readonly clock?: () => Date;
   readonly gitAdapter?: (repository: string) => GitContentAdapter;
   readonly refreshSnapshot?: (input: RuntimeInput, current: RuntimeSnapshotV1 | undefined) => RuntimeSnapshotV1;
+  readonly snapshotStore?: RuntimeSnapshotPersistence;
+}
+
+export interface RuntimeSnapshotPersistence {
+  readonly paths: RuntimeSnapshotPaths;
+  publish(snapshot: RuntimeSnapshotV1): RuntimeSnapshotV1;
+  loadCurrent(): RuntimeSnapshotV1;
+  loadLastKnownGood(): RuntimeSnapshotV1;
 }
 
 export interface PublicGateDecision extends Omit<GateDecision, 'references'> {
@@ -58,7 +66,7 @@ export class RuntimeServiceError extends Error {
 }
 
 export class RuntimeService {
-  readonly #store: RuntimeSnapshotStore;
+  readonly #store: RuntimeSnapshotPersistence;
   readonly #knowledgeStateRoot: string;
   readonly #clock: () => Date;
   readonly #gitAdapter: (repository: string) => GitContentAdapter;
@@ -66,10 +74,11 @@ export class RuntimeService {
   readonly #runtimes = new Map<string, { readonly runtime: ResilientRuntime; readonly snapshotChecksum?: string }>();
   readonly #snapshotsByTarget = new Map<string, RuntimeSnapshotV1>();
   #activeRuntimeKey?: string;
+  #activeTarget?: string;
 
   constructor(options: RuntimeServiceOptions) {
     this.#clock = options.clock ?? (() => new Date());
-    this.#store = new RuntimeSnapshotStore(join(options.dataDir, 'runtime'), { clock: () => this.#clock().getTime() });
+    this.#store = options.snapshotStore ?? new RuntimeSnapshotStore(join(options.dataDir, 'runtime'), { clock: () => this.#clock().getTime() });
     this.#knowledgeStateRoot = join(options.dataDir, 'repository-knowledge');
     this.#gitAdapter = options.gitAdapter ?? createLocalGitContentAdapter;
     this.#refreshSnapshot = options.refreshSnapshot ?? ((input, current) => compileRuntimeSnapshot({
@@ -91,6 +100,14 @@ export class RuntimeService {
     const input = this.#readRuntimeInput(options.inputPath);
     const profile = runtimeProfile(options.profileId ?? 'normal');
     const target = input.repositoryId ?? 'global';
+    const key = runtimeKey(profile.id, target);
+    const cached = this.#runtimes.get(key);
+    if (options.refresh !== true && this.#activeTarget === target && cached !== undefined) {
+      this.#activeRuntimeKey = key;
+      const resolution = cached.runtime.resolve(input.operationClass);
+      const gate = createRuntimeGate({ profile, status: resolution.status, ...(resolution.index === undefined ? {} : { index: resolution.index }) });
+      return publicDecision(gate.evaluate(input));
+    }
     const snapshotAbsent = !existsSync(this.#store.paths.manifest);
     const current = this.#optionalCurrent();
     if (current !== undefined) this.#snapshotsByTarget.set(current.repositoryId, current);
@@ -110,7 +127,8 @@ export class RuntimeService {
     }
 
     const runtime = this.#runtimeFor(profile, target, undefined, activeChecksum);
-    this.#activeRuntimeKey = runtimeKey(profile.id, target);
+    this.#activeRuntimeKey = key;
+    this.#activeTarget = target;
     const resolution = runtime.resolve(input.operationClass);
     const gate = createRuntimeGate({ profile, status: resolution.status, ...(resolution.index === undefined ? {} : { index: resolution.index }) });
     return publicDecision(gate.evaluate(input));
@@ -127,6 +145,7 @@ export class RuntimeService {
     const profile = BUILT_IN_RUNTIME_PROFILES.normal;
     const runtime = this.#runtimeFor(profile, target, undefined, current?.checksum);
     this.#activeRuntimeKey = runtimeKey(profile.id, target);
+    this.#activeTarget = target;
     return runtime.resolve('normal').status;
   }
 

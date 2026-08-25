@@ -68,6 +68,32 @@ test('retains a healthy in-memory runtime after the persisted manifest becomes c
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 
+test('cached evaluation and status reach memory without an orchestration storage pre-read', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-runtime-status-'));
+  const input = join(dataDir, 'action.json');
+  try {
+    writeFileSync(input, JSON.stringify(action));
+    const backing = new RuntimeSnapshotStore(join(dataDir, 'runtime'), { clock: Date.now });
+    backing.publish(blockingSnapshot());
+    let currentLoads = 0;
+    let lastKnownGoodLoads = 0;
+    const store = {
+      paths: backing.paths,
+      publish: (snapshot: Parameters<RuntimeSnapshotStore['publish']>[0]) => backing.publish(snapshot),
+      loadCurrent: () => { currentLoads += 1; return backing.loadCurrent(); },
+      loadLastKnownGood: () => { lastKnownGoodLoads += 1; return backing.loadLastKnownGood(); }
+    };
+    const service = new RuntimeService({ dataDir, snapshotStore: store });
+    assert.equal(service.evaluate({ inputPath: input }).status.fallbackSource, 'snapshot');
+    const before = { currentLoads, lastKnownGoodLoads };
+    writeFileSync(backing.paths.manifest, '{"corrupt":true}', { mode: 0o600 });
+
+    assert.equal(service.evaluate({ inputPath: input }).status.fallbackSource, 'memory');
+    assert.equal(service.status().fallbackSource, 'memory');
+    assert.deepEqual({ currentLoads, lastKnownGoodLoads }, before);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
 test('retains circuit state per profile and opens after repeated unavailable loads', () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-runtime-status-'));
   const input = join(dataDir, 'action.json');
@@ -82,6 +108,34 @@ test('retains circuit state per profile and opens after repeated unavailable loa
     assert.equal(service.evaluate({ inputPath: input, profileId: 'normal' }).status.circuitState, 'open');
     assert.equal(service.status().circuitState, 'open');
     assert.equal(service.evaluate({ inputPath: input, profileId: 'learning' }).status.circuitState, 'closed');
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('an open cached circuit suppresses loaders and orchestration pre-reads', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-runtime-status-'));
+  const input = join(dataDir, 'action.json');
+  try {
+    mkdirSync(join(dataDir, 'runtime'));
+    writeFileSync(join(dataDir, 'runtime', 'manifest.json'), '{"corrupt":true}', { mode: 0o600 });
+    writeFileSync(input, JSON.stringify(action));
+    const backing = new RuntimeSnapshotStore(join(dataDir, 'runtime'), { clock: Date.now });
+    let currentLoads = 0;
+    let lastKnownGoodLoads = 0;
+    const store = {
+      paths: backing.paths,
+      publish: (snapshot: Parameters<RuntimeSnapshotStore['publish']>[0]) => backing.publish(snapshot),
+      loadCurrent: () => { currentLoads += 1; return backing.loadCurrent(); },
+      loadLastKnownGood: () => { lastKnownGoodLoads += 1; return backing.loadLastKnownGood(); }
+    };
+    const service = new RuntimeService({ dataDir, snapshotStore: store });
+    service.evaluate({ inputPath: input });
+    service.evaluate({ inputPath: input });
+    assert.equal(service.evaluate({ inputPath: input }).status.circuitState, 'open');
+    const before = { currentLoads, lastKnownGoodLoads };
+
+    assert.equal(service.evaluate({ inputPath: input }).status.circuitState, 'open');
+    assert.equal(service.status().circuitState, 'open');
+    assert.deepEqual({ currentLoads, lastKnownGoodLoads }, before);
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 
