@@ -194,6 +194,53 @@ test('recovery retains a validated rollback and uses it as last-known-good', () 
   assert.equal(readFileSync(snapshotStore.paths.rollbackManifest, 'utf8'), rollback);
 });
 
+test('repeated corrupt recovery cycles retain only referenced generations', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const snapshotStore = store(root);
+  let current = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('cycle-0')] });
+  snapshotStore.publish(current);
+  for (let index = 1; index <= 12; index += 1) {
+    writeFileSync(snapshotStore.generationPath(current.checksum), '{broken', { mode: 0o600 });
+    current = compileRuntimeSnapshot({
+      repositoryId: 'repo-a', generatedAt: `2026-08-25T00:${String(index).padStart(2, '0')}:00.000Z`, repositoryRules: [rule(`cycle-${index}`)]
+    });
+    snapshotStore.recover(current, 'repo-a');
+  }
+  const manifest = JSON.parse(readFileSync(snapshotStore.paths.manifest, 'utf8')) as { current: { file: string }; lastKnownGood?: { file: string } };
+  const retained = new Set([manifest.current.file, manifest.lastKnownGood?.file].filter(Boolean));
+  assert.deepEqual(readdirSync(root).filter((name) => name.startsWith('generation-')).sort(), [...retained].sort());
+});
+
+test('recovery cleanup is best effort for expected failures and propagates programming errors postcommit', () => {
+  const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
+  for (const cleanupError of [new RuntimeSnapshotCleanupError('expected cleanup failure'), new TypeError('cleanup bug')]) {
+    const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+    store(root).publish(first);
+    writeFileSync(store(root).generationPath(first.checksum), '{broken', { mode: 0o600 });
+    const recovering = store(root, { injectFailure: (step) => { if (step === 'cleanup') throw cleanupError; } });
+    if (cleanupError instanceof TypeError) assert.throws(() => recovering.recover(second, 'repo-a'), cleanupError);
+    else assert.doesNotThrow(() => recovering.recover(second, 'repo-a'));
+    assert.equal(store(root).loadCurrent().rules[0]?.id, 'second');
+  }
+});
+
+test('the state-entry boundary cannot permanently prevent later recovery', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
+  const third = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:02:00.000Z', repositoryRules: [rule('third')] });
+  const snapshotStore = store(root);
+  snapshotStore.publish(first);
+  writeFileSync(snapshotStore.generationPath(first.checksum), '{broken', { mode: 0o600 });
+  for (let index = 0; index < 254; index += 1) writeFileSync(join(root, `bounded-${String(index).padStart(3, '0')}`), 'x');
+
+  snapshotStore.recover(second, 'repo-a');
+  writeFileSync(snapshotStore.generationPath(second.checksum), '{broken', { mode: 0o600 });
+  assert.doesNotThrow(() => snapshotStore.recover(third, 'repo-a'));
+  assert.equal(snapshotStore.loadCurrent().rules[0]?.id, 'third');
+});
+
 test('failed candidate validation and symlink state paths preserve current', () => {
   const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
   const snapshotStore = store(root);

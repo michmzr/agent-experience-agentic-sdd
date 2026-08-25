@@ -138,8 +138,10 @@ export class RuntimeSnapshotStore {
     this.#ensurePrivateDirectory();
     return this.#withWriterLock(() => {
       let normalPublish = false;
+      let priorCurrent: ManifestReference | undefined;
       try {
         const manifest = this.#readOptionalManifest();
+        priorCurrent = manifest?.current;
         if (manifest !== undefined) this.#readSnapshotFile(resolveReference(this.paths.root, manifest.current), manifest.current.checksum);
         normalPublish = true;
       } catch (error) {
@@ -147,7 +149,7 @@ export class RuntimeSnapshotStore {
       }
       return normalPublish
         ? this.#publishLocked(serialized, expected)
-        : this.#recoverPublishLocked(serialized, expected, this.#validRecoveryReference());
+        : this.#recoverPublishLocked(serialized, expected, this.#validRecoveryReference(), priorCurrent);
     });
   }
 
@@ -269,7 +271,12 @@ export class RuntimeSnapshotStore {
     return referenceToRecover;
   }
 
-  #recoverPublishLocked(serialized: string, expected: RuntimeSnapshotV1, lastKnownGood?: ManifestReference): RuntimeSnapshotV1 {
+  #recoverPublishLocked(
+    serialized: string,
+    expected: RuntimeSnapshotV1,
+    lastKnownGood?: ManifestReference,
+    priorCurrent?: ManifestReference
+  ): RuntimeSnapshotV1 {
     const priorSerialized = this.#readOwnerFile(this.paths.manifest, MAX_MANIFEST_BYTES);
     const priorFingerprint = this.#manifestFingerprint();
     const generation = this.generationPath(expected.checksum);
@@ -307,6 +314,8 @@ export class RuntimeSnapshotStore {
         this.#syncDirectory();
         throw error;
       }
+      this.#removeCandidate(restorationCandidate);
+      this.#cleanupAfterCommit(committedManifest, priorCurrent);
       return reopened;
     } finally {
       this.#removeCandidate(generationCandidate);
@@ -315,7 +324,7 @@ export class RuntimeSnapshotStore {
     }
   }
 
-  #cleanupAfterCommit(manifest: RuntimeSnapshotManifestV1): void {
+  #cleanupAfterCommit(manifest: RuntimeSnapshotManifestV1, knownSuperseded?: ManifestReference): void {
     try { this.#injectFailure('cleanup'); }
     catch (error) { if (error instanceof RuntimeSnapshotCleanupError) return; throw error; }
     try {
@@ -324,6 +333,9 @@ export class RuntimeSnapshotStore {
       if (rollback !== undefined) {
         retained.add(rollback.current.file);
         if (rollback.lastKnownGood !== undefined) retained.add(rollback.lastKnownGood.file);
+      }
+      if (knownSuperseded !== undefined && !retained.has(knownSuperseded.file)) {
+        this.#removeCandidate(resolveReference(this.paths.root, knownSuperseded));
       }
       for (const { name } of this.#readStateDirectoryEntries()) {
         if (generationPattern.test(name) && !retained.has(name)) this.#removeCandidate(resolve(this.paths.root, name));
