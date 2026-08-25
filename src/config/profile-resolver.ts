@@ -3,10 +3,16 @@ import type {
   OperationClass,
   RuntimeProfile
 } from '../runtime/contracts.js';
-import { normalizeRuntimePath } from '../runtime/matcher.js';
 import {
+  canonicalRuntimePathIdentity,
+  normalizeRuntimePath
+} from '../runtime/matcher.js';
+import {
+  BUILT_IN_RUNTIME_PROFILE_REGISTRY,
   BUILT_IN_RUNTIME_PROFILES,
-  hasLearningLineage
+  hasLearningLineage,
+  validateRuntimeProfileRegistry,
+  type RuntimeProfileRegistry
 } from './runtime-profile.js';
 
 export type ProfileSource =
@@ -43,7 +49,7 @@ export interface ProfileTargetFacts {
 
 export interface ProfileResolutionInput {
   readonly facts: ProfileTargetFacts;
-  readonly profiles?: Readonly<Record<string, RuntimeProfile>>;
+  readonly profiles?: RuntimeProfileRegistry;
   readonly sessionOverride?: RuntimeProfileSelection;
   readonly localSelectors?: readonly ProfileTargetSelector[];
   readonly repositoryShared?: RuntimeProfileSelection;
@@ -108,19 +114,25 @@ interface Candidate {
 interface MatchedSelector {
   readonly selector: ProfileTargetSelector;
   readonly normalizedPattern: string;
+  readonly matchPattern: string;
   readonly wildcardCount: number;
   readonly literalCount: number;
 }
 
 /** Resolves injected target facts without Git, filesystem, subprocess, or environment access. */
 export function resolveProfileTarget(input: ProfileResolutionInput): ResolvedProfileTarget {
-  const registry = { ...(input.profiles ?? {}), ...BUILT_IN_RUNTIME_PROFILES };
+  const configuredRegistry = validateRuntimeProfileRegistry(
+    input.profiles ?? BUILT_IN_RUNTIME_PROFILE_REGISTRY
+  );
+  const registry = configuredRegistry.profiles;
   if (input.facts.workspacePath !== undefined) normalizeRuntimePath(input.facts.workspacePath);
   if (input.facts.remoteUrl !== undefined) normalizeGitRemoteUrl(input.facts.remoteUrl);
   const localMatches = matchSelectors(input.localSelectors ?? [], input.facts);
   const globalMatches = matchSelectors(input.globalSelectors ?? [], input.facts);
   const defaultId = input.builtInDefault ?? 'normal';
-  const builtInDefault = BUILT_IN_RUNTIME_PROFILES[defaultId];
+  const builtInDefault = Object.hasOwn(BUILT_IN_RUNTIME_PROFILES, defaultId)
+    ? BUILT_IN_RUNTIME_PROFILES[defaultId]
+    : undefined;
   if (builtInDefault === undefined) {
     throw new ProfileResolutionError(`Unknown built-in default profile: ${String(defaultId)}`);
   }
@@ -145,9 +157,7 @@ export function resolveProfileTarget(input: ProfileResolutionInput): ResolvedPro
   }
 
   const resolvedId = values.id as string;
-  const sourceRegistry = input.profiles ?? BUILT_IN_RUNTIME_PROFILES;
-  const learningLineage = hasLearningLineage(sourceRegistry, resolvedId)
-    || hasLearningLineage(BUILT_IN_RUNTIME_PROFILES, resolvedId);
+  const learningLineage = hasLearningLineage(configuredRegistry, resolvedId);
   const profile = freezeResolvedProfile(values, learningLineage);
   return Object.freeze({ profile, trace: Object.freeze(trace) as ProfileResolutionTrace });
 }
@@ -172,14 +182,14 @@ export function normalizeGitRemoteUrl(remoteUrl: string): string {
   const path = hostBoundary < 0 ? '' : value.slice(hostBoundary + 1);
   const host = authority.slice(authority.lastIndexOf('@') + 1).toLowerCase();
   if (host.length === 0 || path.length === 0) {
-    throw new ProfileResolutionError(`Unsupported Git remote URL: ${remoteUrl}`);
+    throw new ProfileResolutionError('Unsupported Git remote URL.');
   }
 
   const normalizedPath = path
     .replace(/\/{2,}/g, '/')
     .replace(/\/+$/, '')
     .replace(/\.git$/i, '');
-  if (normalizedPath.length === 0) throw new ProfileResolutionError(`Unsupported Git remote URL: ${remoteUrl}`);
+  if (normalizedPath.length === 0) throw new ProfileResolutionError('Unsupported Git remote URL.');
   return `${host}/${normalizedPath}`;
 }
 
@@ -193,14 +203,18 @@ function matchSelectors(
     const normalizedPattern = selector.target === 'remote'
       ? normalizeGitRemoteUrl(selector.pattern)
       : normalizeRuntimePath(selector.pattern);
+    const matchPattern = selector.target === 'remote'
+      ? normalizedPattern
+      : canonicalRuntimePathIdentity(selector.pattern);
     const fact = selector.target === 'remote' ? inputRemote(facts.remoteUrl) : inputPath(facts.workspacePath);
-    if (fact === undefined || !globMatches(normalizedPattern, fact)) continue;
-    const wildcardCount = countWildcards(normalizedPattern);
+    if (fact === undefined || !globMatches(matchPattern, fact)) continue;
+    const wildcardCount = countWildcards(matchPattern);
     matches.push({
       selector,
       normalizedPattern,
+      matchPattern,
       wildcardCount,
-      literalCount: normalizedPattern.length - wildcardCount
+      literalCount: matchPattern.length - wildcardCount
     });
   }
   return matches;
@@ -248,7 +262,7 @@ function addSelectorCandidate(
     ...(resolved.profileId === undefined ? {} : { profileId: resolved.profileId }),
     selector: Object.freeze({
       target: match.selector.target,
-      pattern: match.selector.pattern,
+      pattern: match.selector.target === 'remote' ? match.normalizedPattern : match.selector.pattern,
       normalizedPattern: match.normalizedPattern
     })
   });
@@ -309,7 +323,7 @@ function profileValues(
   registry: Readonly<Record<string, RuntimeProfile>>
 ): { readonly values: RuntimeProfile; readonly profileId: string } {
   if (!isNonEmptyString(id)) throw new ProfileResolutionError('Runtime profile id must be a non-empty string.');
-  const profile = registry[id];
+  const profile = Object.hasOwn(registry, id) ? registry[id] : undefined;
   if (profile === undefined) throw new ProfileResolutionError(`Unknown runtime profile: ${id}`);
   return { values: profile, profileId: id };
 }
@@ -353,7 +367,7 @@ function inputRemote(value: string | undefined): string | undefined {
 }
 
 function inputPath(value: string | undefined): string | undefined {
-  return value === undefined ? undefined : normalizeRuntimePath(value);
+  return value === undefined ? undefined : canonicalRuntimePathIdentity(value);
 }
 
 function freezeTraceEntry(candidate: Candidate): ProfileTraceEntry {

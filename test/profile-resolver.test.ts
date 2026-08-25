@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { defineRuntimeProfiles } from '../src/config/runtime-profile.js';
+import {
+  defineRuntimeProfiles,
+  type RuntimeProfileRegistry
+} from '../src/config/runtime-profile.js';
 import {
   normalizeGitRemoteUrl,
   resolveProfileTarget,
@@ -165,6 +168,23 @@ test('rejects a transitive learning descendant with blocking restored when captu
   }), /learning.*capture/i);
 });
 
+test('preserves learning lineage through object spread and JSON serialization', () => {
+  const cloned: RuntimeProfileRegistry = {
+    ...profiles,
+    profiles: { ...profiles.profiles },
+    learningProfileIds: [...profiles.learningProfileIds]
+  };
+  const deserialized = JSON.parse(JSON.stringify(profiles)) as RuntimeProfileRegistry;
+
+  for (const registry of [cloned, deserialized]) {
+    assert.throws(() => resolveProfileTarget({
+      facts,
+      profiles: registry,
+      sessionOverride: { profile: 'safe-learning', captureEnabled: false }
+    }), /learning.*capture/i);
+  }
+});
+
 test('allows a non-learning warn-only custom profile with capture disabled', () => {
   const nonLearningProfiles = defineRuntimeProfiles([
     {
@@ -183,6 +203,65 @@ test('allows a non-learning warn-only custom profile with capture disabled', () 
 
   assert.equal(result.profile.id, 'warn-only-no-capture');
   assert.equal(result.profile.captureEnabled, false);
+});
+
+test('treats Object prototype profile names as explicit IDs only', () => {
+  const specialProfiles = defineRuntimeProfiles([
+    { id: 'toString', extends: 'normal' },
+    { id: 'constructor', extends: 'normal' },
+    { id: '__proto__', extends: 'normal' }
+  ]);
+
+  for (const id of ['toString', 'constructor', '__proto__']) {
+    assert.equal(resolveProfileTarget({ facts, profiles: specialProfiles, sessionOverride: id }).profile.id, id);
+  }
+  for (const id of ['toString', 'constructor', '__proto__']) {
+    assert.throws(() => resolveProfileTarget({ facts, sessionOverride: id }), /unknown/i);
+  }
+});
+
+test('remote diagnostics and traces never retain credential-bearing userinfo', () => {
+  const secret = 'remote-user-secret';
+  const malformedRemoteCalls = [
+    () => normalizeGitRemoteUrl(`https://${secret}@invalid`),
+    () => resolveProfileTarget({
+      facts: { workspacePath: '/work/repo', remoteUrl: `https://${secret}@invalid` },
+      profiles
+    }),
+    () => resolveProfileTarget({
+      facts,
+      profiles,
+      globalSelectors: [selector('remote', `https://${secret}@invalid`, 'normal')]
+    })
+  ];
+  for (const call of malformedRemoteCalls) {
+    let diagnostic = '';
+    try {
+      call();
+    } catch (error) {
+      diagnostic = String(error);
+    }
+    assert.equal(diagnostic.includes(secret), false);
+  }
+
+  const result = resolveProfileTarget({
+    facts: { workspacePath: '/work/repo', remoteUrl: `https://fact:${secret}@github.com/Acme/Project.git` },
+    profiles,
+    globalSelectors: [selector('remote', `https://selector:${secret}@github.com/Acme/Project.git`, 'quiet')]
+  });
+  assert.equal(JSON.stringify(result.trace).includes(secret), false);
+  assert.equal(result.trace.id.selector?.pattern, 'github.com/Acme/Project');
+});
+
+test('path selectors preserve Task 1 path flavor identity', () => {
+  const result = resolveProfileTarget({
+    facts: { workspacePath: 'C:\\Repo' },
+    profiles,
+    localSelectors: [selector('path', './c:/repo', 'learning')]
+  });
+
+  assert.equal(result.profile.id, 'normal');
+  assert.equal(result.trace.id.source, 'built-in-default');
 });
 
 test('resolves valid profile fields independently and traces every field', () => {

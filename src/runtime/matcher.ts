@@ -151,7 +151,7 @@ function declaredApplicabilityMatches(input: RuntimeInput, rule: RuntimeRule): b
 
   if (applicability.tool !== undefined && canonicalToken(applicability.tool) !== canonicalToken(signatureTool ?? '')) return false;
   if (applicability.path !== undefined) {
-    if (signaturePath === undefined || canonicalPathIdentity(applicability.path) !== canonicalPathIdentity(signaturePath)) return false;
+    if (signaturePath === undefined || canonicalRuntimePathIdentity(applicability.path) !== canonicalRuntimePathIdentity(signaturePath)) return false;
   }
   if (applicability.tags !== undefined) {
     const inputTags = new Set((input.tags ?? []).map(canonicalToken));
@@ -169,7 +169,7 @@ function canonicalOptionalPath(path: string | undefined): CanonicalPath | null {
   return path === undefined ? null : canonicalPath(path);
 }
 
-function canonicalPathIdentity(path: string): string {
+export function canonicalRuntimePathIdentity(path: string): string {
   const canonical = canonicalPath(path);
   return `${canonical.flavor}\u0000${canonical.normalized}`;
 }

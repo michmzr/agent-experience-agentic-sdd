@@ -63,7 +63,7 @@ test('observe-only preserves capture, retrieval, and explanations while disablin
 });
 
 test('custom profiles inherit transitively and override declared runtime fields', () => {
-  const profiles = defineRuntimeProfiles([
+  const registry = defineRuntimeProfiles([
     { id: 'team-learning', extends: 'learning', warningsEnabled: false },
     {
       id: 'team-protected',
@@ -72,7 +72,8 @@ test('custom profiles inherit transitively and override declared runtime fields'
     }
   ]);
 
-  assert.deepEqual(profiles['team-protected'], {
+  assert.equal(registry.version, 1);
+  assert.deepEqual(registry.profiles['team-protected'], {
     id: 'team-protected',
     hardBlocking: false,
     warningsEnabled: false,
@@ -80,17 +81,20 @@ test('custom profiles inherit transitively and override declared runtime fields'
     retrievalEnabled: true,
     degradedOutcomes: { normal: 'ALLOW', caution: 'WARN', protected: 'WARN' }
   });
-  assert.equal(Object.isFrozen(profiles), true);
-  assert.equal(Object.isFrozen(profiles['team-protected']), true);
-  assert.equal(Object.isFrozen(profiles['team-protected']?.degradedOutcomes), true);
-  assert.equal(hasLearningLineage(profiles, 'team-learning'), true);
-  assert.equal(hasLearningLineage(profiles, 'team-protected'), true);
-  assert.equal(hasLearningLineage(profiles, 'normal'), false);
-  assert.equal(hasLearningLineage(profiles, 'observe-only'), false);
+  assert.deepEqual(registry.learningProfileIds, ['learning', 'team-learning', 'team-protected']);
+  assert.equal(Object.isFrozen(registry), true);
+  assert.equal(Object.isFrozen(registry.profiles), true);
+  assert.equal(Object.isFrozen(registry.learningProfileIds), true);
+  assert.equal(Object.isFrozen(registry.profiles['team-protected']), true);
+  assert.equal(Object.isFrozen(registry.profiles['team-protected']?.degradedOutcomes), true);
+  assert.equal(hasLearningLineage(registry, 'team-learning'), true);
+  assert.equal(hasLearningLineage(registry, 'team-protected'), true);
+  assert.equal(hasLearningLineage(registry, 'normal'), false);
+  assert.equal(hasLearningLineage(registry, 'observe-only'), false);
 });
 
 test('non-learning profiles may disable capture even when their fields resemble learning mode', () => {
-  const profiles = defineRuntimeProfiles([
+  const registry = defineRuntimeProfiles([
     {
       id: 'warn-only-no-capture',
       extends: 'normal',
@@ -99,8 +103,21 @@ test('non-learning profiles may disable capture even when their fields resemble 
     }
   ]);
 
-  assert.equal(profiles['warn-only-no-capture']?.captureEnabled, false);
-  assert.equal(hasLearningLineage(profiles, 'warn-only-no-capture'), false);
+  assert.equal(registry.profiles['warn-only-no-capture']?.captureEnabled, false);
+  assert.equal(hasLearningLineage(registry, 'warn-only-no-capture'), false);
+});
+
+test('profile identifiers with Object prototype names are explicit own properties', () => {
+  const registry = defineRuntimeProfiles([
+    { id: 'toString', extends: 'normal' },
+    { id: 'constructor', extends: 'normal' },
+    { id: '__proto__', extends: 'normal' }
+  ]);
+
+  for (const id of ['toString', 'constructor', '__proto__']) {
+    assert.equal(Object.hasOwn(registry.profiles, id), true);
+    assert.equal(registry.profiles[id]?.id, id);
+  }
 });
 
 test('custom profile validation rejects invalid configuration', () => {
