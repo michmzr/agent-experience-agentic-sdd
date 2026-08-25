@@ -6,7 +6,7 @@ import type { ExperienceImport, KnowledgeEntry, KnowledgeId, KnowledgeMetadata, 
 import { reconcileImportedKnowledgeLifecycle } from '../domain/transitions.js';
 import { validateImport } from '../domain/validation.js';
 import { openExperienceDatabase } from './database.js';
-import { ensureOverrideAuditUseMigration, overrideAuditMigration } from './override-store.js';
+import { ensureOverrideAuditUseMigration, ensureOverrideEvidenceMigration, overrideAuditMigration } from './override-store.js';
 
 interface KnowledgeRow {
   id: string;
@@ -327,6 +327,12 @@ export class ExperienceStore {
         this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(6, new Date().toISOString());
       } else {
         ensureOverrideAuditUseMigration(this.database);
+      }
+      if (!applied.has(7)) {
+        ensureOverrideEvidenceMigration(this.database);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(7, new Date().toISOString());
+      } else {
+        ensureOverrideEvidenceMigration(this.database);
       }
       this.database.exec('COMMIT');
     } catch (error) {

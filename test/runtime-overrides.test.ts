@@ -147,15 +147,15 @@ function allAudit(store: OverrideStore, overrideId?: string): readonly OverrideA
 
 function allEvidence(store: OverrideStore, overrideId?: string): ReturnType<OverrideStore['deriveLearningEvidencePage']>['entries'] {
   const entries: Array<ReturnType<OverrideStore['deriveLearningEvidencePage']>['entries'][number]> = [];
-  let afterRuleId: string | undefined;
+  let cursor: ReturnType<OverrideStore['deriveLearningEvidencePage']>['nextCursor'];
   do {
     const page = store.deriveLearningEvidencePage({
       ...(overrideId === undefined ? {} : { overrideId }),
-      ...(afterRuleId === undefined ? {} : { afterRuleId })
+      ...(cursor === undefined ? {} : { cursor })
     });
     entries.push(...page.entries);
-    afterRuleId = page.nextCursor;
-  } while (afterRuleId !== undefined);
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
   return entries;
 }
 
@@ -184,6 +184,7 @@ test('ExperienceStore applies the override audit migration', () => {
 
   const database = openExperienceDatabase(databasePath);
   assert.equal(database.prepare('SELECT version FROM schema_migrations WHERE version = 6').get() !== undefined, true);
+  assert.equal(database.prepare('SELECT version FROM schema_migrations WHERE version = 7').get() !== undefined, true);
   assert.equal(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runtime_override_audit'").get() !== undefined, true);
   assert.equal((database.prepare("SELECT COUNT(*) AS count FROM pragma_table_info('runtime_override_audit') WHERE name = 'use_id'").get() as { count: number }).count, 1);
   database.close();
@@ -491,7 +492,7 @@ test('paginates qualifying rules with stable order while excluding many singleto
   }
 
   const first = store.deriveLearningEvidencePage({ overrideId: grant.id, limit: MAX_OVERRIDE_EVIDENCE_PAGE_SIZE });
-  const second = store.deriveLearningEvidencePage({ overrideId: grant.id, limit: MAX_OVERRIDE_EVIDENCE_PAGE_SIZE, afterRuleId: first.nextCursor });
+  const second = store.deriveLearningEvidencePage({ overrideId: grant.id, limit: MAX_OVERRIDE_EVIDENCE_PAGE_SIZE, cursor: first.nextCursor });
   const combined = [...first.entries, ...second.entries];
   assert.equal(first.entries.length, MAX_OVERRIDE_EVIDENCE_PAGE_SIZE);
   assert.equal(second.entries.length, 3);
@@ -501,6 +502,90 @@ test('paginates qualifying rules with stable order while excluding many singleto
   assert.equal(combined.every(({ successfulUseCount }) => successfulUseCount === 2), true);
   assert.throws(() => store.deriveLearningEvidencePage({ limit: MAX_OVERRIDE_EVIDENCE_PAGE_SIZE + 1 }), /page size/i);
   store.close();
+});
+
+test('evidence traversal keeps its audit high-water while concurrent rules qualify', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-override-snapshot-')), 'experience.sqlite');
+  const firstStore = new OverrideStore(databasePath);
+  const secondStore = new OverrideStore(databasePath);
+  const grant = createRuntimeOverride({
+    id: 'snapshot-grant', scope: { kind: 'action', signature: action.signature }, reason: 'Snapshot evidence.', createdAt: now
+  });
+  const addSuccess = (store: OverrideStore, ruleId: string, suffix: string) => {
+    const useId = `${ruleId}-${suffix}`;
+    const references = [{ ruleId, knowledgeId: `knowledge-${ruleId}`, evidenceIds: [`evidence-${ruleId}`] }];
+    store.append({ ...audit(`auth-${useId}`, grant.id, 'authorized', undefined, useId), override: grant, decisionReferences: references });
+    store.append({ ...audit(`done-${useId}`, grant.id, 'completed', 'succeeded', useId), override: grant, decisionReferences: references });
+  };
+  for (const ruleId of ['rule-b', 'rule-c']) for (const suffix of ['1', '2']) addSuccess(firstStore, ruleId, suffix);
+
+  const first = firstStore.deriveLearningEvidencePage({ overrideId: grant.id, limit: 1 });
+  assert.deepEqual(first.entries.map(({ ruleId }) => ruleId), ['rule-b']);
+  assert.notEqual(first.nextCursor, undefined);
+  for (const suffix of ['1', '2']) addSuccess(secondStore, 'rule-a', suffix);
+  addSuccess(secondStore, 'rule-c', '3');
+
+  const second = firstStore.deriveLearningEvidencePage({ overrideId: grant.id, limit: 10, cursor: first.nextCursor });
+  assert.deepEqual(second.entries.map(({ ruleId, successfulUseCount }) => [ruleId, successfulUseCount]), [['rule-c', 2]]);
+  assert.throws(() => firstStore.deriveLearningEvidencePage({ overrideId: 'different-grant', cursor: first.nextCursor }), /cursor/i);
+  assert.deepEqual(allEvidence(firstStore, grant.id).map(({ ruleId, successfulUseCount }) => [ruleId, successfulUseCount]), [
+    ['rule-a', 2], ['rule-b', 2], ['rule-c', 3]
+  ]);
+  firstStore.close();
+  secondStore.close();
+});
+
+test('rebuilds normalized evidence transactionally and uses bounded indexes', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-override-evidence-migration-')), 'experience.sqlite');
+  const store = new OverrideStore(databasePath);
+  for (const useId of ['migration-1', 'migration-2']) {
+    store.append(audit(`auth-${useId}`, 'migration-override', 'authorized', undefined, useId));
+    store.append(audit(`done-${useId}`, 'migration-override', 'completed', 'succeeded', useId));
+  }
+  store.close();
+  const before = openExperienceDatabase(databasePath);
+  before.exec('DROP TABLE runtime_override_rule_qualification');
+  before.exec('DROP TABLE runtime_override_rule_success');
+  before.exec('DROP TABLE runtime_override_rule_reference');
+  before.close();
+
+  const migrated = new OverrideStore(databasePath);
+  assert.equal(allEvidence(migrated, 'migration-override')[0]?.successfulUseCount, 2);
+  migrated.close();
+  const database = openExperienceDatabase(databasePath);
+  assert.equal((database.prepare('SELECT COUNT(*) AS count FROM runtime_override_rule_reference').get() as { count: number }).count, 8);
+  assert.equal((database.prepare('SELECT COUNT(*) AS count FROM runtime_override_rule_success').get() as { count: number }).count, 2);
+  const qualificationPlan = database.prepare(`EXPLAIN QUERY PLAN SELECT rule_id
+    FROM runtime_override_rule_qualification
+    WHERE scope_key = ? AND rule_id > ? AND qualified_at_sequence <= ?
+    ORDER BY rule_id LIMIT ?`).all('migration-override', '', 100, 10) as Array<{ detail: string }>;
+  const countPlan = database.prepare(`EXPLAIN QUERY PLAN SELECT COUNT(*)
+    FROM runtime_override_rule_success
+    WHERE override_id = ? AND rule_id = ? AND completion_sequence <= ?`).all('migration-override', 'rule-a', 100) as Array<{ detail: string }>;
+  assert.equal(qualificationPlan.some(({ detail }) => detail.includes('runtime_override_qualification_page')), true);
+  assert.equal(countPlan.some(({ detail }) => detail.includes('runtime_override_success_by_override_rule_sequence')), true);
+  database.close();
+});
+
+test('invalid strict audit rolls back normalized evidence migration atomically', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-override-evidence-rollback-')), 'experience.sqlite');
+  const store = new OverrideStore(databasePath);
+  store.append(audit('rollback-auth', 'rollback-override', 'authorized'));
+  store.close();
+  const database = openExperienceDatabase(databasePath);
+  database.exec('DROP TABLE runtime_override_rule_qualification');
+  database.exec('DROP TABLE runtime_override_rule_success');
+  database.exec('DROP TABLE runtime_override_rule_reference');
+  database.prepare('UPDATE runtime_override_audit SET decision_references_json = ?')
+    .run(JSON.stringify([decision.references[0], decision.references[0]]));
+  const before = database.prepare('SELECT * FROM runtime_override_audit').all();
+  database.close();
+
+  assert.throws(() => new OverrideStore(databasePath), /duplicate decision reference/i);
+  const after = openExperienceDatabase(databasePath);
+  assert.deepEqual(after.prepare('SELECT * FROM runtime_override_audit').all(), before);
+  assert.equal((after.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE name LIKE 'runtime_override_rule_%'").get() as { count: number }).count, 0);
+  after.close();
 });
 
 test('rejects private or credential-bearing decision references atomically without echoing values', () => {
