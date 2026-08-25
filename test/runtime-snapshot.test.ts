@@ -241,6 +241,48 @@ test('the state-entry boundary cannot permanently prevent later recovery', () =>
   assert.equal(snapshotStore.loadCurrent().rules[0]?.id, 'third');
 });
 
+test('streaming recovery cleanup repairs the corrupt-manifest entry boundary without deleting unknown artifacts', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
+  const third = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:02:00.000Z', repositoryRules: [rule('third')] });
+  const snapshotStore = store(root);
+  snapshotStore.publish(first);
+  writeFileSync(snapshotStore.paths.manifest, '{broken', { mode: 0o600 });
+  for (let index = 0; index < 253; index += 1) writeFileSync(join(root, `unrelated-${String(index).padStart(3, '0')}`), 'x');
+  const invalidGeneration = join(root, 'generation-not-a-checksum.json');
+  writeFileSync(invalidGeneration, 'x');
+
+  snapshotStore.recover(second, 'repo-a');
+  assert.equal(existsSync(snapshotStore.generationPath(first.checksum)), false);
+  assert.equal(existsSync(invalidGeneration), true);
+  writeFileSync(snapshotStore.paths.manifest, '{broken-again', { mode: 0o600 });
+  assert.doesNotThrow(() => snapshotStore.recover(third, 'repo-a'));
+  assert.equal(snapshotStore.loadCurrent().rules[0]?.id, 'third');
+  assert.equal(existsSync(snapshotStore.generationPath(second.checksum)), false);
+  assert.equal(existsSync(invalidGeneration), true);
+});
+
+test('streaming recovery cleanup bounds attacker-controlled directory reads', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
+  store(root).publish(first);
+  writeFileSync(store(root).paths.manifest, '{broken', { mode: 0o600 });
+  let entriesRead = 0;
+  const recovering = store(root, {
+    afterLockAcquired: () => {
+      for (let index = 0; index < 270; index += 1) writeFileSync(join(root, `late-unrelated-${String(index).padStart(3, '0')}`), 'x');
+      entriesRead = 0;
+    },
+    onDirectoryEntryRead: (directory) => { if (directory === 'state') entriesRead += 1; }
+  });
+
+  assert.doesNotThrow(() => recovering.recover(second, 'repo-a'));
+  assert.equal(entriesRead, 259);
+  assert.equal(store(root).loadCurrent().rules[0]?.id, 'second');
+});
+
 test('failed candidate validation and symlink state paths preserve current', () => {
   const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
   const snapshotStore = store(root);

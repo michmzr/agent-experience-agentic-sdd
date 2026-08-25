@@ -76,6 +76,7 @@ const reclaimChoosingPattern = /^choosing-([a-f0-9-]+)$/;
 const reclaimRecoveringPattern = /^(?:recovering|releasing)-([a-f0-9-]+)$/;
 const MAX_RECLAIM_CLAIMS = 128;
 const MAX_STATE_DIRECTORY_ENTRIES = 256;
+const MAX_RECOVERY_CLEANUP_TRANSIENT_ENTRIES = 2;
 
 export class RuntimeSnapshotStore {
   readonly paths: RuntimeSnapshotPaths;
@@ -315,7 +316,7 @@ export class RuntimeSnapshotStore {
         throw error;
       }
       this.#removeCandidate(restorationCandidate);
-      this.#cleanupAfterCommit(committedManifest, priorCurrent);
+      this.#cleanupAfterCommit(committedManifest, priorCurrent, true);
       return reopened;
     } finally {
       this.#removeCandidate(generationCandidate);
@@ -324,7 +325,11 @@ export class RuntimeSnapshotStore {
     }
   }
 
-  #cleanupAfterCommit(manifest: RuntimeSnapshotManifestV1, knownSuperseded?: ManifestReference): void {
+  #cleanupAfterCommit(
+    manifest: RuntimeSnapshotManifestV1,
+    knownSuperseded?: ManifestReference,
+    streamingRecovery = false
+  ): void {
     try { this.#injectFailure('cleanup'); }
     catch (error) { if (error instanceof RuntimeSnapshotCleanupError) return; throw error; }
     try {
@@ -337,6 +342,10 @@ export class RuntimeSnapshotStore {
       if (knownSuperseded !== undefined && !retained.has(knownSuperseded.file)) {
         this.#removeCandidate(resolveReference(this.paths.root, knownSuperseded));
       }
+      if (streamingRecovery) {
+        this.#cleanupRecoveryGenerations(retained);
+        return;
+      }
       for (const { name } of this.#readStateDirectoryEntries()) {
         if (generationPattern.test(name) && !retained.has(name)) this.#removeCandidate(resolve(this.paths.root, name));
       }
@@ -345,6 +354,33 @@ export class RuntimeSnapshotStore {
       if (error instanceof RuntimeSnapshotDirectoryLimitError && error.directory === 'state') return;
       if (isExpectedNodeFilesystemError(error)) return;
       throw error;
+    }
+  }
+
+  #cleanupRecoveryGenerations(retained: ReadonlySet<string>): void {
+    const directory = opendirSync(this.paths.root);
+    let entriesRead = 0;
+    let removed = 0;
+    let ownedWriterLockObserved = false;
+    try {
+      while (true) {
+        const entry = directory.readSync();
+        if (entry === null) break;
+        entriesRead += 1;
+        this.#onDirectoryEntryRead('state');
+        if (entry.name === '.writer-lock') ownedWriterLockObserved = true;
+        if (generationPattern.test(entry.name) && !retained.has(entry.name)) {
+          this.#removeCandidate(resolve(this.paths.root, entry.name));
+          removed += 1;
+        }
+        if (entriesRead > MAX_STATE_DIRECTORY_ENTRIES + MAX_RECOVERY_CLEANUP_TRANSIENT_ENTRIES) {
+          throw new RuntimeSnapshotDirectoryLimitError('state', 'Runtime snapshot state directory entry limit exceeded.');
+        }
+      }
+    } finally { directory.closeSync(); }
+    const steadyStateEntries = entriesRead - removed - (ownedWriterLockObserved ? 1 : 0);
+    if (steadyStateEntries > MAX_STATE_DIRECTORY_ENTRIES) {
+      throw new RuntimeSnapshotDirectoryLimitError('state', 'Runtime snapshot state directory entry limit exceeded.');
     }
   }
 
