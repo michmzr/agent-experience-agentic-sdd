@@ -6,6 +6,12 @@ import type {
 
 export type RuntimeProfileId = string;
 
+const learningLineageMetadata = Symbol('runtime-profile-learning-lineage');
+
+type RuntimeProfileRegistryWithMetadata = Readonly<Record<string, RuntimeProfile>> & {
+  readonly [learningLineageMetadata]?: Readonly<Record<string, boolean>>;
+};
+
 export interface CustomRuntimeProfileDefinition {
   readonly id: string;
   readonly extends: string;
@@ -51,10 +57,14 @@ export const OBSERVE_ONLY_PROFILE: RuntimeProfile = freezeProfile({
   warningsEnabled: false
 });
 
-export const BUILT_IN_RUNTIME_PROFILES: Readonly<Record<string, RuntimeProfile>> = Object.freeze({
+export const BUILT_IN_RUNTIME_PROFILES: Readonly<Record<string, RuntimeProfile>> = freezeRegistry({
   [NORMAL_PROFILE.id]: NORMAL_PROFILE,
   [LEARNING_PROFILE.id]: LEARNING_PROFILE,
   [OBSERVE_ONLY_PROFILE.id]: OBSERVE_ONLY_PROFILE
+}, {
+  [NORMAL_PROFILE.id]: false,
+  [LEARNING_PROFILE.id]: true,
+  [OBSERVE_ONLY_PROFILE.id]: false
 });
 
 const definitionFields = new Set([
@@ -109,9 +119,7 @@ export function defineRuntimeProfiles(
       ...runtimeOverrides(definition),
       id: definition.id
     });
-    const hasLearningSemantics = inheritsLearning
-      || (!profile.hardBlocking && profile.warningsEnabled);
-    if (hasLearningSemantics && !profile.captureEnabled) {
+    if (inheritsLearning && !profile.captureEnabled) {
       throw new RuntimeProfileConfigurationError(
         `Learning profile ${profile.id} must keep capture enabled.`
       );
@@ -125,7 +133,20 @@ export function defineRuntimeProfiles(
 
   for (const definition of validated) resolve(definition.id);
 
-  return Object.freeze(Object.fromEntries(resolved));
+  const registry = Object.fromEntries(resolved);
+  const lineage = Object.fromEntries(
+    [...resolved.keys()].map((id) => [id, learningLineage.get(id) === true])
+  );
+  return freezeRegistry(registry, lineage);
+}
+
+/** Returns validated inheritance lineage without inferring semantics from mutable fields. */
+export function hasLearningLineage(
+  profiles: Readonly<Record<string, RuntimeProfile>>,
+  profileId: string
+): boolean {
+  const metadata = (profiles as RuntimeProfileRegistryWithMetadata)[learningLineageMetadata];
+  return metadata?.[profileId] === true;
 }
 
 function validateDefinition(value: unknown): CustomRuntimeProfileDefinition {
@@ -181,6 +202,19 @@ function freezeProfile(profile: RuntimeProfile): RuntimeProfile {
     ...profile,
     degradedOutcomes: Object.freeze({ ...profile.degradedOutcomes })
   });
+}
+
+function freezeRegistry(
+  profiles: Record<string, RuntimeProfile>,
+  learningLineage: Record<string, boolean>
+): Readonly<Record<string, RuntimeProfile>> {
+  Object.defineProperty(profiles, learningLineageMetadata, {
+    value: Object.freeze({ ...learningLineage }),
+    enumerable: false,
+    configurable: false,
+    writable: false
+  });
+  return Object.freeze(profiles);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

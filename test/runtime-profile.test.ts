@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   BUILT_IN_RUNTIME_PROFILES,
   defineRuntimeProfiles,
+  hasLearningLineage,
   LEARNING_PROFILE,
   NORMAL_PROFILE,
   OBSERVE_ONLY_PROFILE
@@ -82,6 +83,24 @@ test('custom profiles inherit transitively and override declared runtime fields'
   assert.equal(Object.isFrozen(profiles), true);
   assert.equal(Object.isFrozen(profiles['team-protected']), true);
   assert.equal(Object.isFrozen(profiles['team-protected']?.degradedOutcomes), true);
+  assert.equal(hasLearningLineage(profiles, 'team-learning'), true);
+  assert.equal(hasLearningLineage(profiles, 'team-protected'), true);
+  assert.equal(hasLearningLineage(profiles, 'normal'), false);
+  assert.equal(hasLearningLineage(profiles, 'observe-only'), false);
+});
+
+test('non-learning profiles may disable capture even when their fields resemble learning mode', () => {
+  const profiles = defineRuntimeProfiles([
+    {
+      id: 'warn-only-no-capture',
+      extends: 'normal',
+      hardBlocking: false,
+      captureEnabled: false
+    }
+  ]);
+
+  assert.equal(profiles['warn-only-no-capture']?.captureEnabled, false);
+  assert.equal(hasLearningLineage(profiles, 'warn-only-no-capture'), false);
 });
 
 test('custom profile validation rejects invalid configuration', () => {
@@ -95,7 +114,6 @@ test('custom profile validation rejects invalid configuration', () => {
     [{ id: 'bad-outcome', extends: 'normal', degradedOutcomes: { normal: 'ALLOW', caution: 'WARN', protected: 'DENY' } }],
     [{ id: 'incomplete-outcomes', extends: 'normal', degradedOutcomes: { normal: 'ALLOW' } }],
     [{ id: 'no-capture-learning', extends: 'learning', captureEnabled: false }],
-    [{ id: 'effective-learning', extends: 'normal', hardBlocking: false, captureEnabled: false }],
     [
       { id: 'learning-base', extends: 'learning' },
       { id: 'no-capture-descendant', extends: 'learning-base', captureEnabled: false }

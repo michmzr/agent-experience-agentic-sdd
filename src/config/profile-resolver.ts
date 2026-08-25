@@ -4,7 +4,10 @@ import type {
   RuntimeProfile
 } from '../runtime/contracts.js';
 import { normalizeRuntimePath } from '../runtime/matcher.js';
-import { BUILT_IN_RUNTIME_PROFILES } from './runtime-profile.js';
+import {
+  BUILT_IN_RUNTIME_PROFILES,
+  hasLearningLineage
+} from './runtime-profile.js';
 
 export type ProfileSource =
   | 'session-override'
@@ -141,7 +144,11 @@ export function resolveProfileTarget(input: ProfileResolutionInput): ResolvedPro
     trace[field] = freezeTraceEntry(candidate);
   }
 
-  const profile = freezeResolvedProfile(values);
+  const resolvedId = values.id as string;
+  const sourceRegistry = input.profiles ?? BUILT_IN_RUNTIME_PROFILES;
+  const learningLineage = hasLearningLineage(sourceRegistry, resolvedId)
+    || hasLearningLineage(BUILT_IN_RUNTIME_PROFILES, resolvedId);
+  const profile = freezeResolvedProfile(values, learningLineage);
   return Object.freeze({ profile, trace: Object.freeze(trace) as ProfileResolutionTrace });
 }
 
@@ -357,11 +364,12 @@ function freezeTraceEntry(candidate: Candidate): ProfileTraceEntry {
   });
 }
 
-function freezeResolvedProfile(values: Partial<RuntimeProfile>): RuntimeProfile {
+function freezeResolvedProfile(
+  values: Partial<RuntimeProfile>,
+  learningLineage: boolean
+): RuntimeProfile {
   const profile = values as RuntimeProfile;
-  const hasLearningSemantics = profile.id === 'learning'
-    || (!profile.hardBlocking && profile.warningsEnabled);
-  if (hasLearningSemantics && !profile.captureEnabled) {
+  if (learningLineage && !profile.captureEnabled) {
     throw new ProfileResolutionError('Learning runtime profile must keep capture enabled.');
   }
   return Object.freeze({

@@ -11,7 +11,8 @@ import {
 
 const profiles = defineRuntimeProfiles([
   { id: 'quiet', extends: 'normal', warningsEnabled: false },
-  { id: 'safe-learning', extends: 'learning', retrievalEnabled: true }
+  { id: 'safe-learning', extends: 'learning', warningsEnabled: false },
+  { id: 'blocking-learning', extends: 'safe-learning', hardBlocking: true }
 ]);
 
 const facts = {
@@ -145,6 +146,43 @@ test('rejects a learning profile assembled with capture disabled by a higher-pre
     globalDefault: 'learning',
     builtInDefault: 'normal'
   }), /learning.*capture/i);
+});
+
+test('rejects a learning descendant that disables warnings and capture in one setting', () => {
+  assert.throws(() => resolveProfileTarget({
+    facts,
+    profiles,
+    sessionOverride: { profile: 'safe-learning', captureEnabled: false }
+  }), /learning.*capture/i);
+});
+
+test('rejects a transitive learning descendant with blocking restored when capture is disabled by another layer', () => {
+  assert.throws(() => resolveProfileTarget({
+    facts,
+    profiles,
+    repositoryShared: { captureEnabled: false },
+    globalDefault: 'blocking-learning'
+  }), /learning.*capture/i);
+});
+
+test('allows a non-learning warn-only custom profile with capture disabled', () => {
+  const nonLearningProfiles = defineRuntimeProfiles([
+    {
+      id: 'warn-only-no-capture',
+      extends: 'normal',
+      hardBlocking: false,
+      captureEnabled: false
+    }
+  ]);
+
+  const result = resolveProfileTarget({
+    facts,
+    profiles: nonLearningProfiles,
+    sessionOverride: 'warn-only-no-capture'
+  });
+
+  assert.equal(result.profile.id, 'warn-only-no-capture');
+  assert.equal(result.profile.captureEnabled, false);
 });
 
 test('resolves valid profile fields independently and traces every field', () => {
