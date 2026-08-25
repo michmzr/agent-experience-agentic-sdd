@@ -73,32 +73,37 @@ interface CanonicalPath {
 }
 
 function canonicalPath(path: string): CanonicalPath {
-  const trimmed = path.trim();
-  if (/^[A-Za-z]:(?![\\/])/.test(trimmed)) {
+  const withoutSurroundingWhitespace = path.trim();
+  const windowsLookingAfterTrim = /^[A-Za-z]:/.test(withoutSurroundingWhitespace)
+    || /^\\\\/.test(withoutSurroundingWhitespace);
+  if (path !== withoutSurroundingWhitespace && windowsLookingAfterTrim) {
+    throw new RangeError('Windows paths cannot contain surrounding whitespace.');
+  }
+  if (/^[A-Za-z]:(?![\\/])/.test(path)) {
     throw new RangeError('Windows drive-relative paths are not supported.');
   }
 
-  const driveMatch = /^([A-Za-z]):[\\/]/.exec(trimmed);
+  const driveMatch = /^([A-Za-z]):[\\/]/.exec(path);
   if (driveMatch) {
     const drive = driveMatch[1]!.toLowerCase();
-    const remainder = trimmed.slice(driveMatch[0].length).replaceAll('\\', '/');
+    const remainder = path.slice(driveMatch[0].length).replaceAll('\\', '/');
     const segments = normalizeSegments(remainder, true, true);
     return { flavor: 'windows-drive-absolute', normalized: `${drive}:/${segments.join('/')}` };
   }
 
-  if (/^\\\\/.test(trimmed)) {
-    const remainder = trimmed.slice(2).replaceAll('\\', '/');
+  if (/^\\\\/.test(path)) {
+    const remainder = path.slice(2).replaceAll('\\', '/');
     const segments = normalizeSegments(remainder, true, true);
     return { flavor: 'windows-unc', normalized: `//${segments.join('/')}` };
   }
 
-  if (trimmed.includes('\\')) throw new RangeError('Unsupported Windows-relative path.');
-  if (trimmed.startsWith('/')) {
-    const segments = normalizeSegments(trimmed, true, false);
+  if (path.includes('\\')) throw new RangeError('Unsupported Windows-relative path.');
+  if (path.startsWith('/')) {
+    const segments = normalizeSegments(path, true, false);
     return { flavor: 'posix-absolute', normalized: `/${segments.join('/')}` };
   }
 
-  const segments = normalizeSegments(trimmed, false, false);
+  const segments = normalizeSegments(path, false, false);
   return { flavor: 'posix-relative', normalized: segments.join('/') };
 }
 

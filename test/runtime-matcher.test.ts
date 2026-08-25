@@ -142,6 +142,42 @@ test('keeps absent, relative, POSIX absolute, Windows drive, and UNC path identi
   assert.notEqual(canonicalSignature(signature('//server/share/project')), canonicalSignature(signature('\\\\server\\share\\project')));
 });
 
+test('preserves leading and trailing whitespace in POSIX exact-signature path identity', () => {
+  const signature = (path: string): RuntimeSignature => ({ kind: 'action', tool: 'git', action: 'status', path });
+
+  for (const [spaced, unspaced] of [
+    ['/repo/file ', '/repo/file'],
+    [' repo/file', 'repo/file'],
+    ['repo/file ', 'repo/file']
+  ] as const) {
+    assert.notEqual(canonicalSignature(signature(spaced)), canonicalSignature(signature(unspaced)));
+  }
+});
+
+test('does not metadata-match POSIX paths that differ by leading or trailing whitespace', () => {
+  for (const [rulePath, inputPath] of [
+    ['/repo/file ', '/repo/file'],
+    [' repo/file', 'repo/file'],
+    ['repo/file ', 'repo/file']
+  ] as const) {
+    const rule = actionRule(`rule-whitespace-${rulePath}`, {
+      signature: { kind: 'action', tool: 'git', action: 'fetch' },
+      applicability: { scope: 'repository', repositoryId: 'repository-1', path: rulePath }
+    });
+    const input = actionInput({
+      signature: { kind: 'action', tool: 'git', action: 'push', path: inputPath }
+    });
+
+    assert.deepEqual(matchRules(input, [rule]), []);
+  }
+});
+
+test('rejects surrounding whitespace on Windows-looking paths', () => {
+  for (const path of [' C:\\repo', 'C:\\repo ', ' \\\\server\\share', '\\\\server\\share ']) {
+    assert.throws(() => normalizeRuntimePath(path), { name: 'RangeError' });
+  }
+});
+
 test('rejects Windows drive-relative paths instead of treating them as drive roots', () => {
   for (const path of ['C:', 'C:project']) {
     assert.throws(() => normalizeRuntimePath(path), { name: 'RangeError' });
