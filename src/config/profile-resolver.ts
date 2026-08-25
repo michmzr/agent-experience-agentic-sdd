@@ -359,6 +359,11 @@ function freezeTraceEntry(candidate: Candidate): ProfileTraceEntry {
 
 function freezeResolvedProfile(values: Partial<RuntimeProfile>): RuntimeProfile {
   const profile = values as RuntimeProfile;
+  const hasLearningSemantics = profile.id === 'learning'
+    || (!profile.hardBlocking && profile.warningsEnabled);
+  if (hasLearningSemantics && !profile.captureEnabled) {
+    throw new ProfileResolutionError('Learning runtime profile must keep capture enabled.');
+  }
   return Object.freeze({
     ...profile,
     degradedOutcomes: Object.freeze({ ...profile.degradedOutcomes })

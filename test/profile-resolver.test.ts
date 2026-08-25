@@ -128,12 +128,31 @@ test('rejects equally specific matching selectors as ambiguous', () => {
   }), /ambiguous/i);
 });
 
-test('resolves profile fields independently and traces every field', () => {
-  const result = resolveProfileTarget({
+test('rejects a learning profile with capture disabled in one setting', () => {
+  assert.throws(() => resolveProfileTarget({
+    facts,
+    profiles,
+    sessionOverride: { profile: 'learning', captureEnabled: false }
+  }), /learning.*capture/i);
+});
+
+test('rejects a learning profile assembled with capture disabled by a higher-precedence layer', () => {
+  assert.throws(() => resolveProfileTarget({
     facts,
     profiles,
     sessionOverride: { warningsEnabled: false },
     repositoryShared: { captureEnabled: false },
+    globalDefault: 'learning',
+    builtInDefault: 'normal'
+  }), /learning.*capture/i);
+});
+
+test('resolves valid profile fields independently and traces every field', () => {
+  const result = resolveProfileTarget({
+    facts,
+    profiles,
+    sessionOverride: { warningsEnabled: false },
+    repositoryShared: { retrievalEnabled: false },
     globalDefault: 'learning',
     builtInDefault: 'normal'
   });
@@ -141,9 +160,10 @@ test('resolves profile fields independently and traces every field', () => {
   assert.equal(result.profile.id, 'learning');
   assert.equal(result.profile.hardBlocking, false);
   assert.equal(result.profile.warningsEnabled, false);
-  assert.equal(result.profile.captureEnabled, false);
+  assert.equal(result.profile.captureEnabled, true);
+  assert.equal(result.profile.retrievalEnabled, false);
   assert.equal(result.trace.warningsEnabled.source, 'session-override');
-  assert.equal(result.trace.captureEnabled.source, 'repository-shared');
+  assert.equal(result.trace.retrievalEnabled.source, 'repository-shared');
   assert.equal(result.trace.hardBlocking.source, 'global-default');
   assert.deepEqual(Object.keys(result.trace).sort(), [
     'captureEnabled',
