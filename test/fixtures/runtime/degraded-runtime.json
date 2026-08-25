@@ -1,0 +1,34 @@
+{
+  "input": {
+    "repositoryId": "repo-acceptance",
+    "operationClass": "normal",
+    "signature": {
+      "kind": "action",
+      "tool": "pnpm",
+      "action": "test",
+      "arguments": ["--offline"],
+      "path": "/workspace/repo"
+    }
+  },
+  "rule": {
+    "id": "degraded-context-rule",
+    "state": "verified",
+    "authoritative": true,
+    "effect": "conflict",
+    "signature": {
+      "kind": "action",
+      "tool": "pnpm",
+      "action": "test",
+      "arguments": ["--offline"],
+      "path": "/workspace/repo"
+    },
+    "applicability": {
+      "scope": "repository",
+      "repositoryId": "repo-acceptance"
+    },
+    "reference": {
+      "knowledgeId": "degraded-runtime-knowledge",
+      "evidenceIds": ["degraded-runtime-evidence"]
+    }
+  }
+}

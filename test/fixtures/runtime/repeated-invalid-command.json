@@ -1,0 +1,35 @@
+{
+  "input": {
+    "repositoryId": "repo-acceptance",
+    "operationClass": "protected",
+    "signature": {
+      "kind": "action",
+      "tool": "git",
+      "action": "reset",
+      "arguments": ["--hard"],
+      "path": "/workspace/repo"
+    },
+    "tags": ["destructive"]
+  },
+  "rule": {
+    "id": "repeated-invalid-command",
+    "state": "verified",
+    "authoritative": true,
+    "effect": "conflict",
+    "signature": {
+      "kind": "action",
+      "tool": "git",
+      "action": "reset",
+      "arguments": ["--hard"],
+      "path": "/workspace/repo"
+    },
+    "applicability": {
+      "scope": "repository",
+      "repositoryId": "repo-acceptance"
+    },
+    "reference": {
+      "knowledgeId": "invalid-command-knowledge",
+      "evidenceIds": ["invalid-command-evidence"]
+    }
+  }
+}

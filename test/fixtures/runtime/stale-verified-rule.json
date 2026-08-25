@@ -1,0 +1,34 @@
+{
+  "input": {
+    "repositoryId": "repo-acceptance",
+    "operationClass": "protected",
+    "signature": {
+      "kind": "action",
+      "tool": "git",
+      "action": "push",
+      "arguments": ["--force-with-lease"],
+      "path": "/workspace/repo"
+    }
+  },
+  "rule": {
+    "id": "stale-verified-rule",
+    "state": "verified",
+    "authoritative": true,
+    "effect": "conflict",
+    "signature": {
+      "kind": "action",
+      "tool": "git",
+      "action": "push",
+      "arguments": ["--force-with-lease"],
+      "path": "/workspace/repo"
+    },
+    "applicability": {
+      "scope": "repository",
+      "repositoryId": "repo-acceptance"
+    },
+    "reference": {
+      "knowledgeId": "stale-knowledge",
+      "evidenceIds": ["seed-evidence"]
+    }
+  }
+}
