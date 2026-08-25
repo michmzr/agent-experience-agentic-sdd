@@ -182,10 +182,19 @@ test('rejects task-specific promotion and reuses trusted merged knowledge throug
   const localOnly: SharedKnowledgeDocument = {
     ...document,
     identity: 'untrusted-local-rule',
-    runtimeDirective: { effect: 'conflict', signature: { kind: 'action', tool: 'git', action: 'clean', arguments: ['-fd'] } }
+    applicability: { paths: [], tags: [], tools: ['pnpm'] },
+    runtimeDirective: { effect: 'conflict', signature: { kind: 'action', tool: 'pnpm', action: 'install', arguments: ['--offline'] } }
   };
   writeSharedKnowledge(repository, [document, localOnly], { stateRoot: join(privateState, 'local-change') });
-  assert.equal(service.refreshKnowledgeRuntime(repository, 'repo-acceptance', 'HEAD').rules, 1);
+  assert.equal(service.refreshKnowledgeRuntime(repository, 'repo-acceptance', 'HEAD').rules, 2);
+
+  const localInput = writeInput(privateState, 'local-context.json', inputForSignature(localOnly.runtimeDirective!.signature));
+  const localDecision = new RuntimeService({ dataDir, clock: () => new Date(now) }).evaluate({ inputPath: localInput });
+  assert.equal(localDecision.outcome, 'ALLOW');
+  assert.deepEqual(localDecision.references.map(({ knowledgeId }) => knowledgeId), ['untrusted-local-rule']);
+  assert.deepEqual(localDecision.explanations.map(({ code, outcome, authoritative }) => ({ code, outcome, authoritative })), [
+    { code: 'CONTEXT_ONLY', outcome: 'ALLOW', authoritative: false }
+  ]);
 
   for (const [index, record] of records.entries()) {
     const inputPath = writeInput(privateState, `adapter-${index}.json`, inputForSignature(record.signature));
@@ -194,9 +203,11 @@ test('rejects task-specific promotion and reuses trusted merged knowledge throug
     assert.deepEqual(decision.references.map(({ knowledgeId }) => knowledgeId), ['merged-invalid-command']);
   }
   const otherRepositoryInput = writeInput(privateState, 'other-repository.json', {
-    ...inputForSignature(records[0]!.signature), repositoryId: 'other-repository'
+    ...inputForSignature(localOnly.runtimeDirective!.signature), repositoryId: 'other-repository'
   });
-  assert.equal(new RuntimeService({ dataDir, clock: () => new Date(now) }).evaluate({ inputPath: otherRepositoryInput }).outcome, 'ALLOW');
+  const otherDecision = new RuntimeService({ dataDir, clock: () => new Date(now) }).evaluate({ inputPath: otherRepositoryInput });
+  assert.equal(otherDecision.outcome, 'ALLOW');
+  assert.equal(otherDecision.references.length, 0);
 });
 
 test('retained services use memory while process restarts fall back to the last-known-good generation', () => {

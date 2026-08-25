@@ -28,7 +28,7 @@ function activated(documentValue: SharedKnowledgeDocument, overrides: Partial<Ac
   };
 }
 
-test('compiles only active authoritative trusted directives for the exact repository', () => {
+test('compiles trusted enforcement and non-authoritative local context for the exact repository', () => {
   const entries: ActivatedKnowledgeEntry[] = [
     activated(document('verified-conflict')),
     activated(document('confirmed-context', {
@@ -39,8 +39,10 @@ test('compiles only active authoritative trusted directives for the exact reposi
     activated(document('terminal', { state: 'superseded' })),
     activated(document('no-directive', { runtimeDirective: undefined })),
     activated(document('wrong-repository', { repositoryScope: 'repository:repo-two' })),
-    activated(document('local-forgery'), { provenance: { source: 'working-tree' } }),
-    activated(document('non-authoritative'), { authoritative: false })
+    activated(document('local-context'), { authoritative: false, provenance: { source: 'working-tree' } }),
+    activated(document('local-disputed', { state: 'disputed' }), { authoritative: false, provenance: { source: 'working-tree' } }),
+    activated(document('local-terminal', { state: 'superseded' }), { authoritative: false, provenance: { source: 'working-tree' } }),
+    activated(document('verified-conflict', { repositoryScope: 'repository:repo-two' }), { authoritative: false, provenance: { source: 'working-tree' } })
   ];
 
   const rules = compileActivatedRuntimeRules({ repositoryId: 'repo-one', trustedCommit: commit, entries });
@@ -48,17 +50,25 @@ test('compiles only active authoritative trusted directives for the exact reposi
   assert.deepEqual(rules.map(({ id, state, effect }) => [id, state, effect]), [
     ['shared:confirmed-context', 'confirmed', 'context'],
     ['shared:disputed-conflict', 'disputed', 'context'],
+    ['shared:local-context', 'verified', 'context'],
+    ['shared:local-disputed', 'disputed', 'context'],
     ['shared:verified-conflict', 'verified', 'conflict']
   ]);
   assert.deepEqual(rules[2], {
+    id: 'shared:local-context', state: 'verified', authoritative: false, effect: 'context',
+    signature: { kind: 'action', tool: 'git', action: 'reset', arguments: ['--hard'] },
+    applicability: { scope: 'repository', repositoryId: 'repo-one', tool: 'git', tags: ['destructive'] },
+    reference: { knowledgeId: 'local-context', evidenceIds: [], source: 'working-tree' }
+  });
+  assert.deepEqual(rules[4], {
     id: 'shared:verified-conflict', state: 'verified', authoritative: true, effect: 'conflict',
     signature: { kind: 'action', tool: 'git', action: 'reset', arguments: ['--hard'] },
     applicability: { scope: 'repository', repositoryId: 'repo-one', tool: 'git', tags: ['destructive'] },
     reference: { knowledgeId: 'verified-conflict', evidenceIds: [], source: `trusted-ref:${commit}` }
   });
   assert.equal(Object.isFrozen(rules), true);
-  assert.equal(Object.isFrozen(rules[2]?.signature), true);
-  assert.equal(Object.isFrozen(rules[2]?.applicability.tags), true);
+  assert.equal(Object.isFrozen(rules[4]?.signature), true);
+  assert.equal(Object.isFrozen(rules[4]?.applicability.tags), true);
 });
 
 test('is deterministic and rejects forged commit, scope, applicability, and private directives', () => {

@@ -12,7 +12,7 @@ export interface ActivatedRuntimeCompilation {
 const activeStates = new Set(['observed', 'confirmed', 'verified', 'disputed']);
 const commitPattern = /^[a-f0-9]{40,64}$/;
 
-/** Compiles only explicit structured directives from one trusted merged Git generation. */
+/** Compiles explicit trusted directives for enforcement and same-repository local directives for context. */
 export function compileActivatedRuntimeRules(input: ActivatedRuntimeCompilation): readonly RuntimeRule[] {
   assertRepositoryId(input.repositoryId);
   if (!commitPattern.test(input.trustedCommit)) throw new TypeError('Trusted runtime knowledge commit is invalid.');
@@ -22,17 +22,19 @@ export function compileActivatedRuntimeRules(input: ActivatedRuntimeCompilation)
   const identities = new Set<string>();
 
   for (const entry of input.entries) {
-    if (!entry.authoritative || entry.provenance.source !== 'trusted-ref') continue;
-    if (entry.provenance.commit !== input.trustedCommit) throw new TypeError('Activated runtime knowledge commit provenance is inconsistent.');
+    if (entry.provenance.source === 'trusted-ref' && entry.provenance.commit !== input.trustedCommit) {
+      throw new TypeError('Activated runtime knowledge commit provenance is inconsistent.');
+    }
     const document = entry.document;
     assertIdentity(document.identity);
+    if (document.repositoryScope !== expectedScope || !activeStates.has(document.state) || document.runtimeDirective === undefined) continue;
     if (identities.has(document.identity)) throw new TypeError('Activated runtime knowledge contains a duplicate identity.');
     identities.add(document.identity);
-    if (document.repositoryScope !== expectedScope || !activeStates.has(document.state) || document.runtimeDirective === undefined) continue;
 
     const directive = parseRuntimeDirective(document.runtimeDirective);
     assertApplicability(document.applicability, directive.signature);
-    const effect = directive.effect === 'context' || document.state === 'observed' || document.state === 'disputed'
+    const authoritative = entry.authoritative && entry.provenance.source === 'trusted-ref';
+    const effect = !authoritative || directive.effect === 'context' || document.state === 'observed' || document.state === 'disputed'
       ? 'context' as const : 'conflict' as const;
     const signatureTool = directive.signature.tool;
     const applicability = {
@@ -45,14 +47,14 @@ export function compileActivatedRuntimeRules(input: ActivatedRuntimeCompilation)
     rules.push(deepFreeze({
       id: `shared:${document.identity}`,
       state: document.state,
-      authoritative: true,
+      authoritative,
       effect,
       signature: directive.signature,
       applicability,
       reference: {
         knowledgeId: document.identity,
         evidenceIds: [],
-        source: `trusted-ref:${input.trustedCommit}`
+        source: entry.provenance.source === 'trusted-ref' ? `trusted-ref:${input.trustedCommit}` : 'working-tree'
       }
     }));
   }
