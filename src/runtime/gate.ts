@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type {
   DecisionOutcome,
   DecisionReference,
@@ -7,6 +9,7 @@ import type {
   RuntimeInput,
   RuntimeProfile
 } from './contracts.js';
+import { canonicalSignature } from './matcher.js';
 import { evaluateRule } from './policy.js';
 import type { RuleIndex } from './rule-index.js';
 import type { RuntimeStatus } from './resilience.js';
@@ -37,6 +40,7 @@ export interface GateDecision {
   readonly captureEnabled: boolean;
   readonly retrievalEnabled: boolean;
   readonly status: RuntimeStatus;
+  readonly inputBinding: string;
   readonly override?: RuntimeOverrideDecisionMetadata;
 }
 
@@ -64,7 +68,7 @@ export function createRuntimeGate(options: RuntimeGateOptions): RuntimeGate {
 
   return Object.freeze({
     evaluate(input: RuntimeInput): GateDecision {
-      if (status.retrievalMode === 'degraded') return degradedDecision(input.operationClass, profile, status);
+      if (status.retrievalMode === 'degraded') return degradedDecision(input, profile, status);
 
       const decisions = index!.match(input).map((match) => evaluateRule(match, profile));
       const explanations = decisions.map((decision) => Object.freeze({
@@ -79,7 +83,8 @@ export function createRuntimeGate(options: RuntimeGateOptions): RuntimeGate {
         references,
         captureEnabled: profile.captureEnabled,
         retrievalEnabled: profile.retrievalEnabled,
-        status
+        status,
+        inputBinding: runtimeInputBinding(input)
       });
     }
   });
@@ -100,7 +105,21 @@ export function freezeDecision(decision: GateDecision): GateDecision {
   return Object.freeze({ ...decision, explanations, references, ...(override === undefined ? {} : { override }) });
 }
 
-function degradedDecision(operationClass: OperationClass, profile: RuntimeProfile, status: RuntimeStatus): GateDecision {
+/** Digests every normalized runtime field that can affect matching or policy. */
+export function runtimeInputBinding(input: RuntimeInput): string {
+  const tags = [...new Set((input.tags ?? []).map((tag) => tag.trim().toLowerCase()))]
+    .sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+  const normalized = JSON.stringify({
+    operationClass: input.operationClass,
+    repositoryId: input.repositoryId ?? null,
+    signature: JSON.parse(canonicalSignature(input.signature)) as unknown,
+    tags
+  });
+  return createHash('sha256').update('ael:runtime-input:v1\0').update(normalized).digest('hex');
+}
+
+function degradedDecision(input: RuntimeInput, profile: RuntimeProfile, status: RuntimeStatus): GateDecision {
+  const operationClass = input.operationClass;
   const outcome = operationClass === 'normal' ? 'ALLOW' : profile.degradedOutcomes[operationClass];
   const explanation: GateExplanation = Object.freeze({
     code: 'DEGRADED_POLICY',
@@ -114,7 +133,8 @@ function degradedDecision(operationClass: OperationClass, profile: RuntimeProfil
     references: [],
     captureEnabled: profile.captureEnabled,
     retrievalEnabled: profile.retrievalEnabled,
-    status
+    status,
+    inputBinding: runtimeInputBinding(input)
   });
 }
 

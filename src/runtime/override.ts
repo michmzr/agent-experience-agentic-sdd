@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { assertDurableTextSafe } from '../review/sanitizer.js';
 import type { ActionSignature, DecisionReference, RuntimeInput } from './contracts.js';
-import { freezeDecision, strongest, type GateDecision } from './gate.js';
+import { freezeDecision, runtimeInputBinding, strongest, type GateDecision } from './gate.js';
 import { canonicalSignature } from './matcher.js';
 
 export type RuntimeOverrideScope =
@@ -31,7 +31,7 @@ export interface RuntimeOverrideInput {
   readonly expiresAt?: string;
 }
 
-export type OverrideRejection = 'EXPIRED' | 'NOT_YET_VALID' | 'SCOPE_MISMATCH' | 'DECISION_NOT_ENFORCING';
+export type OverrideRejection = 'EXPIRED' | 'NOT_YET_VALID' | 'SCOPE_MISMATCH' | 'DECISION_NOT_ENFORCING' | 'INPUT_MISMATCH';
 
 export interface OverrideApplication {
   readonly accepted: boolean;
@@ -72,6 +72,7 @@ const canonicalIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:@-]*$/;
 const MAX_IDENTIFIER_LENGTH = 512;
 const MAX_TEXT_LENGTH = 4_096;
 const MAX_REFERENCES = 100;
+export const MAX_OVERRIDE_EVIDENCE_ENTRIES = 1_000;
 
 export function createRuntimeOverride(input: RuntimeOverrideInput): RuntimeOverride {
   const id = checkedIdentifier(input.id, 'override id');
@@ -126,6 +127,7 @@ export function parseRuntimeOverride(value: unknown): RuntimeOverride {
 export function applyRuntimeOverride(input: ApplyRuntimeOverrideInput): OverrideApplication {
   assertTimestamp(input.now);
   const override = parseRuntimeOverride(input.override);
+  if (runtimeInputBinding(input.input) !== input.decision.inputBinding) return rejected(input.decision, 'INPUT_MISMATCH');
   if (input.now < override.createdAt) return rejected(input.decision, 'NOT_YET_VALID');
   if (override.expiresAt !== undefined && input.now >= override.expiresAt) return rejected(input.decision, 'EXPIRED');
 
@@ -149,6 +151,7 @@ export function applyRuntimeOverride(input: ApplyRuntimeOverrideInput): Override
 
 /** Produces evidence proposals only. It never changes or removes knowledge. */
 export function deriveOverrideLearningEvidence(entries: readonly OverrideAuditEntry[]): readonly OverrideLearningEvidence[] {
+  if (entries.length > MAX_OVERRIDE_EVIDENCE_ENTRIES) throw new TypeError('Override evidence input resource limit exceeded.');
   const successes = new Map<string, Map<string, string>>();
   const authorized = new Map<string, string>();
   for (const entry of entries) {

@@ -9,6 +9,20 @@ import {
 } from '../runtime/override.js';
 import { openExperienceDatabase } from './database.js';
 
+export const MAX_OVERRIDE_AUDIT_PAGE_SIZE = 100;
+export const OVERRIDE_AUDIT_MIGRATION_BATCH_SIZE = 64;
+
+export interface OverrideAuditPageRequest {
+  readonly overrideId?: string;
+  readonly afterSequence?: number;
+  readonly limit?: number;
+}
+
+export interface OverrideAuditPage {
+  readonly entries: readonly OverrideAuditEntry[];
+  readonly nextCursor?: number;
+}
+
 export const overrideAuditMigration = `
   CREATE TABLE IF NOT EXISTS runtime_override_audit (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,11 +132,20 @@ export class OverrideStore {
     );
   }
 
-  list(overrideId?: string): readonly OverrideAuditEntry[] {
-    const rows = (overrideId === undefined
-      ? this.#database.prepare('SELECT * FROM runtime_override_audit ORDER BY sequence').all()
-      : this.#database.prepare('SELECT * FROM runtime_override_audit WHERE override_id = ? ORDER BY sequence').all(overrideId)) as unknown as OverrideAuditRow[];
-    return Object.freeze(rows.map((row) => auditEntryFromRow(row, checkedUseId(row.use_id))));
+  listPage(request: OverrideAuditPageRequest = {}): OverrideAuditPage {
+    const limit = request.limit ?? MAX_OVERRIDE_AUDIT_PAGE_SIZE;
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_OVERRIDE_AUDIT_PAGE_SIZE) {
+      throw new RangeError(`Override audit page size must be between 1 and ${MAX_OVERRIDE_AUDIT_PAGE_SIZE}.`);
+    }
+    const afterSequence = request.afterSequence ?? 0;
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new RangeError('Override audit cursor is invalid.');
+    const rows = (request.overrideId === undefined
+      ? this.#database.prepare('SELECT * FROM runtime_override_audit WHERE sequence > ? ORDER BY sequence LIMIT ?').all(afterSequence, limit + 1)
+      : this.#database.prepare('SELECT * FROM runtime_override_audit WHERE sequence > ? AND override_id = ? ORDER BY sequence LIMIT ?').all(afterSequence, request.overrideId, limit + 1)) as unknown as OverrideAuditRow[];
+    const visible = rows.slice(0, limit);
+    const entries = Object.freeze(visible.map((row) => auditEntryFromRow(row, checkedUseId(row.use_id))));
+    const nextCursor = rows.length > limit ? visible.at(-1)!.sequence : undefined;
+    return Object.freeze({ entries, ...(nextCursor === undefined ? {} : { nextCursor }) });
   }
 
   close(): void {
@@ -157,8 +180,7 @@ export function ensureOverrideAuditUseMigration(database: DatabaseSync): void {
 
   const columns = database.prepare("SELECT name FROM pragma_table_info('runtime_override_audit')").all() as Array<{ name: string }>;
   const hasUseId = columns.some(({ name }) => name === 'use_id');
-  const rows = database.prepare('SELECT * FROM runtime_override_audit ORDER BY sequence').all() as unknown as OverrideAuditRow[];
-  validateLegacyRows(rows, hasUseId);
+  validateLegacyRows(database, hasUseId);
   if (database.prepare("SELECT name FROM sqlite_master WHERE name = 'runtime_override_audit_v6'").get() !== undefined) {
     throw new TypeError('Override audit migration staging schema already exists.');
   }
@@ -202,25 +224,32 @@ function auditEntryFromRow(row: OverrideAuditRow, useId: string): OverrideAuditE
   });
 }
 
-function validateLegacyRows(rows: readonly OverrideAuditRow[], hasUseId: boolean): void {
-  const authorizations = new Map<string, OverrideAuditEntry>();
-  const phases = new Set<string>();
-  for (const row of rows) {
-    const useId = hasUseId ? checkedUseId(row.use_id) : 'legacy';
-    const entry = auditEntryFromRow(row, useId);
-    const useKey = `${entry.override.id}\0${entry.useId}`;
-    const phaseKey = `${useKey}\0${entry.phase}`;
-    if (phases.has(phaseKey)) throw new TypeError('Legacy override audit contains a duplicate use phase.');
-    phases.add(phaseKey);
-    if (entry.phase === 'authorized') {
-      authorizations.set(useKey, entry);
-      continue;
-    }
-    const authorization = authorizations.get(useKey);
-    if (authorization === undefined) throw new TypeError('Legacy completion audit requires a prior authorization row.');
-    if (!sameAuditBinding(authorization, entry)) throw new TypeError('Legacy completion audit must match its authorization decision.');
-    if (entry.recordedAt < authorization.recordedAt) throw new TypeError('Legacy completion audit cannot precede its authorization.');
+function validateLegacyRows(database: DatabaseSync, hasUseId: boolean): void {
+  let afterSequence = 0;
+  while (true) {
+    const rows = database.prepare('SELECT * FROM runtime_override_audit WHERE sequence > ? ORDER BY sequence LIMIT ?')
+      .all(afterSequence, OVERRIDE_AUDIT_MIGRATION_BATCH_SIZE) as unknown as OverrideAuditRow[];
+    if (rows.length === 0) return;
+    for (const row of rows) validateLegacyRow(database, row, hasUseId);
+    afterSequence = rows.at(-1)!.sequence;
   }
+}
+
+function validateLegacyRow(database: DatabaseSync, row: OverrideAuditRow, hasUseId: boolean): void {
+  const useId = hasUseId ? checkedUseId(row.use_id) : 'legacy';
+  const entry = auditEntryFromRow(row, useId);
+  if (entry.phase === 'authorized') return;
+  const authorizationRows = (hasUseId
+    ? database.prepare(`SELECT * FROM runtime_override_audit
+        WHERE sequence < ? AND override_id = ? AND use_id = ? AND phase = 'authorized'
+        ORDER BY sequence DESC LIMIT 2`).all(row.sequence, entry.override.id, useId)
+    : database.prepare(`SELECT * FROM runtime_override_audit
+        WHERE sequence < ? AND override_id = ? AND phase = 'authorized'
+        ORDER BY sequence DESC LIMIT 2`).all(row.sequence, entry.override.id)) as unknown as OverrideAuditRow[];
+  if (authorizationRows.length !== 1) throw new TypeError('Legacy completion audit requires exactly one prior authorization row.');
+  const authorization = auditEntryFromRow(authorizationRows[0]!, useId);
+  if (!sameAuditBinding(authorization, entry)) throw new TypeError('Legacy completion audit must match its authorization decision.');
+  if (entry.recordedAt < authorization.recordedAt) throw new TypeError('Legacy completion audit cannot precede its authorization.');
 }
 
 function sameAuditBinding(authorization: OverrideAuditEntry, completion: OverrideAuditEntry): boolean {

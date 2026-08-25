@@ -11,13 +11,20 @@ import {
   applyRuntimeOverride,
   createRuntimeOverride,
   deriveOverrideLearningEvidence,
+  MAX_OVERRIDE_EVIDENCE_ENTRIES,
   type OverrideAuditEntry
 } from '../src/runtime/override.js';
 import { createRuleIndex } from '../src/runtime/rule-index.js';
 import { compileRuntimeSnapshot } from '../src/runtime/snapshot.js';
 import { openExperienceDatabase } from '../src/storage/database.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
-import { ensureOverrideAuditUseMigration, overrideAuditMigration, OverrideStore } from '../src/storage/override-store.js';
+import {
+  ensureOverrideAuditUseMigration,
+  MAX_OVERRIDE_AUDIT_PAGE_SIZE,
+  OVERRIDE_AUDIT_MIGRATION_BATCH_SIZE,
+  overrideAuditMigration,
+  OverrideStore
+} from '../src/storage/override-store.js';
 
 const now = '2026-08-25T10:00:00.000Z';
 const action: RuntimeInput = {
@@ -66,6 +73,34 @@ test('action and task-session scopes allow continuation only for their bound tar
   assert.equal(applyRuntimeOverride({ decision, input: action, override: sessionOverride, now, taskSessionId: 'task-2' }).rejection, 'SCOPE_MISMATCH');
 });
 
+test('cannot apply a harmless-action override to a blocking decision created for another input', () => {
+  const harmless: RuntimeInput = {
+    ...action,
+    tags: ['inspection'],
+    signature: { kind: 'action', tool: 'git', action: 'status', path: '/workspace/repo' }
+  };
+  const harmlessOverride = createRuntimeOverride({
+    id: 'harmless', scope: { kind: 'action', signature: harmless.signature }, reason: 'Status is read-only.', createdAt: now
+  });
+  const result = applyRuntimeOverride({ decision, input: harmless, override: harmlessOverride, now });
+  assert.equal(result.rejection, 'INPUT_MISMATCH');
+  assert.equal(result.decision.outcome, 'BLOCK');
+});
+
+test('decision input binding covers repository, tags, and operation class', () => {
+  const grant = createRuntimeOverride({
+    id: 'binding', scope: { kind: 'action', signature: action.signature }, reason: 'Bound exception.', createdAt: now
+  });
+  for (const changed of [
+    { ...action, repositoryId: 'repo-2' },
+    { ...action, tags: ['different'] },
+    { ...action, signature: { ...action.signature, path: '/workspace/other' } },
+    { ...action, operationClass: 'normal' as const }
+  ]) {
+    assert.equal(applyRuntimeOverride({ decision, input: changed, override: grant, now }).rejection, 'INPUT_MISMATCH');
+  }
+});
+
 test('rejects expired, future-created, and nonmatching overrides without changing the decision', () => {
   const expired = createRuntimeOverride({ id: 'expired', scope: { kind: 'rule', ruleId: 'rule-a' }, reason: 'Short exception.', createdAt: '2026-08-25T08:00:00.000Z', expiresAt: '2026-08-25T09:00:00.000Z' });
   const future = createRuntimeOverride({ id: 'future', scope: { kind: 'rule', ruleId: 'rule-a' }, reason: 'Future exception.', createdAt: '2026-08-25T11:00:00.000Z' });
@@ -100,21 +135,32 @@ function audit(id: string, overrideId: string, phase: 'authorized' | 'completed'
   };
 }
 
+function allAudit(store: OverrideStore, overrideId?: string): readonly OverrideAuditEntry[] {
+  const entries: OverrideAuditEntry[] = [];
+  let afterSequence: number | undefined;
+  do {
+    const page = store.listPage({ ...(overrideId === undefined ? {} : { overrideId }), ...(afterSequence === undefined ? {} : { afterSequence }) });
+    entries.push(...page.entries);
+    afterSequence = page.nextCursor;
+  } while (afterSequence !== undefined);
+  return entries;
+}
+
 test('persists deterministic append-only authorization and post-action audit rows', () => {
   const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-override-')), 'experience.sqlite');
   const store = new OverrideStore(databasePath);
   store.append(audit('audit-1', 'override-1', 'authorized'));
   store.append(audit('audit-2', 'override-1', 'completed', 'succeeded'));
 
-  assert.deepEqual(store.list().map(({ id, phase, postActionOutcome }) => [id, phase, postActionOutcome]), [
+  assert.deepEqual(allAudit(store).map(({ id, phase, postActionOutcome }) => [id, phase, postActionOutcome]), [
     ['audit-1', 'authorized', undefined], ['audit-2', 'completed', 'succeeded']
   ]);
   assert.throws(() => store.append(audit('audit-1', 'override-1', 'authorized')), /UNIQUE|unique/i);
-  assert.equal(store.list().length, 2);
+  assert.equal(allAudit(store).length, 2);
   store.close();
 
   const reopened = new OverrideStore(databasePath);
-  assert.deepEqual(reopened.list('override-1').map(({ id }) => id), ['audit-1', 'audit-2']);
+  assert.deepEqual(allAudit(reopened, 'override-1').map(({ id }) => id), ['audit-1', 'audit-2']);
   reopened.close();
 });
 
@@ -138,7 +184,7 @@ test('requires authorization before completion and an identical decision referen
     ...audit('completed-wrong', 'override-1', 'completed', 'succeeded'),
     decisionReferences: decision.references.slice(0, 1)
   }), /match its authorization/i);
-  assert.deepEqual(store.list().map(({ id }) => id), ['authorized']);
+  assert.deepEqual(allAudit(store).map(({ id }) => id), ['authorized']);
   store.close();
 });
 
@@ -171,7 +217,7 @@ test('persists two complete uses of the same reusable grant without overwriting 
     store.append({ ...audit(`authorized-${useId}`, 'override-reused', 'authorized', undefined, useId), override: reusableActionGrant });
     store.append({ ...audit(`completed-${useId}`, 'override-reused', 'completed', 'succeeded', useId), override: reusableActionGrant });
   }
-  const rows = store.list('override-reused');
+  const rows = allAudit(store, 'override-reused');
   assert.deepEqual(rows.map(({ useId, phase }) => [useId, phase]), [
     ['use-1', 'authorized'], ['use-1', 'completed'], ['use-2', 'authorized'], ['use-2', 'completed']
   ]);
@@ -197,7 +243,7 @@ test('migrates legacy single-use audit rows without losing their authorization p
   database.close();
 
   const migrated = new OverrideStore(databasePath);
-  assert.deepEqual(migrated.list().map(({ useId, phase }) => [useId, phase]), [
+  assert.deepEqual(allAudit(migrated).map(({ useId, phase }) => [useId, phase]), [
     ['legacy', 'authorized'], ['legacy', 'completed']
   ]);
   migrated.close();
@@ -321,6 +367,44 @@ test('version 6 schema rejects null, empty, and duplicate use-phase identities d
   database.close();
 });
 
+test('paginates audit history with a stable cursor, hard cap, and no duplicates', () => {
+  const store = new OverrideStore(join(mkdtempSync(join(tmpdir(), 'ael-override-')), 'experience.sqlite'));
+  for (let index = 0; index < 7; index += 1) {
+    const useId = `page-use-${index}`;
+    store.append(audit(`page-auth-${index}`, 'page-override', 'authorized', undefined, useId));
+    store.append(audit(`page-done-${index}`, 'page-override', 'completed', 'succeeded', useId));
+  }
+  const first = store.listPage({ overrideId: 'page-override', limit: 5 });
+  const second = store.listPage({ overrideId: 'page-override', limit: 5, afterSequence: first.nextCursor });
+  const third = store.listPage({ overrideId: 'page-override', limit: 5, afterSequence: second.nextCursor });
+  const ids = [...first.entries, ...second.entries, ...third.entries].map(({ id }) => id);
+  assert.deepEqual(ids, Array.from({ length: 7 }, (_, index) => [`page-auth-${index}`, `page-done-${index}`]).flat());
+  assert.equal(new Set(ids).size, 14);
+  assert.equal(third.nextCursor, undefined);
+  assert.throws(() => store.listPage({ limit: MAX_OVERRIDE_AUDIT_PAGE_SIZE + 1 }), /page size/i);
+  store.close();
+});
+
+test('validates and migrates legacy audit history spanning more than one batch', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-override-v5-')), 'experience.sqlite');
+  const database = openExperienceDatabase(databasePath);
+  database.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+  database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(5, now);
+  database.exec(overrideAuditMigration);
+  const count = OVERRIDE_AUDIT_MIGRATION_BATCH_SIZE + 3;
+  for (let index = 0; index < count; index += 1) insertLegacyAudit(database, audit(`batch-${index}`, `batch-override-${index}`, 'authorized'));
+  database.close();
+  assert.equal(attemptVersion6(databasePath), undefined);
+  const migrated = new OverrideStore(databasePath);
+  assert.equal(allAudit(migrated).length, count);
+  migrated.close();
+});
+
+test('rejects unbounded evidence derivation input', () => {
+  const entry = audit('bounded', 'bounded-override', 'authorized');
+  assert.throws(() => deriveOverrideLearningEvidence(Array.from({ length: MAX_OVERRIDE_EVIDENCE_ENTRIES + 1 }, () => entry)), /resource limit/i);
+});
+
 test('rejects private or credential-bearing decision references atomically without echoing values', () => {
   const store = new OverrideStore(join(mkdtempSync(join(tmpdir(), 'ael-override-')), 'experience.sqlite'));
   const unsafeValues = [
@@ -342,7 +426,7 @@ test('rejects private or credential-bearing decision references atomically witho
     assert.notEqual(message, '');
     assert.equal(message.includes(value), false);
   }
-  assert.deepEqual(store.list(), []);
+  assert.deepEqual(allAudit(store), []);
   store.close();
 });
 
@@ -355,13 +439,13 @@ test('authorizes only inside the inclusive-created and exclusive-expiry window',
   store.append({ ...audit('at-created', 'expiring', 'authorized', undefined, 'use-created'), override: expiring, recordedAt: expiring.createdAt });
   assert.throws(() => store.append({ ...audit('before-created', 'expiring', 'authorized', undefined, 'use-before'), override: expiring, recordedAt: '2026-08-25T09:59:59.999Z' }), /authorization time/i);
   assert.throws(() => store.append({ ...audit('at-expiry', 'expiring', 'authorized', undefined, 'use-expiry'), override: expiring, recordedAt: expiring.expiresAt! }), /authorization time/i);
-  assert.deepEqual(store.list().map(({ id }) => id), ['at-created']);
+  assert.deepEqual(allAudit(store).map(({ id }) => id), ['at-created']);
   store.close();
 });
 
 test('rejects malformed completion audit rows atomically', () => {
   const store = new OverrideStore(join(mkdtempSync(join(tmpdir(), 'ael-override-')), 'experience.sqlite'));
   assert.throws(() => store.append({ ...audit('bad', 'override-1', 'completed'), postActionOutcome: undefined }), /outcome/i);
-  assert.deepEqual(store.list(), []);
+  assert.deepEqual(allAudit(store), []);
   store.close();
 });

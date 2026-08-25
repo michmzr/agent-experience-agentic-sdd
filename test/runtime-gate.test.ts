@@ -73,6 +73,7 @@ test('aggregates the strongest outcome and retains every explanation in stable m
   ]);
   assert.deepEqual(decision.references.map(({ ruleId }) => ruleId), ['a-block', 'b-block', 'context', 'z-warn']);
   assert.equal(JSON.parse(JSON.stringify(decision)).outcome, 'BLOCK');
+  assert.match(decision.inputBinding, /^[a-f0-9]{64}$/);
   assert.equal(Object.isFrozen(decision), true);
   assert.equal(Object.isFrozen(decision.explanations), true);
 });
@@ -81,7 +82,9 @@ test('evaluates structured intent and returns ALLOW with no fabricated explanati
   const intentRule = rule('intent', { signature: intent.signature, applicability: { scope: 'repository', repositoryId: 'repo-1' } });
   const gate = createRuntimeGate({ index: index([intentRule]), profile: NORMAL_PROFILE, status: status() });
 
-  assert.equal(gate.evaluate(intent).outcome, 'BLOCK');
+  const intentDecision = gate.evaluate(intent);
+  assert.equal(intentDecision.outcome, 'BLOCK');
+  assert.notEqual(intentDecision.inputBinding, gate.evaluate(action).inputBinding);
   assert.deepEqual(gate.evaluate({ ...intent, signature: { ...intent.signature, target: 'draft' } }).explanations, []);
 });
 
