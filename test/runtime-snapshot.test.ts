@@ -18,9 +18,12 @@ function store(root: string, options: Omit<RuntimeSnapshotStoreOptions, 'clock'>
   return new RuntimeSnapshotStore(root, { clock, ...options });
 }
 
-function fakeFilesystemError(message: string): Error {
+function fakeFilesystemError(message: string, code: 'ENOENT' | 'EEXIST' = 'ENOENT'): Error {
   let source: NodeJS.ErrnoException;
-  try { readFileSync(join(tmpdir(), `ael-missing-${process.pid}-${Math.random()}`)); }
+  try {
+    if (code === 'EEXIST') mkdirSync(mkdtempSync(join(tmpdir(), 'ael-existing-')));
+    else readFileSync(join(tmpdir(), `ael-missing-${process.pid}-${Math.random()}`));
+  }
   catch (error) { source = error as NodeJS.ErrnoException; }
   return Object.assign(new Error(message), { code: source!.code, errno: source!.errno, syscall: source!.syscall });
 }
@@ -238,6 +241,46 @@ test('recovers a stale dead writer lock but preserves a live owner lock', () => 
   const blocked = new RuntimeSnapshotStore(root, { clock: () => now, staleLockMs: 10, lockTimeoutMs: 20, wait: (milliseconds) => { now += milliseconds; } });
   assert.throws(() => blocked.publish(snapshot), /Timed out/);
   assert.equal(existsSync(lock), true);
+});
+
+test('propagates a filesystem-shaped clock error from writer acquisition', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const snapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const expected = fakeFilesystemError('clock bug', 'EEXIST');
+  let calls = 0;
+  const snapshotStore = new RuntimeSnapshotStore(root, {
+    clock: () => {
+      calls += 1;
+      if (calls === 3) throw expected;
+      return calls;
+    }
+  });
+  assert.throws(() => snapshotStore.publish(snapshot), expected);
+});
+
+test('streams at most one entry beyond the reclaim claim limit including unrelated entries', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const snapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const claims = join(store(root).paths.root, '.writer-lock-reclaim');
+  mkdirSync(claims, { mode: 0o700 });
+  for (let index = 0; index < 140; index += 1) writeFileSync(join(claims, `unrelated-${String(index).padStart(3, '0')}`), 'x');
+  let entriesRead = 0;
+  const bounded = new RuntimeSnapshotStore(root, { clock, onReclaimClaimEntryRead: () => { entriesRead += 1; } });
+  assert.throws(() => bounded.publish(snapshot), /claim limit exceeded/);
+  assert.equal(entriesRead, 129);
+});
+
+test('propagates a filesystem-shaped reclaim scan hook error from writer acquisition', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const snapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const claims = join(store(root).paths.root, '.writer-lock-reclaim');
+  mkdirSync(claims, { mode: 0o700 });
+  writeFileSync(join(claims, 'unrelated'), 'x');
+  const expected = fakeFilesystemError('reclaim scan hook bug', 'EEXIST');
+  const snapshotStore = new RuntimeSnapshotStore(root, {
+    clock, onReclaimClaimEntryRead: () => { throw expected; }
+  });
+  assert.throws(() => snapshotStore.publish(snapshot), expected);
 });
 
 test('releases an exclusively owned lock when a reentrant acquisition hook throws', () => {

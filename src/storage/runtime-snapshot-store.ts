@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
-  openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync
+  openSync, opendirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync
 } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { getSystemErrorName } from 'node:util';
@@ -48,6 +48,7 @@ export interface RuntimeSnapshotStoreOptions {
   readonly beforeLockRelease?: () => void;
   readonly beforeReclaimClaimRelease?: (claim: string) => void;
   readonly beforeStaleReclaimClaimRemoval?: (claim: string) => void;
+  readonly onReclaimClaimEntryRead?: () => void;
 }
 export interface RuntimeSnapshotPaths { readonly root: string; readonly manifest: string; readonly rollbackManifest: string }
 interface ManifestReference { readonly checksum: string; readonly file: string }
@@ -77,6 +78,7 @@ export class RuntimeSnapshotStore {
   readonly #beforeLockRelease: () => void;
   readonly #beforeReclaimClaimRelease: (claim: string) => void;
   readonly #beforeStaleReclaimClaimRemoval: (claim: string) => void;
+  readonly #onReclaimClaimEntryRead: () => void;
 
   constructor(stateDirectory: string, options: RuntimeSnapshotStoreOptions) {
     if (typeof options?.clock !== 'function') throw new TypeError('Runtime snapshot store requires an injected clock.');
@@ -97,6 +99,7 @@ export class RuntimeSnapshotStore {
     this.#beforeLockRelease = options.beforeLockRelease ?? (() => undefined);
     this.#beforeReclaimClaimRelease = options.beforeReclaimClaimRelease ?? (() => undefined);
     this.#beforeStaleReclaimClaimRemoval = options.beforeStaleReclaimClaimRemoval ?? (() => undefined);
+    this.#onReclaimClaimEntryRead = options.onReclaimClaimEntryRead ?? (() => undefined);
   }
 
   generationPath(checksum: string): string {
@@ -305,8 +308,8 @@ export class RuntimeSnapshotStore {
       if ((stat.mode & 0o077) !== 0) throw new RuntimeSnapshotStorageError('Runtime snapshot target must be owner-only.');
       if (stat.size > maxBytes) throw new RuntimeSnapshotStorageError('Runtime snapshot target exceeds its resource boundary.');
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && allowMissing) return;
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new RuntimeSnapshotStorageError('Runtime snapshot target does not exist.', { cause: error });
+      if (isExpectedNodeFilesystemError(error) && error.code === 'ENOENT' && allowMissing) return;
+      if (isExpectedNodeFilesystemError(error) && error.code === 'ENOENT') throw new RuntimeSnapshotStorageError('Runtime snapshot target does not exist.', { cause: error });
       throw error;
     }
   }
@@ -321,27 +324,15 @@ export class RuntimeSnapshotStore {
       this.#cleanupAbandonedLockCandidates(this.#clock());
       const candidate = resolve(this.paths.root, `.writer-lock-candidate-${token}-${randomUUID()}`);
       try {
-        mkdirSync(candidate, { mode: 0o700 });
-        const owner = resolve(candidate, 'owner.json');
-        writeFileSync(owner, JSON.stringify({ pid: process.pid, timestamp: this.#clock(), token }), { mode: 0o600, flag: 'wx' });
-        fsyncFile(owner);
-        fsyncDirectory(candidate);
-        if (existsSync(lock)) throw occupiedLockError();
-        if (this.#hasLiveReclaimClaim(reclaimClaims, this.#clock())) throw occupiedLockError();
-        renameSync(candidate, lock);
-        acquiredIdentity = lockIdentity(lock);
-        this.#syncDirectory();
-        break;
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code !== 'EEXIST' && code !== 'ENOTEMPTY') throw error;
-        this.#recoverStaleWriterLock(lock, reclaimClaims, this.#clock());
-        if (this.#clock() - started >= this.#lockTimeoutMs) throw new RuntimeSnapshotStorageError('Timed out waiting for runtime snapshot writer lock.');
-        this.#onLockWait();
-        this.#wait(Math.min(25, this.#lockTimeoutMs));
+        acquiredIdentity = this.#tryAcquireWriterLock(candidate, lock, reclaimClaims, token);
       } finally {
         if (existsSync(candidate)) removeLockArtifact(candidate);
       }
+      if (acquiredIdentity !== undefined) break;
+      this.#recoverStaleWriterLock(lock, reclaimClaims, this.#clock());
+      if (this.#clock() - started >= this.#lockTimeoutMs) throw new RuntimeSnapshotStorageError('Timed out waiting for runtime snapshot writer lock.');
+      this.#onLockWait();
+      this.#wait(Math.min(25, this.#lockTimeoutMs));
     }
     try {
       this.#afterLockAcquired();
@@ -350,6 +341,30 @@ export class RuntimeSnapshotStore {
     finally {
       this.#releaseWriterLock(lock, token, acquiredIdentity);
     }
+  }
+
+  #tryAcquireWriterLock(candidate: string, lock: string, reclaimClaims: string, token: string): LockIdentity | undefined {
+    const timestamp = this.#clock();
+    try { mkdirSync(candidate, { mode: 0o700 }); }
+    catch (error) {
+      if (isExpectedNodeFilesystemError(error) && (error.code === 'EEXIST' || error.code === 'ENOTEMPTY')) return undefined;
+      throw error;
+    }
+    const owner = resolve(candidate, 'owner.json');
+    writeFileSync(owner, JSON.stringify({ pid: process.pid, timestamp, token }), { mode: 0o600, flag: 'wx' });
+    fsyncFile(owner);
+    fsyncDirectory(candidate);
+    if (existsSync(lock)) return undefined;
+    const reclaimNow = this.#clock();
+    if (this.#hasLiveReclaimClaim(reclaimClaims, reclaimNow)) return undefined;
+    try { renameSync(candidate, lock); }
+    catch (error) {
+      if (isExpectedNodeFilesystemError(error) && (error.code === 'EEXIST' || error.code === 'ENOTEMPTY')) return undefined;
+      throw error;
+    }
+    const acquiredIdentity = lockIdentity(lock);
+    this.#syncDirectory();
+    return acquiredIdentity;
   }
 
   #recoverStaleWriterLock(lock: string, claims: string, now: number): void {
@@ -488,9 +503,21 @@ export class RuntimeSnapshotStore {
   }
 
   #readReclaimClaimEntries(claims: string): string[] {
-    const entries = readdirSync(claims);
-    if (entries.length > MAX_RECLAIM_CLAIMS) throw new RuntimeSnapshotStorageError('Runtime snapshot reclaim claim limit exceeded.');
-    return entries;
+    const directory = opendirSync(claims);
+    const entries: string[] = [];
+    try {
+      while (true) {
+        const entry = directory.readSync();
+        if (entry === null) return entries;
+        entries.push(entry.name);
+        this.#onReclaimClaimEntryRead();
+        if (entries.length > MAX_RECLAIM_CLAIMS) {
+          throw new RuntimeSnapshotStorageError('Runtime snapshot reclaim claim limit exceeded.');
+        }
+      }
+    } finally {
+      directory.closeSync();
+    }
   }
 
   #isStaleOwner(owner: LockOwner, now: number): boolean {
@@ -560,12 +587,6 @@ export class RuntimeSnapshotStore {
   #removeCandidate(path: string): void { try { unlinkSync(path); } catch (error) { if (!isExpectedNodeFilesystemError(error) || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } }
 }
 
-function occupiedLockError(): NodeJS.ErrnoException {
-  const error = new Error('Runtime snapshot writer lock is occupied.') as NodeJS.ErrnoException;
-  error.code = 'EEXIST';
-  return error;
-}
-
 interface LockOwner { readonly pid: number; readonly timestamp: number; readonly token: string }
 interface LockIdentity { readonly dev: number; readonly ino: number; readonly mtimeMs: number }
 interface LockObservation { readonly identity: LockIdentity; readonly owner: LockOwner }
@@ -611,7 +632,7 @@ function removeLockArtifact(path: string): boolean {
 function isPidAlive(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0) return true;
   try { process.kill(pid, 0); return true; }
-  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+  catch (error) { return !hasTrustedNodeErrorCode(error, ['ESRCH']); }
 }
 
 function blockingWait(milliseconds: number): void {
@@ -646,7 +667,7 @@ function assertNoCallerSymlink(root: string): void {
     try {
       if (lstatSync(current).isSymbolicLink()) throw new RuntimeSnapshotStorageError('Runtime snapshot state path contains a symlink.');
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      if (isExpectedNodeFilesystemError(error) && error.code === 'ENOENT') return;
       throw error;
     }
   }
@@ -677,12 +698,15 @@ function isMissing(error: unknown): boolean {
     || (error instanceof RuntimeSnapshotStorageError && isExpectedNodeFilesystemError(error.cause) && error.cause.code === 'ENOENT');
 }
 function isExpectedNodeFilesystemError(error: unknown): error is NodeJS.ErrnoException {
+  return hasTrustedNodeErrorCode(error, ['ENOENT', 'EEXIST', 'EACCES', 'EPERM', 'EBUSY', 'EIO', 'ENOTEMPTY']);
+}
+function hasTrustedNodeErrorCode(error: unknown, allowedCodes: readonly string[]): error is NodeJS.ErrnoException {
   if (!(error instanceof Error) || error instanceof TypeError || error instanceof SyntaxError) return false;
   const systemError = error as NodeJS.ErrnoException;
   if (typeof systemError.errno !== 'number' || typeof systemError.syscall !== 'string') return false;
   try {
     return getSystemErrorName(systemError.errno) === systemError.code
-      && ['ENOENT', 'EEXIST', 'EACCES', 'EPERM', 'EBUSY', 'EIO', 'ENOTEMPTY'].includes(systemError.code ?? '');
+      && allowedCodes.includes(systemError.code ?? '');
   } catch {
     return false;
   }
