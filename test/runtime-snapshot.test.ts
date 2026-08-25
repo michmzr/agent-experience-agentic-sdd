@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -238,6 +238,95 @@ test('releases an exclusively owned lock when a reentrant acquisition hook throw
   assert.throws(() => failing.publish(snapshot), TypeError);
   assert.equal(existsSync(join(failing.paths.root, '.writer-lock')), false);
   store(root).publish(snapshot);
+});
+
+test('identity-safe stale reclaim never removes a replacement live lock', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const snapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const base = store(root);
+  const lock = join(base.paths.root, '.writer-lock');
+  mkdirSync(lock, { mode: 0o700 });
+  writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 999_999_999, timestamp: 0, token: 'stale-owner' }), { mode: 0o600 });
+  let now = 100_000;
+  let replaced = false;
+  const publisher = new RuntimeSnapshotStore(root, {
+    clock: () => now, staleLockMs: 10, lockTimeoutMs: 20, wait: (milliseconds) => { now += milliseconds; },
+    beforeStaleLockRename: () => {
+      if (replaced) return;
+      replaced = true;
+      renameSync(lock, `${lock}.old`);
+      mkdirSync(lock, { mode: 0o700 });
+      writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, timestamp: now, token: 'replacement-live' }), { mode: 0o600 });
+    }
+  });
+  assert.throws(() => publisher.publish(snapshot), /Timed out/);
+  assert.equal((JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')) as { token: string }).token, 'replacement-live');
+  assert.equal(existsSync(base.paths.manifest), false);
+  rmSync(lock, { recursive: true });
+  rmSync(`${lock}.old`, { recursive: true });
+});
+
+test('lock release suppresses expected filesystem errors but propagates programming errors', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const first = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const expected = Object.assign(new Error('release busy'), { code: 'EBUSY' });
+  new RuntimeSnapshotStore(root, { clock, beforeLockRelease: () => { throw expected; } }).publish(first);
+  assert.equal(existsSync(join(store(root).paths.root, '.writer-lock')), false);
+
+  const second = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:01:00.000Z', repositoryRules: [rule('second')] });
+  assert.throws(() => new RuntimeSnapshotStore(root, {
+    clock, beforeLockRelease: () => { throw Object.assign(new TypeError('release bug'), { code: 'EBUSY' }); }
+  }).publish(second), TypeError);
+  assert.equal(existsSync(join(store(root).paths.root, '.writer-lock')), false);
+});
+
+test('stale reclaim and abandoned-candidate housekeeping propagate only programming errors', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const snapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const base = store(root);
+  const lock = join(base.paths.root, '.writer-lock');
+  mkdirSync(lock, { mode: 0o700 });
+  writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 999_999_999, timestamp: 0, token: 'stale' }), { mode: 0o600 });
+  assert.throws(() => new RuntimeSnapshotStore(root, { clock: () => 100_000, staleLockMs: 10, beforeStaleLockRename: () => { throw new TypeError('reclaim bug'); } }).publish(snapshot), TypeError);
+  let now = 100_000;
+  const expectedReclaim = Object.assign(new Error('reclaim busy'), { code: 'EBUSY' });
+  assert.throws(() => new RuntimeSnapshotStore(root, {
+    clock: () => now, staleLockMs: 10, lockTimeoutMs: 20, wait: (milliseconds) => { now += milliseconds; },
+    beforeStaleLockRename: () => { throw expectedReclaim; }
+  }).publish(snapshot), /Timed out/);
+  assert.equal((JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')) as { token: string }).token, 'stale');
+  rmSync(lock, { recursive: true });
+
+  const abandoned = join(base.paths.root, '.writer-lock-candidate-abandoned');
+  mkdirSync(abandoned, { mode: 0o700 });
+  utimesSync(abandoned, 0, 0);
+  assert.throws(() => new RuntimeSnapshotStore(root, { clock: () => 100_000, staleLockMs: 10, beforeStaleCandidateRemoval: () => { throw new TypeError('candidate bug'); } }).publish(snapshot), TypeError);
+  const expected = Object.assign(new Error('candidate busy'), { code: 'EBUSY' });
+  new RuntimeSnapshotStore(root, { clock: () => 100_000, staleLockMs: 10, beforeStaleCandidateRemoval: () => { throw expected; } }).publish(snapshot);
+});
+
+test('stale reclaim claim release suppresses filesystem errors and propagates programming errors after cleanup', () => {
+  const snapshot = compileRuntimeSnapshot({ repositoryId: 'repo-a', generatedAt: '2026-08-25T00:00:00.000Z', repositoryRules: [rule('first')] });
+  const expectedRoot = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const expectedBase = store(expectedRoot);
+  const expectedLock = join(expectedBase.paths.root, '.writer-lock');
+  mkdirSync(expectedLock, { mode: 0o700 });
+  writeFileSync(join(expectedLock, 'owner.json'), JSON.stringify({ pid: 999_999_999, timestamp: 0, token: 'stale' }), { mode: 0o600 });
+  const expected = Object.assign(new Error('claim release busy'), { code: 'EBUSY' });
+  new RuntimeSnapshotStore(expectedRoot, {
+    clock: () => 100_000, staleLockMs: 10, beforeReclaimClaimRelease: () => { throw expected; }
+  }).publish(snapshot);
+  assert.equal(existsSync(join(expectedBase.paths.root, '.writer-lock-reclaim')), false);
+
+  const programmingRoot = mkdtempSync(join(tmpdir(), 'ael-runtime-'));
+  const programmingBase = store(programmingRoot);
+  const programmingLock = join(programmingBase.paths.root, '.writer-lock');
+  mkdirSync(programmingLock, { mode: 0o700 });
+  writeFileSync(join(programmingLock, 'owner.json'), JSON.stringify({ pid: 999_999_999, timestamp: 0, token: 'stale' }), { mode: 0o600 });
+  assert.throws(() => new RuntimeSnapshotStore(programmingRoot, {
+    clock: () => 100_000, staleLockMs: 10, beforeReclaimClaimRelease: () => { throw new TypeError('claim release bug'); }
+  }).publish(snapshot), TypeError);
+  assert.equal(existsSync(join(programmingBase.paths.root, '.writer-lock-reclaim')), false);
 });
 
 async function waitForFile(path: string): Promise<void> {

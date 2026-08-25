@@ -42,6 +42,10 @@ export interface RuntimeSnapshotStoreOptions {
   readonly injectFailure?: (step: RuntimeSnapshotStoreStep) => void;
   readonly afterLockAcquired?: () => void;
   readonly onLockWait?: () => void;
+  readonly beforeStaleLockRename?: () => void;
+  readonly beforeStaleCandidateRemoval?: () => void;
+  readonly beforeLockRelease?: () => void;
+  readonly beforeReclaimClaimRelease?: () => void;
 }
 export interface RuntimeSnapshotPaths { readonly root: string; readonly manifest: string; readonly rollbackManifest: string }
 interface ManifestReference { readonly checksum: string; readonly file: string }
@@ -62,6 +66,10 @@ export class RuntimeSnapshotStore {
   readonly #staleLockMs: number;
   readonly #afterLockAcquired: () => void;
   readonly #onLockWait: () => void;
+  readonly #beforeStaleLockRename: () => void;
+  readonly #beforeStaleCandidateRemoval: () => void;
+  readonly #beforeLockRelease: () => void;
+  readonly #beforeReclaimClaimRelease: () => void;
 
   constructor(stateDirectory: string, options: RuntimeSnapshotStoreOptions) {
     if (typeof options?.clock !== 'function') throw new TypeError('Runtime snapshot store requires an injected clock.');
@@ -77,6 +85,10 @@ export class RuntimeSnapshotStore {
     this.#staleLockMs = options.staleLockMs ?? DEFAULT_STALE_LOCK_MS;
     this.#afterLockAcquired = options.afterLockAcquired ?? (() => undefined);
     this.#onLockWait = options.onLockWait ?? (() => undefined);
+    this.#beforeStaleLockRename = options.beforeStaleLockRename ?? (() => undefined);
+    this.#beforeStaleCandidateRemoval = options.beforeStaleCandidateRemoval ?? (() => undefined);
+    this.#beforeLockRelease = options.beforeLockRelease ?? (() => undefined);
+    this.#beforeReclaimClaimRelease = options.beforeReclaimClaimRelease ?? (() => undefined);
   }
 
   generationPath(checksum: string): string {
@@ -292,10 +304,12 @@ export class RuntimeSnapshotStore {
 
   #withWriterLock<T>(action: () => T): T {
     const lock = resolve(this.paths.root, '.writer-lock');
+    const reclaimClaim = resolve(this.paths.root, '.writer-lock-reclaim');
     const token = randomUUID();
     const started = this.#clock();
+    let acquiredIdentity: LockIdentity | undefined;
     while (true) {
-      cleanupAbandonedLockCandidates(this.paths.root, this.#clock(), this.#staleLockMs);
+      this.#cleanupAbandonedLockCandidates(this.#clock());
       const candidate = resolve(this.paths.root, `.writer-lock-candidate-${token}-${randomUUID()}`);
       try {
         mkdirSync(candidate, { mode: 0o700 });
@@ -304,18 +318,20 @@ export class RuntimeSnapshotStore {
         fsyncFile(owner);
         fsyncDirectory(candidate);
         if (existsSync(lock)) throw occupiedLockError();
+        if (existsSync(reclaimClaim)) throw occupiedLockError();
         renameSync(candidate, lock);
+        acquiredIdentity = lockIdentity(lock);
         this.#syncDirectory();
         break;
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== 'EEXIST' && code !== 'ENOTEMPTY') throw error;
-        recoverStaleWriterLock(lock, this.#clock(), this.#staleLockMs);
+        this.#recoverStaleWriterLock(lock, reclaimClaim, this.#clock());
         if (this.#clock() - started >= this.#lockTimeoutMs) throw new RuntimeSnapshotStorageError('Timed out waiting for runtime snapshot writer lock.');
         this.#onLockWait();
         this.#wait(Math.min(25, this.#lockTimeoutMs));
       } finally {
-        if (existsSync(candidate)) rmSync(candidate, { recursive: true, force: true });
+        if (existsSync(candidate)) removeLockArtifact(candidate);
       }
     }
     try {
@@ -323,14 +339,90 @@ export class RuntimeSnapshotStore {
       return action();
     }
     finally {
+      this.#releaseWriterLock(lock, token, acquiredIdentity);
+    }
+  }
+
+  #recoverStaleWriterLock(lock: string, claim: string, now: number): void {
+    let observed: LockObservation;
+    try {
+      observed = observeLock(lock);
+      if (now - observed.owner.timestamp <= this.#staleLockMs || isPidAlive(observed.owner.pid)) return;
+    } catch (error) {
+      if (isExpectedLockFilesystemError(error)) return;
+      throw error;
+    }
+
+    try {
+      mkdirSync(claim, { mode: 0o700 });
+    } catch (error) {
+      if (isExpectedLockFilesystemError(error)) return;
+      throw error;
+    }
+
+    try {
+      fsyncDirectory(claim);
+      const confirmed = observeLock(lock);
+      if (!sameLockObservation(observed, confirmed) || isPidAlive(confirmed.owner.pid)) return;
+      this.#beforeStaleLockRename();
+      const final = observeLock(lock);
+      if (!sameLockObservation(confirmed, final) || isPidAlive(final.owner.pid)) return;
+      const stale = resolve(this.paths.root, `.writer-lock-stale-${randomUUID()}`);
+      renameSync(lock, stale);
+      rmSync(stale, { recursive: true, force: true });
+      this.#syncDirectory();
+    } catch (error) {
+      if (!isExpectedLockFilesystemError(error)) throw error;
+    } finally {
+      this.#releaseReclaimClaim(claim);
+    }
+  }
+
+  #cleanupAbandonedLockCandidates(now: number): void {
+    for (const entry of readdirSync(this.paths.root, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith('.writer-lock-candidate-')) continue;
+      const candidate = resolve(this.paths.root, entry.name);
       try {
-        const owner = JSON.parse(readFileSync(resolve(lock, 'owner.json'), 'utf8')) as { token?: string };
-        if (owner.token === token) {
+        const observed = lockIdentity(candidate);
+        if (now - observed.mtimeMs <= this.#staleLockMs) continue;
+        const confirmed = lockIdentity(candidate);
+        if (!sameLockIdentity(observed, confirmed)) continue;
+        this.#beforeStaleCandidateRemoval();
+        rmSync(candidate, { recursive: true, force: true });
+      } catch (error) {
+        if (!isExpectedLockFilesystemError(error)) throw error;
+      }
+    }
+  }
+
+  #releaseWriterLock(lock: string, token: string, acquiredIdentity: LockIdentity | undefined): void {
+    let programmingError: unknown;
+    try { this.#beforeLockRelease(); }
+    catch (error) { if (!isExpectedLockFilesystemError(error)) programmingError = error; }
+    try {
+      if (acquiredIdentity !== undefined) {
+        const observed = observeLock(lock);
+        if (observed.owner.token === token && sameLockIdentity(observed.identity, acquiredIdentity)) {
           rmSync(lock, { recursive: true, force: true });
           this.#syncDirectory();
         }
-      } catch { /* Never remove a lock whose ownership cannot be verified. */ }
+      }
+    } catch (error) {
+      if (!isExpectedLockFilesystemError(error) && programmingError === undefined) programmingError = error;
     }
+    if (programmingError !== undefined) throw programmingError;
+  }
+
+  #releaseReclaimClaim(claim: string): void {
+    let programmingError: unknown;
+    try { this.#beforeReclaimClaimRelease(); }
+    catch (error) { if (!isExpectedLockFilesystemError(error)) programmingError = error; }
+    try {
+      if (removeLockArtifact(claim)) this.#syncDirectory();
+    } catch (error) {
+      if (!isExpectedLockFilesystemError(error) && programmingError === undefined) programmingError = error;
+    }
+    if (programmingError !== undefined) throw programmingError;
   }
 
   #syncDirectory(): void {
@@ -348,30 +440,41 @@ function occupiedLockError(): NodeJS.ErrnoException {
   return error;
 }
 
-function recoverStaleWriterLock(lock: string, now: number, staleAfter: number): void {
-  try {
-    const owner = JSON.parse(readFileSync(resolve(lock, 'owner.json'), 'utf8')) as { pid?: number; timestamp?: number; token?: string };
-    if (typeof owner.pid !== 'number' || typeof owner.timestamp !== 'number' || typeof owner.token !== 'string') return;
-    if (now - owner.timestamp <= staleAfter || isPidAlive(owner.pid)) return;
-    const confirmed = JSON.parse(readFileSync(resolve(lock, 'owner.json'), 'utf8')) as { pid?: number; timestamp?: number; token?: string };
-    if (confirmed.pid !== owner.pid || confirmed.timestamp !== owner.timestamp || confirmed.token !== owner.token || isPidAlive(owner.pid)) return;
-    const stale = `${lock}.stale-${owner.token}`;
-    renameSync(lock, stale);
-    rmSync(stale, { recursive: true, force: true });
-  } catch { /* A malformed, live, or concurrently changing lock remains untouched. */ }
+interface LockOwner { readonly pid: number; readonly timestamp: number; readonly token: string }
+interface LockIdentity { readonly dev: number; readonly ino: number; readonly mtimeMs: number }
+interface LockObservation { readonly identity: LockIdentity; readonly owner: LockOwner }
+
+function observeLock(lock: string): LockObservation {
+  const identity = lockIdentity(lock);
+  const value = JSON.parse(readFileSync(resolve(lock, 'owner.json'), 'utf8')) as unknown;
+  if (!isRecord(value) || typeof value.pid !== 'number' || typeof value.timestamp !== 'number' || typeof value.token !== 'string') {
+    throw new RuntimeSnapshotStorageError('Runtime snapshot writer lock owner is invalid.');
+  }
+  return { identity, owner: { pid: value.pid, timestamp: value.timestamp, token: value.token } };
 }
 
-function cleanupAbandonedLockCandidates(root: string, now: number, staleAfter: number): void {
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !entry.name.startsWith('.writer-lock-candidate-')) continue;
-    const candidate = resolve(root, entry.name);
-    try {
-      const observed = statSync(candidate);
-      if (now - observed.mtimeMs <= staleAfter) continue;
-      const confirmed = statSync(candidate);
-      if (confirmed.dev !== observed.dev || confirmed.ino !== observed.ino || confirmed.mtimeMs !== observed.mtimeMs) continue;
-      rmSync(candidate, { recursive: true, force: true });
-    } catch { /* A concurrently changing lock candidate remains untouched. */ }
+function lockIdentity(path: string): LockIdentity {
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new RuntimeSnapshotStorageError('Runtime snapshot writer lock is unsafe.');
+  return { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs };
+}
+
+function sameLockObservation(left: LockObservation, right: LockObservation): boolean {
+  return sameLockIdentity(left.identity, right.identity)
+    && left.owner.pid === right.owner.pid
+    && left.owner.timestamp === right.owner.timestamp
+    && left.owner.token === right.owner.token;
+}
+
+function sameLockIdentity(left: LockIdentity, right: LockIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.mtimeMs === right.mtimeMs;
+}
+
+function removeLockArtifact(path: string): boolean {
+  try { rmSync(path, { recursive: true, force: true }); return true; }
+  catch (error) {
+    if (isExpectedLockFilesystemError(error)) return false;
+    throw error;
   }
 }
 
@@ -447,6 +550,17 @@ function isExpectedCleanupFilesystemError(error: unknown): boolean {
   let current: unknown = error;
   while (current && typeof current === 'object') {
     if (['ENOENT', 'EACCES', 'EPERM', 'EBUSY', 'EIO', 'ENOTEMPTY'].includes((current as NodeJS.ErrnoException).code ?? '')) return true;
+    current = (current as Error).cause;
+  }
+  return false;
+}
+
+function isExpectedLockFilesystemError(error: unknown): boolean {
+  let current: unknown = error;
+  while (current && typeof current === 'object') {
+    if (current instanceof TypeError || current instanceof SyntaxError) return false;
+    if (current instanceof Error
+      && ['ENOENT', 'EEXIST', 'EACCES', 'EPERM', 'EBUSY', 'EIO', 'ENOTEMPTY'].includes((current as NodeJS.ErrnoException).code ?? '')) return true;
     current = (current as Error).cause;
   }
   return false;
