@@ -336,7 +336,7 @@ test('bounds state-directory scans for abandoned candidates and committed genera
     },
     onDirectoryEntryRead: (directory) => { if (directory === 'state') cleanupReads += 1; }
   });
-  assert.throws(() => cleanupStore.publish(second), /state directory entry limit exceeded/);
+  cleanupStore.publish(second);
   assert.equal(cleanupReads, 257);
   assert.equal(store(cleanupRoot).loadCurrent().rules[0]?.id, 'second');
 });

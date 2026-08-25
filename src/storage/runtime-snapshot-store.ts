@@ -24,6 +24,15 @@ export class RuntimeSnapshotCleanupError extends RuntimeSnapshotStorageError {
   constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = 'RuntimeSnapshotCleanupError'; }
 }
 
+class RuntimeSnapshotDirectoryLimitError extends RuntimeSnapshotStorageError {
+  readonly directory: 'reclaim' | 'state';
+  constructor(directory: 'reclaim' | 'state', message: string) {
+    super(message);
+    this.name = 'RuntimeSnapshotDirectoryLimitError';
+    this.directory = directory;
+  }
+}
+
 export type RuntimeSnapshotStoreStep =
   | 'after-generation-write'
   | 'after-generation-reopen'
@@ -228,6 +237,7 @@ export class RuntimeSnapshotStore {
       }
       this.#syncDirectory();
     } catch (error) {
+      if (error instanceof RuntimeSnapshotDirectoryLimitError && error.directory === 'state') return;
       if (isExpectedNodeFilesystemError(error)) return;
       throw error;
     }
@@ -574,7 +584,7 @@ export class RuntimeSnapshotStore {
         if (entry === null) return entries;
         entries.push(entry);
         this.#onDirectoryEntryRead(kind);
-        if (entries.length > maximum) throw new RuntimeSnapshotStorageError(message);
+        if (entries.length > maximum) throw new RuntimeSnapshotDirectoryLimitError(kind, message);
       }
     } finally {
       directory.closeSync();
