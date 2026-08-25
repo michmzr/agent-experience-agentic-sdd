@@ -3,6 +3,7 @@ import { dirname, relative, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import type { KnowledgeEntry, KnowledgeState, LessonKind } from '../domain/types.js';
+import { withRepositoryKnowledgeLock } from '../shared-knowledge/repository.js';
 
 // Keep the version 1 writer available while exposing the strict version 2 boundary
 // from the historical repository-knowledge module.
@@ -60,6 +61,10 @@ const knowledgeStates: readonly KnowledgeState[] = ['candidate', 'observed', 'co
 const lessonKinds: readonly LessonKind[] = ['failure', 'successful-workflow', 'project-fact', 'convention', 'tool-capability', 'environment-quirk', 'heuristic', 'preference'];
 
 export function writeRepositoryKnowledge(repositoryRoot: string, document: RepositoryKnowledgeDocument): void {
+  withRepositoryKnowledgeLock(repositoryRoot, () => writeRepositoryKnowledgeUnlocked(repositoryRoot, document));
+}
+
+function writeRepositoryKnowledgeUnlocked(repositoryRoot: string, document: RepositoryKnowledgeDocument): void {
   validateDocument(document);
   const output = outputPaths(repositoryRoot, document.entry.id);
   ensureDirectory(output.root);

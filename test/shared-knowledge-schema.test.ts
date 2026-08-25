@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 import { readSharedKnowledge, writeSharedKnowledge, type SharedKnowledgeDocument } from '../src/shared-knowledge/repository.js';
+
+process.env.AEL_DATA_DIR = mkdtempSync(join(tmpdir(), 'ael-shared-state-'));
 
 function root(): string {
   return mkdtempSync(join(tmpdir(), 'ael-shared-knowledge-'));
@@ -177,56 +179,98 @@ test('keeps the prior complete generation when a replacement is rejected', () =>
   assert.deepEqual(readSharedKnowledge(repository), [document()]);
 });
 
-test('serves the prior complete generation during the directory swap and restores it on publication failure', () => {
+test('fails closed on an invalid existing primary and promotion preserves every edited byte', async () => {
   const repository = root();
-  writeSharedKnowledge(repository, [document()]);
-  let duringSwap: SharedKnowledgeDocument[] | undefined;
+  const stateRoot = mkdtempSync(join(tmpdir(), 'ael-private-state-'));
+  writeSharedKnowledge(repository, [document()], { stateRoot });
+  const markdown = join(repository, 'agent-experience', 'knowledge', 'safe-reset.md');
+  writeFileSync(markdown, `${readFileSync(markdown, 'utf8')}manual invalid edit\n`);
+  const edited = readFileSync(markdown);
 
-  assert.throws(() => writeSharedKnowledge(repository, [{ ...document(), lesson: 'replacement' }], {
-    afterCurrentMovedToBackup: () => {
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        const read = readSharedKnowledge(repository);
-        assert.notEqual(read.length, 0);
-        assert.equal(read[0]?.lesson, document().lesson);
-        duringSwap = read;
-      }
-      throw new Error('injected publication failure');
-    }
-  }), /injected publication failure/);
-
-  assert.equal(duringSwap?.[0]?.lesson, document().lesson);
-  assert.equal(readSharedKnowledge(repository)[0]?.lesson, document().lesson);
+  assert.throws(() => readSharedKnowledge(repository, { stateRoot }), /invalid|content|hash/i);
+  const { promoteKnowledge } = await import('../src/shared-knowledge/promotion-policy.js');
+  assert.throws(() => promoteKnowledge(repository, { ...document('new-fact'), evidence: [{ kind: 'code-or-tool', summary: 'code', deterministic: true }] }, { stateRoot }), /invalid|content|hash/i);
+  assert.deepEqual(readFileSync(markdown), edited);
 });
 
-test('recovers an interrupted immutable backup and safely cleans a leftover stage before publishing', () => {
+test('normalizes CRLF before Markdown hash comparison', () => {
   const repository = root();
   writeSharedKnowledge(repository, [document()]);
-  const primary = join(repository, 'agent-experience');
-  const backup = join(repository, '.agent-experience-backup-0001756123200000-fixture');
-  const stage = join(repository, '.agent-experience-stage-20260825T120000000Z-fixture');
-  renameSync(primary, backup);
-  cpSync(backup, stage, { recursive: true });
-
-  assert.equal(readSharedKnowledge(repository)[0]?.lesson, document().lesson);
-  writeSharedKnowledge(repository, [{ ...document(), lesson: 'recovered replacement' }]);
-
-  assert.equal(readSharedKnowledge(repository)[0]?.lesson, 'recovered replacement');
-  assert.equal(existsSync(backup), true);
-  assert.equal(existsSync(stage), false);
+  const base = join(repository, 'agent-experience');
+  const markdown = join(base, 'knowledge', 'safe-reset.md');
+  writeFileSync(markdown, readFileSync(markdown, 'utf8').replace(/\n/g, '\r\n'));
+  assert.equal(readSharedKnowledge(repository)[0]?.identity, 'safe-reset');
 });
 
-test('keeps immutable unique backups and selects the newest valid generation deterministically', () => {
+test('keeps one owner-only private recovery generation outside Git and restores only an absent primary', () => {
   const repository = root();
-  writeSharedKnowledge(repository, [{ ...document(), lesson: 'generation one' }]);
-  writeSharedKnowledge(repository, [{ ...document(), lesson: 'generation two' }]);
-  writeSharedKnowledge(repository, [{ ...document(), lesson: 'generation three' }]);
-  const backups = readdirSync(repository).filter((name) => name.startsWith('.agent-experience-backup-')).sort();
-  assert.equal(backups.length, 2);
-  assert.notEqual(backups[0], backups[1]);
+  const stateRoot = mkdtempSync(join(tmpdir(), 'ael-private-state-'));
+  writeSharedKnowledge(repository, [{ ...document(), lesson: 'generation one' }], { stateRoot });
+  writeSharedKnowledge(repository, [{ ...document(), lesson: 'generation two' }], { stateRoot });
+  const digest = createHash('sha256').update(realpathSync.native(repository)).digest('hex');
+  const privateDirectory = join(stateRoot, digest);
 
+  assert.deepEqual(readdirSync(repository), ['agent-experience']);
+  assert.equal(statSync(privateDirectory).mode & 0o777, 0o700);
+  assert.deepEqual(readdirSync(privateDirectory).sort(), ['recovery']);
   rmSync(join(repository, 'agent-experience'), { recursive: true });
-  assert.equal(readSharedKnowledge(repository)[0]?.lesson, 'generation two');
-  assert.equal(backups.every((name) => existsSync(join(repository, name))), true);
+
+  assert.equal(readSharedKnowledge(repository, { stateRoot })[0]?.lesson, 'generation one');
+  assert.equal(existsSync(join(privateDirectory, 'recovery')), true);
+});
+
+test('rolls back from private recovery when publication fails after primary removal', () => {
+  const repository = root();
+  const stateRoot = mkdtempSync(join(tmpdir(), 'ael-private-state-'));
+  writeSharedKnowledge(repository, [{ ...document(), lesson: 'stable generation' }], { stateRoot });
+
+  assert.throws(() => writeSharedKnowledge(repository, [{ ...document(), lesson: 'failed generation' }], {
+    stateRoot,
+    afterPrimaryRemoved: () => { throw new Error('injected removal failure'); }
+  }), /injected removal failure/);
+
+  assert.equal(readSharedKnowledge(repository, { stateRoot })[0]?.lesson, 'stable generation');
+});
+
+test('recovers a stale dead-owner lock but never deletes a live-owner lock', () => {
+  const repository = root();
+  const stateRoot = mkdtempSync(join(tmpdir(), 'ael-private-state-'));
+  readSharedKnowledge(repository, { stateRoot });
+  const digest = createHash('sha256').update(realpathSync.native(repository)).digest('hex');
+  const lock = join(stateRoot, digest, 'lock');
+  mkdirSync(lock, { mode: 0o700 });
+  writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 999_999_999, timestamp: 0, token: 'dead-owner' }));
+  assert.deepEqual(readSharedKnowledge(repository, { stateRoot, clock: () => 100_000, wait: () => {} }), []);
+  assert.equal(existsSync(lock), false);
+
+  mkdirSync(lock, { mode: 0o700 });
+  writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, timestamp: 0, token: 'live-owner' }));
+  let now = 100_000;
+  assert.throws(() => readSharedKnowledge(repository, {
+    stateRoot, clock: () => now, wait: (milliseconds) => { now += milliseconds; }, lockTimeoutMs: 50, staleLockMs: 1
+  }), /Timed out/);
+  assert.equal(existsSync(lock), true);
+  rmSync(lock, { recursive: true });
+});
+
+test('rejects canonical sensitive durable text and pre-parse resource excess', () => {
+  const unsafe = [
+    'password=hunter2',
+    'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.signaturevalue',
+    'xoxb-1234567890-abcdefghijklmnop',
+    'session_id: private-17',
+    'User: private transcript line',
+    '/Users/private/work/repository',
+    'private.person@example.com'
+  ];
+  for (const value of unsafe) assert.throws(() => writeSharedKnowledge(root(), [{ ...document(), evidenceSummary: value }]), /sensitive|sanitized|credential/i);
+  assert.throws(() => writeSharedKnowledge(root(), [{ ...document(), applicability: { ...document().applicability, paths: ['/Users/private/repository'] } }]), /sensitive|sanitized/i);
+
+  const repository = root();
+  const base = join(repository, 'agent-experience');
+  mkdirSync(join(base, 'knowledge'), { recursive: true });
+  writeFileSync(join(base, 'index.json'), ' '.repeat(1_048_577));
+  assert.throws(() => readSharedKnowledge(repository), /resource|size|limit/i);
 });
 
 test('keeps superseded knowledge and its replacement linked and inspectable', () => {

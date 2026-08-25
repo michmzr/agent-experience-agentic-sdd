@@ -61,6 +61,23 @@ const baseRules: readonly [RedactionCategory, RegExp][] = [
   ['secret', /\b(?:secret|client[_-]?secret)\s*[:=]\s*[^\s;,]+/gi]
 ];
 
+const durableOnlyRules: readonly RegExp[] = [
+  /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
+  /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
+  /\b(?:session|event|observation|candidate|evidence|reviewer|local_database)_id\s*[:=]\s*\S+/gi,
+  /\b(?:sessionId|eventId|observationId|candidateId|evidenceId|reviewerId|localDatabaseId)\s*[:=]\s*\S+/g,
+  /^(?:User|Assistant|System|Tool):\s+/gim,
+  /\b(?:raw\s+(?:event|transcript)|private\s+(?:review|reviewer))\b/gi
+];
+
+export function assertDurableTextSafe(value: string): void {
+  let sanitized = value;
+  for (const [, pattern] of baseRules) sanitized = sanitized.replace(pattern, '[REDACTED]');
+  for (const pattern of durableOnlyRules) sanitized = sanitized.replace(pattern, '[REDACTED]');
+  if (sanitized !== value) throw new SanitizationError('Durable text is not sanitized and contains sensitive or private material.');
+}
+
 export function sanitizeForReview(input: NormalizedSession, options: SanitizeForReviewOptions = {}): SanitizedReviewArtifact {
   validateNormalizedSession(input);
   const configuredPatterns = normalizePatterns(options.configuredPatterns ?? []);

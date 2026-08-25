@@ -9,6 +9,8 @@ import { activateGitKnowledge, type GitContentAdapter } from '../src/shared-know
 import { writeSharedKnowledge, type SharedKnowledgeDocument } from '../src/shared-knowledge/repository.js';
 import { initializeGitRepository } from './helpers/git-repository.js';
 
+process.env.AEL_DATA_DIR = mkdtempSync(join(tmpdir(), 'ael-git-state-'));
+
 function doc(identity: string, lesson: string): SharedKnowledgeDocument {
   return { identity, repositoryScope: 'repository:test', kind: 'project-fact', state: 'verified', applicability: { paths: [], tags: [], tools: [] }, instructionOrigin: 'code-tool-confirmed', supersedes: [], title: identity, context: 'context', lesson, recommendedBehavior: 'follow it', evidenceSummary: 'Deterministic code inspection confirmed this.', evidence: [{ kind: 'code-or-tool', summary: 'code', deterministic: true }] };
 }

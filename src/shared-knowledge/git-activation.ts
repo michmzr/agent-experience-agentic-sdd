@@ -1,4 +1,4 @@
-import { readSharedKnowledge, readSharedKnowledgeContent, type KnowledgeContentSource, type SharedKnowledgeDocument } from './repository.js';
+import { readSharedKnowledge, readSharedKnowledgeContent, type KnowledgeContentSource, type RepositoryKnowledgeOptions, type SharedKnowledgeDocument } from './repository.js';
 
 export interface GitContentAdapter {
   readonly resolveCommit: (trustedRef: string) => string;
@@ -20,8 +20,8 @@ export interface ActivatedKnowledge {
   readonly entries: readonly ActivatedKnowledgeEntry[];
 }
 
-export function activateGitKnowledge(repositoryRoot: string, git: GitContentAdapter, trustedRef?: string): ActivatedKnowledge {
-  const local = readSharedKnowledge(repositoryRoot);
+export function activateGitKnowledge(repositoryRoot: string, git: GitContentAdapter, trustedRef?: string, options: RepositoryKnowledgeOptions = {}): ActivatedKnowledge {
+  const local = readSharedKnowledge(repositoryRoot, options);
   if (!trustedRef) {
     return { entries: local.map((document) => ({ document, authoritative: false, provenance: { source: 'working-tree' } })) };
   }

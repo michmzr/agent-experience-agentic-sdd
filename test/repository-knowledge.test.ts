@@ -7,6 +7,8 @@ import test from 'node:test';
 import type { KnowledgeEntry } from '../src/domain/types.js';
 import { writeRepositoryKnowledge, type RepositoryKnowledgeDocument } from '../src/storage/repository-knowledge.js';
 
+process.env.AEL_DATA_DIR = mkdtempSync(join(tmpdir(), 'ael-legacy-state-'));
+
 function mergedRepositoryKnowledge(): RepositoryKnowledgeDocument {
   return {
     entry: {

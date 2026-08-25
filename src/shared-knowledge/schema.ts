@@ -61,12 +61,17 @@ const hashPattern = /^[a-f0-9]{64}$/;
 const states: readonly KnowledgeState[] = ['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired'];
 const kinds: readonly LessonKind[] = ['failure', 'successful-workflow', 'project-fact', 'convention', 'tool-capability', 'environment-quirk', 'heuristic', 'preference'];
 const origins: readonly InstructionOrigin[] = ['code-tool-confirmed', 'user-preference', 'skill-workflow-candidate', 'task-specific-constraint'];
+const MAX_INDEX_ENTRIES = 1_000;
+const MAX_ARRAY_ITEMS = 100;
+const MAX_INDEX_STRING_LENGTH = 4_096;
 
 export function parseKnowledgeIndex(value: unknown): KnowledgeIndex {
   assertSafeExportValue(value);
   if (!isRecord(value) || !onlyKeys(value, ['entries', 'version']) || !Array.isArray(value.entries) || (value.version !== 1 && value.version !== 2)) {
     throw new Error('Invalid repository knowledge index.');
   }
+  if (value.entries.length > MAX_INDEX_ENTRIES) throw new Error('Repository knowledge entry-count limit exceeded.');
+  assertBoundedStrings(value);
   const identities = new Set<string>();
   const entries = value.version === 1 ? value.entries.map(parseV1Entry) : value.entries.map(parseV2Entry);
   for (const entry of entries) {
@@ -132,7 +137,7 @@ function parseV2Entry(value: unknown): KnowledgeIndexEntryV2 {
   if (!isApplicability(value.applicability)) throw new Error('Invalid structured applicability.');
   if (value.approval !== undefined) parseApproval(value.approval);
   if (value.lastVerification !== undefined) parseVerification(value.lastVerification);
-  if (!Array.isArray(value.supersedes) || !value.supersedes.every((id) => typeof id === 'string')) throw new Error('Invalid supersedes list.');
+  if (!Array.isArray(value.supersedes) || value.supersedes.length > MAX_ARRAY_ITEMS || !value.supersedes.every((id) => typeof id === 'string')) throw new Error('Invalid supersedes list.');
   for (const id of value.supersedes) assertIdentity(id as string);
   if (typeof value.contentHash !== 'string' || !hashPattern.test(value.contentHash)) throw new Error('Invalid Markdown content hash.');
   return value as unknown as KnowledgeIndexEntryV2;
@@ -161,11 +166,11 @@ function parseVerification(value: unknown): void {
 
 function isApplicability(value: unknown): value is KnowledgeApplicability {
   return isRecord(value) && onlyKeys(value, ['paths', 'tags', 'tools'])
-    && ['paths', 'tags', 'tools'].every((key) => Array.isArray(value[key]) && (value[key] as unknown[]).every((item) => typeof item === 'string'));
+    && ['paths', 'tags', 'tools'].every((key) => Array.isArray(value[key]) && (value[key] as unknown[]).length <= MAX_ARRAY_ITEMS && (value[key] as unknown[]).every((item) => typeof item === 'string'));
 }
 
 function isLegacyApplicability(value: unknown): boolean {
-  return isRecord(value) && onlyKeys(value, ['path', 'tags', 'tool']) && Array.isArray(value.tags) && value.tags.every((tag) => typeof tag === 'string')
+  return isRecord(value) && onlyKeys(value, ['path', 'tags', 'tool']) && Array.isArray(value.tags) && value.tags.length <= MAX_ARRAY_ITEMS && value.tags.every((tag) => typeof tag === 'string')
     && (value.path === undefined || typeof value.path === 'string') && (value.tool === undefined || typeof value.tool === 'string');
 }
 
@@ -181,6 +186,17 @@ function sortObject(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortObject);
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => compare(a, b)).map(([key, nested]) => [key, sortObject(nested)]));
+}
+
+function assertBoundedStrings(value: unknown, seen = new WeakSet<object>()): void {
+  if (typeof value === 'string') {
+    if (value.length > MAX_INDEX_STRING_LENGTH) throw new Error('Repository knowledge string-length limit exceeded.');
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+  if (seen.has(value)) return;
+  seen.add(value);
+  for (const nested of Object.values(value)) assertBoundedStrings(nested, seen);
 }
 
 export function compare(left: string, right: string): number {
