@@ -178,6 +178,72 @@ test('rejects malformed incremental identifiers, timestamps, private fields, and
   target.close();
 });
 
+test('rejects an event before its session start and rolls back the new session', () => {
+  const target = store();
+  const session = { id: 'session-1' as SessionId, source: 'codex' as const, startedAt: now };
+  const early = preEvent('pre-early', 'push', '2026-08-25T09:59:59.999Z');
+  assert.throws(() => target.appendIncremental({ session, event: early }), /session start/i);
+  assert.deepEqual(target.listCapturedEventsPage().entries, []);
+  assert.equal(target.appendIncremental({ session }).inserted, true);
+  target.close();
+});
+
+test('rejects transitions before knowledge creation and before the latest persisted transition after reopen', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-causal-')), 'experience.sqlite');
+  const target = new ExperienceStore(databasePath);
+  target.import({
+    sessions: [{ id: 'seed-session' as SessionId, source: 'codex', startedAt: now }],
+    events: [{ id: 'seed-event' as never, sessionId: 'seed-session' as SessionId, kind: 'test-result', occurredAt: now, outcome: 'passed' }],
+    observations: [{ id: 'seed-observation' as never, eventIds: ['seed-event' as never], statement: 'Verified.' }],
+    clusters: [{ id: 'seed-cluster' as never, observationIds: ['seed-observation' as never] }],
+    candidates: [{ id: 'candidate-causal' as CandidateLessonId, clusterId: 'seed-cluster' as never, kind: 'convention', statement: 'Convention.' }],
+    evidence: [{ id: 'seed-evidence' as Evidence['id'], candidateId: 'candidate-causal' as CandidateLessonId, polarity: 'confirms', summary: 'Seed.' }],
+    knowledge: [{ id: 'knowledge-causal' as KnowledgeEntry['id'], candidateId: 'candidate-causal' as CandidateLessonId, evidenceIds: ['seed-evidence' as Evidence['id']], state: 'verified', statement: 'Convention.' }]
+  });
+  assert.throws(() => target.appendIncremental({
+    evidence: { id: 'before-creation', candidateId: 'candidate-causal', polarity: 'contradicts', summary: 'Too early.' },
+    transition: { knowledgeId: 'knowledge-causal', occurredAt: '2026-08-25T09:59:59.999Z' }
+  }), /knowledge creation/i);
+  target.appendIncremental({
+    evidence: { id: 'dispute-evidence', candidateId: 'candidate-causal', polarity: 'contradicts', summary: 'Dispute.' },
+    transition: { knowledgeId: 'knowledge-causal', occurredAt: '2026-08-25T11:00:00.000Z' }
+  });
+  const runtimeSession = { id: 'session-1' as SessionId, source: 'codex' as const, startedAt: now };
+  target.appendIncremental({ session: runtimeSession, event: preEvent('pre-causal', 'push', '2026-08-25T12:00:00.000Z') });
+  const post = adaptCodexCapture({
+    event_id: 'post-causal', session_id: 'session-1', event_kind: 'post_result', occurred_at: '2026-08-25T13:00:00.000Z',
+    tool: 'git', action: 'push', arguments: ['main'], cwd: '/work/repo', summary: 'Push succeeded.',
+    outcome: 'succeeded', exit_status: 0, related_event_id: 'pre-causal'
+  });
+  assert.throws(() => target.appendIncremental({
+    event: post,
+    evidenceUpdates: [{
+      evidence: { id: 'pre-result-evidence', candidateId: 'candidate-causal', polarity: 'contradicts', summary: 'Impossible ordering.' },
+      transition: { knowledgeId: 'knowledge-causal', occurredAt: '2026-08-25T12:59:59.999Z' }
+    }]
+  }), /event.*transition|transition.*event/i);
+  assert.equal(target.listCapturedEventsPage().entries.some(({ sourceEventId }) => sourceEventId === 'post-causal'), false);
+  target.close();
+
+  const reopened = new ExperienceStore(databasePath);
+  assert.throws(() => reopened.appendIncremental({
+    evidence: { id: 'early-revalidation', candidateId: 'candidate-causal', polarity: 'confirms', summary: 'Early.', revalidatesTo: 'verified' },
+    transition: { knowledgeId: 'knowledge-causal', occurredAt: '2026-08-25T10:59:59.999Z' }
+  }), /latest transition/i);
+  assert.equal(reopened.inspect('knowledge-causal' as KnowledgeEntry['id'])?.state, 'disputed');
+  assert.equal(reopened.listEvidencePage().entries.some(({ id }) => id === 'early-revalidation'), false);
+
+  reopened.appendIncremental({
+    evidence: { id: 'equal-revalidation', candidateId: 'candidate-causal', polarity: 'confirms', summary: 'Equal timestamp.', revalidatesTo: 'verified' },
+    transition: { knowledgeId: 'knowledge-causal', occurredAt: '2026-08-25T11:00:00.000Z' }
+  });
+  assert.equal(reopened.inspect('knowledge-causal' as KnowledgeEntry['id'])?.state, 'verified');
+  assert.deepEqual(reopened.listTransitionHistoryPage('knowledge-causal').entries.map(({ occurredAt }) => occurredAt), [
+    '2026-08-25T11:00:00.000Z', '2026-08-25T11:00:00.000Z'
+  ]);
+  reopened.close();
+});
+
 test('paginates every incremental capture collection with bounded stable cursors', () => {
   const target = store();
   const session = { id: 'session-1' as SessionId, source: 'codex' as const, startedAt: now };

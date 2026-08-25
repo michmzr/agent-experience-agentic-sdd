@@ -321,6 +321,7 @@ export class ExperienceStore {
     this.database.exec('BEGIN IMMEDIATE');
     try {
       let sessionInserted = false;
+      let appendedEvent: CapturedEventRecord | undefined;
       if (input.event !== undefined) {
         const event = validateNormalizedCaptureEvent(input.event);
         this.insertSession(input.session, event);
@@ -331,14 +332,24 @@ export class ExperienceStore {
           return Object.freeze({ inserted: false });
         }
         this.assertPostResultLink(event);
+        if (event.phase !== 'post-result' && (input.candidate !== undefined || input.evidence !== undefined || (input.evidenceUpdates?.length ?? 0) > 0)) {
+          throw new TypeError('Captured event lifecycle mutation requires a post-result event.');
+        }
         this.insertCaptureEvent(event);
+        appendedEvent = event;
       } else if (input.session !== undefined) {
         sessionInserted = this.insertOrVerifySession(input.session);
       }
 
       if (input.candidate !== undefined) this.insertCandidateCapture(input.event!, input.candidate);
-      if (input.evidence !== undefined) this.insertIncrementalEvidence(input.evidence, input.transition);
-      for (const update of input.evidenceUpdates ?? []) this.insertIncrementalEvidence(update.evidence, update.transition);
+      if (input.evidence !== undefined) {
+        assertTransitionAfterEvent(appendedEvent, input.transition);
+        this.insertIncrementalEvidence(input.evidence, input.transition);
+      }
+      for (const update of input.evidenceUpdates ?? []) {
+        assertTransitionAfterEvent(appendedEvent, update.transition);
+        this.insertIncrementalEvidence(update.evidence, update.transition);
+      }
       this.database.exec('COMMIT');
       return Object.freeze({ inserted: input.event !== undefined || sessionInserted || input.candidate !== undefined || input.evidence !== undefined || (input.evidenceUpdates?.length ?? 0) > 0 });
     } catch (error) {
@@ -589,10 +600,14 @@ export class ExperienceStore {
     if (existing === undefined) {
       if (session === undefined) throw new TypeError('Capture requires a new session record.');
       this.insertOrVerifySession(session);
+      if (event.occurredAt < session.startedAt) throw new TypeError('Capture event cannot precede its session start.');
       return;
     }
+    const persisted = sessionFromRow(existing);
+    assertIncrementalSession(persisted);
     if (existing.source !== event.source) throw new TypeError('Capture source conflicts with the existing session.');
     if (session !== undefined) this.assertSameSession(existing, session);
+    if (event.occurredAt < persisted.startedAt) throw new TypeError('Capture event cannot precede its session start.');
   }
 
   private insertOrVerifySession(session: Session): boolean {
@@ -627,7 +642,10 @@ export class ExperienceStore {
       ...(event.exitStatus === undefined ? {} : { exitStatus: event.exitStatus })
     };
     const session = this.database.prepare('SELECT id, source, started_at, repository_id, workspace_id, user_id FROM sessions WHERE id = ?').get(event.sessionId) as unknown as SessionRow;
-    const validation = validateImport({ sessions: [sessionFromRow(session)], events: [domainEvent], observations: [], clusters: [], candidates: [], evidence: [], knowledge: [] });
+    const persistedSession = sessionFromRow(session);
+    assertIncrementalSession(persistedSession);
+    if (event.occurredAt < persistedSession.startedAt) throw new TypeError('Capture event cannot precede its session start.');
+    const validation = validateImport({ sessions: [persistedSession], events: [domainEvent], observations: [], clusters: [], candidates: [], evidence: [], knowledge: [] });
     if (!validation.ok) throw new TypeError(`${validation.code}: ${validation.message}`);
     this.database.prepare('INSERT INTO events (id, session_id, kind, occurred_at, tool, path, tags_json, outcome, exit_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .run(domainEvent.id, domainEvent.sessionId, domainEvent.kind, domainEvent.occurredAt, domainEvent.tool ?? null, domainEvent.path ?? null, '[]', domainEvent.outcome ?? null, domainEvent.exitStatus ?? null);
@@ -696,8 +714,23 @@ export class ExperienceStore {
       .run(evidence.id, evidence.candidateId, evidence.polarity, evidence.summary, evidence.revalidatesTo ?? null);
     if (transition === undefined) return;
     assertCanonicalTimestamp(transition.occurredAt);
-    const row = this.database.prepare('SELECT id, candidate_id, state, statement FROM knowledge WHERE id = ?').get(transition.knowledgeId) as KnowledgeRow | undefined;
+    const row = this.database.prepare(`
+      SELECT k.id, k.candidate_id, k.state, k.statement, m.created_at
+      FROM knowledge k JOIN knowledge_metadata m ON m.knowledge_id = k.id
+      WHERE k.id = ?
+    `).get(transition.knowledgeId) as (KnowledgeRow & { created_at: string }) | undefined;
     if (row === undefined) throw new TypeError('Incremental transition references missing knowledge.');
+    assertCanonicalTimestamp(row.created_at);
+    if (transition.occurredAt < row.created_at) throw new TypeError('Incremental transition cannot precede knowledge creation.');
+    const latest = this.database.prepare(`
+      SELECT occurred_at FROM knowledge_transition_history
+      WHERE knowledge_id = ? ORDER BY occurred_at DESC, id DESC LIMIT 1
+    `).get(transition.knowledgeId) as { occurred_at: string } | undefined;
+    if (latest !== undefined) {
+      assertCanonicalTimestamp(latest.occurred_at);
+      // Equal timestamps are valid; append-only sequence IDs provide deterministic order.
+      if (transition.occurredAt < latest.occurred_at) throw new TypeError('Incremental transition cannot precede the latest transition.');
+    }
     const current: KnowledgeEntry = {
       id: row.id as KnowledgeId,
       candidateId: row.candidate_id as CandidateLessonId,
@@ -939,6 +972,15 @@ function assertIncrementalTransition(transition: NonNullable<IncrementalCaptureA
   assertCanonicalTimestamp(transition.occurredAt);
   if (transition.target !== undefined && !['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired'].includes(transition.target)) {
     throw new TypeError('Incremental transition target is invalid.');
+  }
+}
+
+function assertTransitionAfterEvent(
+  event: CapturedEventRecord | undefined,
+  transition: IncrementalCaptureAppend['transition']
+): void {
+  if (event !== undefined && transition !== undefined && transition.occurredAt < event.occurredAt) {
+    throw new TypeError('Incremental event cannot occur after its lifecycle transition.');
   }
 }
 
