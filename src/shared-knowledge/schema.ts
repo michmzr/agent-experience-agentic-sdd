@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 
 import type { KnowledgeState, LessonKind } from '../domain/types.js';
+import { assertDurableTextSafe } from '../review/sanitizer.js';
+import type { RuntimeSignature } from '../runtime/contracts.js';
+import { normalizeRuntimePath } from '../runtime/matcher.js';
 
 export type InstructionOrigin = 'code-tool-confirmed' | 'user-preference' | 'skill-workflow-candidate' | 'task-specific-constraint';
 
@@ -18,6 +21,11 @@ export interface KnowledgeApproval {
 export interface KnowledgeVerification {
   readonly at: string;
   readonly by?: string;
+}
+
+export interface RuntimeDirective {
+  readonly signature: RuntimeSignature;
+  readonly effect: 'conflict' | 'context';
 }
 
 export interface KnowledgeIndexEntryV2 {
@@ -39,6 +47,15 @@ export interface KnowledgeIndexV2 {
   readonly entries: readonly KnowledgeIndexEntryV2[];
 }
 
+export interface KnowledgeIndexEntryV3 extends KnowledgeIndexEntryV2 {
+  readonly runtimeDirective?: RuntimeDirective;
+}
+
+export interface KnowledgeIndexV3 {
+  readonly version: 3;
+  readonly entries: readonly KnowledgeIndexEntryV3[];
+}
+
 export interface KnowledgeIndexEntryV1 {
   readonly identity: string;
   readonly kind: LessonKind;
@@ -54,7 +71,7 @@ export interface KnowledgeIndexV1 {
   readonly entries: readonly KnowledgeIndexEntryV1[];
 }
 
-export type KnowledgeIndex = KnowledgeIndexV1 | KnowledgeIndexV2;
+export type KnowledgeIndex = KnowledgeIndexV1 | KnowledgeIndexV2 | KnowledgeIndexV3;
 
 const safeIdentity = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const hashPattern = /^[a-f0-9]{64}$/;
@@ -67,22 +84,27 @@ const MAX_INDEX_STRING_LENGTH = 4_096;
 
 export function parseKnowledgeIndex(value: unknown): KnowledgeIndex {
   assertSafeExportValue(value);
-  if (!isRecord(value) || !onlyKeys(value, ['entries', 'version']) || !Array.isArray(value.entries) || (value.version !== 1 && value.version !== 2)) {
+  if (!isRecord(value) || !onlyKeys(value, ['entries', 'version']) || !Array.isArray(value.entries)
+    || (value.version !== 1 && value.version !== 2 && value.version !== 3)) {
     throw new Error('Invalid repository knowledge index.');
   }
   if (value.entries.length > MAX_INDEX_ENTRIES) throw new Error('Repository knowledge entry-count limit exceeded.');
   assertBoundedStrings(value);
   const identities = new Set<string>();
-  const entries = value.version === 1 ? value.entries.map(parseV1Entry) : value.entries.map(parseV2Entry);
+  const entries = value.version === 1
+    ? value.entries.map(parseV1Entry)
+    : value.version === 2 ? value.entries.map(parseV2Entry) : value.entries.map(parseV3Entry);
   for (const entry of entries) {
     if (identities.has(entry.identity)) throw new Error(`Duplicate knowledge identity: ${entry.identity}.`);
     identities.add(entry.identity);
   }
-  return value.version === 1 ? { version: 1, entries: entries as KnowledgeIndexEntryV1[] } : { version: 2, entries: entries as KnowledgeIndexEntryV2[] };
+  if (value.version === 1) return { version: 1, entries: entries as KnowledgeIndexEntryV1[] };
+  if (value.version === 2) return { version: 2, entries: entries as KnowledgeIndexEntryV2[] };
+  return { version: 3, entries: entries as KnowledgeIndexEntryV3[] };
 }
 
-export function serializeKnowledgeIndex(index: KnowledgeIndexV2): string {
-  const parsed = parseKnowledgeIndex(index) as KnowledgeIndexV2;
+export function serializeKnowledgeIndex(index: KnowledgeIndexV2 | KnowledgeIndexV3): string {
+  const parsed = parseKnowledgeIndex(index) as KnowledgeIndexV2 | KnowledgeIndexV3;
   return `${JSON.stringify(sortObject(parsed), null, 2)}\n`;
 }
 
@@ -143,6 +165,75 @@ function parseV2Entry(value: unknown): KnowledgeIndexEntryV2 {
   return value as unknown as KnowledgeIndexEntryV2;
 }
 
+function parseV3Entry(value: unknown): KnowledgeIndexEntryV3 {
+  if (!isRecord(value)) throw new Error('Invalid version 3 index entry.');
+  const allowed = [
+    'identity', 'document', 'repositoryScope', 'kind', 'state', 'applicability', 'instructionOrigin',
+    'approval', 'lastVerification', 'supersedes', 'contentHash', 'runtimeDirective'
+  ];
+  if (!onlyKeys(value, allowed) || allowed.some((key) => !['approval', 'lastVerification', 'runtimeDirective'].includes(key) && !(key in value))) {
+    throw new Error('Invalid version 3 index entry.');
+  }
+  const base = parseV2Entry(Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'runtimeDirective')));
+  const runtimeDirective = value.runtimeDirective === undefined ? undefined : parseRuntimeDirective(value.runtimeDirective);
+  return runtimeDirective === undefined ? base : { ...base, runtimeDirective };
+}
+
+export function parseRuntimeDirective(value: unknown): RuntimeDirective {
+  if (!isRecord(value) || !onlyKeys(value, ['effect', 'signature'])
+    || (value.effect !== 'conflict' && value.effect !== 'context')) {
+    throw new Error('Invalid runtime directive.');
+  }
+  const signature = parseDirectiveSignature(value.signature);
+  const directive = { effect: value.effect, signature } as RuntimeDirective;
+  assertSafeExportValue(directive);
+  assertDurableTextSafe(JSON.stringify(directive));
+  return deepFreeze(directive);
+}
+
+function parseDirectiveSignature(value: unknown): RuntimeSignature {
+  if (!isRecord(value) || (value.kind !== 'action' && value.kind !== 'intent')) throw new Error('Invalid runtime directive signature.');
+  if (value.kind === 'action') {
+    if (!onlyKeys(value, ['action', 'arguments', 'kind', 'path', 'tool'])
+      || !canonicalDirectiveToken(value.tool) || !canonicalDirectiveToken(value.action)
+      || (value.arguments !== undefined && (!Array.isArray(value.arguments) || value.arguments.length > MAX_ARRAY_ITEMS
+        || !value.arguments.every(canonicalDirectiveArgument)))
+      || (value.path !== undefined && !canonicalDirectivePath(value.path))) {
+      throw new Error('Invalid runtime action directive.');
+    }
+    return deepFreeze({
+      kind: 'action', tool: value.tool as string, action: value.action as string,
+      ...(value.arguments === undefined ? {} : { arguments: [...value.arguments] as string[] }),
+      ...(value.path === undefined ? {} : { path: value.path as string })
+    });
+  }
+  if (!onlyKeys(value, ['kind', 'path', 'target', 'tool', 'verb'])
+    || !canonicalDirectiveToken(value.verb) || !canonicalDirectiveToken(value.target)
+    || (value.tool !== undefined && !canonicalDirectiveToken(value.tool))
+    || (value.path !== undefined && !canonicalDirectivePath(value.path))) {
+    throw new Error('Invalid runtime intent directive.');
+  }
+  return deepFreeze({
+    kind: 'intent', verb: value.verb as string, target: value.target as string,
+    ...(value.tool === undefined ? {} : { tool: value.tool as string }),
+    ...(value.path === undefined ? {} : { path: value.path as string })
+  });
+}
+
+function canonicalDirectiveToken(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_INDEX_STRING_LENGTH && value === value.trim();
+}
+
+function canonicalDirectiveArgument(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_INDEX_STRING_LENGTH && !/[\r\n\0]/.test(value);
+}
+
+function canonicalDirectivePath(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_INDEX_STRING_LENGTH) return false;
+  try { return normalizeRuntimePath(value) === value; }
+  catch { return false; }
+}
+
 function parseV1Entry(value: unknown): KnowledgeIndexEntryV1 {
   if (!isRecord(value) || !onlyKeys(value, ['applicability', 'approval', 'identity', 'kind', 'lastVerification', 'mergedProvenance', 'state'])
     || typeof value.identity !== 'string' || !kinds.includes(value.kind as LessonKind)
@@ -186,6 +277,14 @@ function sortObject(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortObject);
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => compare(a, b)).map(([key, nested]) => [key, sortObject(nested)]));
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object') {
+    for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 function assertBoundedStrings(value: unknown, seen = new WeakSet<object>()): void {

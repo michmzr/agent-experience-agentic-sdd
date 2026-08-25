@@ -33,18 +33,60 @@ function document(identity = 'safe-reset'): SharedKnowledgeDocument {
   };
 }
 
-test('version 2 repository round-trips with byte-stable output', () => {
+test('version 3 repository round-trips a structured runtime directive with byte-stable output', () => {
   const repository = root();
-  writeSharedKnowledge(repository, [document()]);
+  const directiveDocument: SharedKnowledgeDocument = {
+    ...document(),
+    applicability: { paths: ['src'], tags: ['git', 'safety'], tools: ['git'] },
+    runtimeDirective: {
+      effect: 'conflict',
+      signature: { kind: 'action', tool: 'git', action: 'reset', arguments: ['--hard'], path: 'src' }
+    }
+  };
+  writeSharedKnowledge(repository, [directiveDocument]);
   const index = join(repository, 'agent-experience', 'index.json');
   const markdown = join(repository, 'agent-experience', 'knowledge', 'safe-reset.md');
   const before = [readFileSync(index, 'utf8'), readFileSync(markdown, 'utf8')];
 
-  writeSharedKnowledge(repository, [document()]);
+  writeSharedKnowledge(repository, [directiveDocument]);
 
   assert.deepEqual([readFileSync(index, 'utf8'), readFileSync(markdown, 'utf8')], before);
-  assert.deepEqual(readSharedKnowledge(repository), [document()]);
+  assert.equal((JSON.parse(before[0]) as { version: number }).version, 3);
+  assert.deepEqual(readSharedKnowledge(repository), [directiveDocument]);
   assert.match(before[1], /## Lesson\n\nDestructive reset/);
+});
+
+test('reads a version 2 index without inventing a runtime directive', () => {
+  const repository = root();
+  writeSharedKnowledge(repository, [document()]);
+  const indexPath = join(repository, 'agent-experience', 'index.json');
+  const index = JSON.parse(readFileSync(indexPath, 'utf8')) as { version: number; entries: Array<Record<string, unknown>> };
+  index.version = 2;
+  for (const entry of index.entries) delete entry.runtimeDirective;
+  writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`);
+
+  assert.deepEqual(readSharedKnowledge(repository), [document()]);
+});
+
+test('rejects malformed, noncanonical, private, and oversized runtime directives', () => {
+  const base = {
+    effect: 'conflict' as const,
+    signature: { kind: 'action' as const, tool: 'git', action: 'reset', arguments: ['--hard'], path: 'src' }
+  };
+  const invalid = [
+    { ...base, unexpected: true },
+    { ...base, effect: 'BLOCK' },
+    { ...base, signature: { ...base.signature, tool: ' git ' } },
+    { ...base, signature: { ...base.signature, path: 'src/../repo' } },
+    { ...base, signature: { ...base.signature, arguments: Array.from({ length: 101 }, () => '--flag') } },
+    { ...base, signature: { ...base.signature, arguments: ['--token=credential-value'] } }
+  ];
+  for (const runtimeDirective of invalid) {
+    assert.throws(
+      () => writeSharedKnowledge(root(), [{ ...document(), runtimeDirective } as unknown as SharedKnowledgeDocument]),
+      /runtime|directive|canonical|credential|private|limit|field|path/i
+    );
+  }
 });
 
 test('reads a version 1 index and legacy Markdown', () => {

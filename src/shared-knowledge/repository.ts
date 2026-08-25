@@ -6,7 +6,7 @@ import type { KnowledgeState, LessonKind } from '../domain/types.js';
 import { assertDurableTextSafe } from '../review/sanitizer.js';
 import { assertPublicationDevice, cleanupPrivateCandidates, createLocalGenerationSource, fsyncDirectory, fsyncTree, generationFingerprint, MAX_INDEX_BYTES, MAX_MARKDOWN_BYTES, publishRename, RepositoryKnowledgeConfigurationError, RepositoryKnowledgeValidationError, resolvePrivateGenerationPaths, safeGenerationBase, securePrivateTree, type PrivateGenerationPaths } from './generation-store.js';
 import { withRepositoryLock } from './repository-lock.js';
-import { assertIdentity, assertSafeExportValue, compare, contentHash, parseKnowledgeIndex, serializeKnowledgeIndex, type InstructionOrigin, type KnowledgeApplicability, type KnowledgeApproval, type KnowledgeIndexEntryV2, type KnowledgeIndexV2, type KnowledgeVerification } from './schema.js';
+import { assertIdentity, assertSafeExportValue, compare, contentHash, parseKnowledgeIndex, parseRuntimeDirective, serializeKnowledgeIndex, type InstructionOrigin, type KnowledgeApplicability, type KnowledgeApproval, type KnowledgeIndexEntryV3, type KnowledgeIndexV3, type KnowledgeVerification, type RuntimeDirective } from './schema.js';
 
 export interface PromotionEvidence {
   readonly kind: 'code-or-tool' | 'reviewed-summary';
@@ -30,6 +30,7 @@ export interface SharedKnowledgeDocument {
   readonly recommendedBehavior: string;
   readonly evidenceSummary: string;
   readonly evidence?: readonly PromotionEvidence[];
+  readonly runtimeDirective?: RuntimeDirective;
   readonly activation?: 'local' | 'merged-team-active';
   readonly mergedProvenance?: string;
 }
@@ -134,7 +135,8 @@ export function readSharedKnowledgeContent(source: KnowledgeContentSource): Shar
     const parsed = parseMarkdown(markdown, entry.identity, 2);
     return { identity: entry.identity, repositoryScope: entry.repositoryScope, kind: entry.kind, state: entry.state, applicability: entry.applicability,
       instructionOrigin: entry.instructionOrigin, ...(entry.approval ? { approval: entry.approval } : {}),
-      ...(entry.lastVerification ? { lastVerification: entry.lastVerification } : {}), supersedes: entry.supersedes, ...parsed };
+      ...(entry.lastVerification ? { lastVerification: entry.lastVerification } : {}), supersedes: entry.supersedes,
+      ...('runtimeDirective' in entry && entry.runtimeDirective !== undefined ? { runtimeDirective: entry.runtimeDirective } : {}), ...parsed };
   });
 }
 
@@ -176,12 +178,12 @@ function writeSharedKnowledgeUnlocked(repositoryRoot: string, documents: readonl
   const stage = join(paths.directory, `stage-${randomUUID()}`);
   try {
     mkdirSync(join(stage, 'knowledge'), { recursive: true, mode: 0o700 });
-    const entries: KnowledgeIndexEntryV2[] = normalized.map((document) => {
+    const entries: KnowledgeIndexEntryV3[] = normalized.map((document) => {
       const content = renderMarkdown(document);
       writeFileSync(join(stage, 'knowledge', `${document.identity}.md`), content, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
       return toIndexEntry(document, content);
     });
-    const index: KnowledgeIndexV2 = { version: 2, entries };
+    const index: KnowledgeIndexV3 = { version: 3, entries };
     writeFileSync(join(stage, 'index.json'), serializeKnowledgeIndex(index), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     readGeneration(repositoryRoot, stage);
     fsyncTree(stage);
@@ -208,6 +210,7 @@ function validateAndNormalize(document: SharedKnowledgeDocument): SharedKnowledg
     if (!value.trim()) throw new Error('Knowledge Markdown content must not be empty.');
   }
   assertSanitizedContent(document);
+  const runtimeDirective = document.runtimeDirective === undefined ? undefined : parseRuntimeDirective(document.runtimeDirective);
   assertDurableTextSafe(JSON.stringify({
     identity: document.identity,
     repositoryScope: document.repositoryScope,
@@ -222,7 +225,8 @@ function validateAndNormalize(document: SharedKnowledgeDocument): SharedKnowledg
   return {
     ...document,
     applicability: { paths: unique(document.applicability.paths), tags: unique(document.applicability.tags), tools: unique(document.applicability.tools) },
-    supersedes: unique(document.supersedes)
+    supersedes: unique(document.supersedes),
+    ...(runtimeDirective === undefined ? {} : { runtimeDirective })
   };
 }
 
@@ -254,11 +258,12 @@ function parseMarkdown(markdown: string, identity: string, version: 1 | 2): Pick
   return parsed;
 }
 
-function toIndexEntry(document: SharedKnowledgeDocument, content: string): KnowledgeIndexEntryV2 {
+function toIndexEntry(document: SharedKnowledgeDocument, content: string): KnowledgeIndexEntryV3 {
   return { identity: document.identity, document: `knowledge/${document.identity}.md`, repositoryScope: document.repositoryScope,
     kind: document.kind, state: document.state, applicability: document.applicability, instructionOrigin: document.instructionOrigin,
     ...(document.approval ? { approval: document.approval } : {}), ...(document.lastVerification ? { lastVerification: document.lastVerification } : {}),
-    supersedes: document.supersedes, contentHash: contentHash(content) };
+    supersedes: document.supersedes, contentHash: contentHash(content),
+    ...(document.runtimeDirective === undefined ? {} : { runtimeDirective: document.runtimeDirective }) };
 }
 
 type PrivatePaths = PrivateGenerationPaths;
