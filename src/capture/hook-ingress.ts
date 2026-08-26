@@ -3,6 +3,8 @@ import { MAX_HOOK_INPUT_BYTES, type PassiveHookSource } from './hook-adapters/co
 import { createPassiveCaptureService } from './passive-service.js';
 import { ExperienceStore } from '../storage/experience-store.js';
 
+const HOOK_DATABASE_TIMEOUT_MS = 250;
+
 export interface HookIngressOptions {
   readonly source: PassiveHookSource;
   readonly input: string;
@@ -32,7 +34,7 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
     const record = adaptPassiveHook(options.source, payload, options.now());
     if (record === undefined) return { status: 'ignored' };
 
-    store = new ExperienceStore(options.databasePath);
+    store = new ExperienceStore(options.databasePath, { timeoutMs: HOOK_DATABASE_TIMEOUT_MS });
     const service = createPassiveCaptureService({ store });
     const result = service.capture(record);
     return result.status === 'degraded'

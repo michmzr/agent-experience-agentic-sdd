@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { runCliAsync } from '../src/cli.js';
@@ -130,4 +131,35 @@ test('maps persistence failures to a generic fail-open diagnostic', async () => 
     stderr: 'AEL_CAPTURE_PERSISTENCE_FAILED: Passive capture skipped.\n'
   });
   rmSync(dataDir, { recursive: true, force: true });
+});
+
+test('fails open promptly when the hook database is busy', async () => {
+  const dataDir = temporaryDataDirectory();
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const initialized = new ExperienceStore(databasePath);
+  initialized.close();
+  const blocker = new DatabaseSync(databasePath);
+  blocker.exec('BEGIN IMMEDIATE');
+  const startedAt = Date.now();
+  try {
+    const result = await runCliAsync(
+      ['capture', 'hook', '--source', 'codex', '--data-dir', dataDir],
+      {
+        hookInput: JSON.stringify({ session_id: 'locked-session', hook_event_name: 'SessionStart' }),
+        now
+      }
+    );
+    const elapsedMs = Date.now() - startedAt;
+
+    assert.ok(elapsedMs < 1_000, `hook lock handling took ${elapsedMs}ms`);
+    assert.deepEqual(result, {
+      exitCode: 0,
+      stdout: '',
+      stderr: 'AEL_CAPTURE_PERSISTENCE_FAILED: Passive capture skipped.\n'
+    });
+  } finally {
+    blocker.exec('ROLLBACK');
+    blocker.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });

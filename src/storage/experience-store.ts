@@ -32,7 +32,7 @@ import type {
 } from '../capture/contracts.js';
 import { validateNormalizedCaptureEvent } from '../capture/normalization.js';
 import { assertDurableTextSafe } from '../review/sanitizer.js';
-import { openExperienceDatabase } from './database.js';
+import { openExperienceDatabase, type ExperienceDatabaseOptions } from './database.js';
 import { ensureOverrideAuditUseMigration, ensureOverrideEvidenceMigration, overrideAuditMigration } from './override-store.js';
 
 interface KnowledgeRow {
@@ -262,8 +262,8 @@ const sessionEndMigration = `
 export class ExperienceStore {
   private readonly database: DatabaseSync;
 
-  constructor(databasePath?: string) {
-    this.database = openExperienceDatabase(databasePath);
+  constructor(databasePath?: string, options: ExperienceDatabaseOptions = {}) {
+    this.database = openExperienceDatabase(databasePath, options);
     this.migrate();
   }
 
