@@ -152,6 +152,62 @@ test('sorts MCP scalar arguments so reordered pre and post payloads correlate', 
   }
 });
 
+test('omits MCP prompt, content, output, and user identity scalar keys', () => {
+  const record = technical(adaptPassiveHook('cursor', {
+    conversation_id: 'session-1',
+    hook_event_name: 'preToolUse',
+    tool_name: 'mcp__github__create_issue',
+    tool_use_id: 'mcp-private-scalars',
+    tool_input: {
+      owner: 'octo',
+      repo: 'repo',
+      prompt: 'private prompt value',
+      user_email: 'person@example.test',
+      user: 'private-user',
+      author: 'private-author',
+      response: 'private response',
+      output: 'private output',
+      message_text: 'private message text',
+      transcriptPath: '/private/transcript.jsonl'
+    }
+  }, preTime));
+
+  assert.equal(record.event.signature.kind, 'action');
+  if (record.event.signature.kind === 'action') {
+    assert.deepEqual(record.event.signature.arguments, ['owner=octo', 'repo=repo']);
+  }
+  const serialized = JSON.stringify(record);
+  for (const marker of [
+    'private prompt value',
+    'person@example.test',
+    'private-user',
+    'private-author',
+    'private response',
+    'private output',
+    'private message text',
+    '/private/transcript.jsonl'
+  ]) {
+    assert.equal(serialized.includes(marker), false, marker);
+  }
+});
+
+test('rejects non-finite and unsafe MCP numeric scalar values without leaking them', () => {
+  for (const value of [1e400, Number.MAX_SAFE_INTEGER + 1, Number.NaN]) {
+    assert.throws(
+      () => adaptPassiveHook('codex', {
+        session_id: 'session-1',
+        hook_event_name: 'PreToolUse',
+        tool_name: 'mcp__github__create_issue',
+        tool_use_id: 'mcp-unsafe-number',
+        tool_input: { owner: 'octo', repo: 'repo', count: value }
+      }, preTime),
+      (error: unknown) => error instanceof Error
+        && /passive hook/i.test(error.message)
+        && !error.message.includes(String(value))
+    );
+  }
+});
+
 test('maps file edits without patch or content fields', () => {
   const record = technical(adaptPassiveHook('cursor', {
     conversation_id: 'session-1',

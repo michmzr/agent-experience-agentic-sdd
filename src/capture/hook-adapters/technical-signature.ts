@@ -5,6 +5,19 @@ const shellTokenPattern = /^[A-Za-z0-9_./:@%+=,~\\-]+$/;
 const mcpSegmentPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const scalarKeyPattern = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const fileEditTools = new Set(['apply_patch', 'Edit', 'Write']);
+const omittedMcpScalarKeys = new Set([
+  'prompt',
+  'message',
+  'content',
+  'text',
+  'output',
+  'response',
+  'transcript',
+  'useremail',
+  'email',
+  'user',
+  'author'
+]);
 
 export interface TechnicalSignatureInput {
   readonly toolName: string;
@@ -94,15 +107,28 @@ function shellTokens(command: string): string[] {
 function scalarArguments(payload: Readonly<Record<string, unknown>>): readonly string[] {
   const entries = Object.entries(payload).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
   if (entries.length > MAX_CAPTURE_ARGUMENTS) throw rejectedLimit();
-  return entries.map(([key, value]) => {
+  return entries.flatMap(([key, value]) => {
     if (!scalarKeyPattern.test(key)) throw rejected();
+    if (omittedMcpScalarKey(key)) return [];
     if (containsCredentialMaterial(key)) throw rejectedPrivate();
     if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') throw rejected();
+    if (typeof value === 'number' && (!Number.isFinite(value) || !Number.isSafeInteger(value))) throw rejected();
     const argument = `${key}=${String(value)}`;
     assertSafeText(argument, 'argument');
     if (!shellTokenPattern.test(argument)) throw rejected();
-    return argument;
+    return [argument];
   });
+}
+
+function omittedMcpScalarKey(key: string): boolean {
+  const tokens = key
+    .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1-$2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  const collapsed = tokens.join('');
+  return omittedMcpScalarKeys.has(collapsed) || tokens.some((token) => omittedMcpScalarKeys.has(token));
 }
 
 function optionalPath(payload: Readonly<Record<string, unknown>>): string | undefined {
