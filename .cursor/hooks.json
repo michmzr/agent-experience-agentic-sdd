@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      { "command": ".agents/hooks/ael-passive-capture.sh cursor" }
+    ],
+    "sessionEnd": [
+      { "command": ".agents/hooks/ael-passive-capture.sh cursor" }
+    ],
+    "preToolUse": [
+      { "command": ".agents/hooks/ael-passive-capture.sh cursor" }
+    ],
+    "postToolUse": [
+      { "command": ".agents/hooks/ael-passive-capture.sh cursor" }
+    ]
+  }
+}

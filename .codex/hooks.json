@@ -1,0 +1,36 @@
+{
+  "description": "Passive local technical-action and session capture.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          { "type": "command", "command": "\"$(git rev-parse --show-toplevel)/.agents/hooks/ael-passive-capture.sh\" codex" }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"$(git rev-parse --show-toplevel)/.agents/hooks/ael-passive-capture.sh\" codex", "timeout": 3 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch|mcp__.*",
+        "hooks": [
+          { "type": "command", "command": "\"$(git rev-parse --show-toplevel)/.agents/hooks/ael-passive-capture.sh\" codex" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|apply_patch|mcp__.*",
+        "hooks": [
+          { "type": "command", "command": "\"$(git rev-parse --show-toplevel)/.agents/hooks/ael-passive-capture.sh\" codex" }
+        ]
+      }
+    ]
+  }
+}

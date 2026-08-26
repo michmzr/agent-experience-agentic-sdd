@@ -206,6 +206,58 @@ test('rejects unsupported event outcomes', () => {
   assert.equal(validateImport(record).ok, false);
 });
 
+test('accepts an optional canonical session end at or after session start', () => {
+  const record = validImport();
+  record.sessions[0] = {
+    ...record.sessions[0],
+    endedAt: '2026-08-24T10:02:00.000Z'
+  };
+
+  assert.deepEqual(validateImport(record), { ok: true });
+});
+
+test('rejects invalid, non-canonical, and pre-start session ends', () => {
+  for (const endedAt of [
+    'not-a-time',
+    '2026-08-24T12:02:00+02:00',
+    '2026-08-24T09:59:59.999Z'
+  ]) {
+    const record = validImport();
+    record.sessions[0] = { ...record.sessions[0], endedAt };
+    assert.equal(validateImport(record).ok, false, endedAt);
+  }
+});
+
+test('rejects events outside their session lifetime', () => {
+  for (const occurredAt of [
+    '2026-08-24T09:59:59.999Z',
+    '2026-08-24T10:02:00.001Z'
+  ]) {
+    const record = validImport();
+    record.sessions[0] = {
+      ...record.sessions[0],
+      endedAt: '2026-08-24T10:02:00.000Z'
+    };
+    record.events[0] = { ...record.events[0], occurredAt };
+    assert.equal(validateImport(record).ok, false, occurredAt);
+  }
+});
+
+test('orders expanded-year canonical timestamps by their parsed time', () => {
+  const record = validImport();
+  record.sessions[0] = {
+    ...record.sessions[0],
+    startedAt: '9999-12-31T23:59:59.999Z',
+    endedAt: '+010000-01-01T00:00:00.000Z'
+  };
+  record.events[0] = {
+    ...record.events[0],
+    occurredAt: '+010000-01-01T00:00:00.000Z'
+  };
+
+  assert.deepEqual(validateImport(record), { ok: true });
+});
+
 test('does not allow an explicit target to override an active contradiction dispute', () => {
   const result = applyTransition(verifiedKnowledge(), contradictionEvidence(), [], 'expired');
 

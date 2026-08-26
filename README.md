@@ -26,6 +26,18 @@ pnpm add --global ./agent-experience-layer-0.0.0.tgz
 ael init
 ```
 
+## Project hook capture
+
+The checked-in `.cursor/hooks.json` and `.codex/hooks.json` files connect session and technical tool events to the shared passive-capture wrapper. Build the CLI before a hook can capture anything:
+
+```sh
+pnpm build
+```
+
+The wrapper resolves the Git repository top level and invokes `dist/src/cli.js`. Capture data stays in the local SQLite database under `AEL_DATA_DIR` when it is set, or under the platform default described below. Hook capture stores normalized session and technical event records only. It excludes prompts, assistant or tool transcripts, raw hook payloads and credential-like values.
+
+Capture is fail-open. A missing build or capture failure writes only a generic diagnostic to standard error and exits successfully, so it cannot warn about, ask about, deny or block an agent action. Codex users must review and trust project hooks through `/hooks` after adding or changing the checked-in configuration. Remove the project hook entries to stop future capture; existing local records remain in the database.
+
 ## Commands
 
 ```text
