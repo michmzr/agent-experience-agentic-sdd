@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { basename } from 'node:path';
 
 import { DomainError, errorMessage, ExperienceService } from './application/experience-service.js';
+import { MAX_HOOK_INPUT_BYTES, type PassiveHookSource } from './capture/hook-adapters/contracts.js';
+import type { HookIngressResult } from './capture/hook-ingress.js';
 import { isBuiltInRuntimeProfileId, RuntimeServiceError, type BuiltInRuntimeProfileId } from './application/runtime-service.js';
 import type { KnowledgeState } from './domain/types.js';
 import type { KnowledgeScope } from './storage/experience-store.js';
@@ -13,6 +15,8 @@ export interface CliResult { exitCode: number; stdout: string; stderr: string; }
 export interface RunCliAsyncOptions {
   readonly terminal?: TerminalHost;
   readonly reviewDependencies?: ManualReviewDependencies;
+  readonly hookInput?: string;
+  readonly now?: () => string;
 }
 
 interface ParsedArguments { readonly positionals: string[]; readonly options: Map<string, string | true>; }
@@ -39,6 +43,7 @@ export function runCli(args: string[]): CliResult {
 }
 
 export async function runCliAsync(args: string[], options: RunCliAsyncOptions = {}): Promise<CliResult> {
+  if (isCaptureHookCommand(args)) return runCaptureHookCli(args, options);
   if (args[0] !== 'review') return runCli(args);
   try {
     const parsed = parseArguments(args); const json = parsed.options.has('json');
@@ -55,6 +60,56 @@ export async function runCliAsync(args: string[], options: RunCliAsyncOptions = 
     const diagnostic = syntax ? toDiagnostic(error, 'INVALID_SYNTAX') : { code: 'REVIEW_ERROR', message: 'Review failed.' };
     return args.includes('--json') ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' } : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${diagnostic.code}: ${diagnostic.message}\n` };
   }
+}
+
+async function runCaptureHookCli(args: string[], options: RunCliAsyncOptions): Promise<CliResult> {
+  try {
+    const parsed = parseArguments(args);
+    if (parsed.positionals.length !== 2) throw new SyntaxError('Unknown command form for capture.');
+    assertNoUnknownOptions(parsed.options, ['source', 'data-dir']);
+    const source = requiredString(parsed.options, 'source');
+    if (source !== 'codex' && source !== 'cursor') throw new SyntaxError('Unsupported passive hook source.');
+    const input = options.hookInput === undefined ? await readBoundedStdin() : { input: options.hookInput, oversized: false };
+    if (input.oversized) return hookCliResult({ status: 'degraded', code: 'INVALID_INPUT' });
+    const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
+    return hookCliResult(service.captureHook(source as PassiveHookSource, input.input, options.now));
+  } catch (error) {
+    return hookCliResult({ status: 'degraded', code: hookErrorCode(error) });
+  }
+}
+
+function hookErrorCode(error: unknown): 'INVALID_INPUT' | 'PERSISTENCE_FAILED' {
+  return error instanceof Error && /sqlite|database|directory|file|path|permission|busy|locked|constraint/i.test(error.message)
+    ? 'PERSISTENCE_FAILED'
+    : 'INVALID_INPUT';
+}
+
+function isCaptureHookCommand(args: readonly string[]): boolean {
+  return args[0] === 'capture' && args[1] === 'hook';
+}
+
+function hookCliResult(result: HookIngressResult): CliResult {
+  if (result.status !== 'degraded') return { exitCode: 0, stdout: '', stderr: '' };
+  return {
+    exitCode: 0,
+    stdout: '',
+    stderr: `AEL_CAPTURE_${result.code}: Passive capture skipped.\n`
+  };
+}
+
+async function readBoundedStdin(): Promise<{ readonly input: string; readonly oversized: boolean }> {
+  const chunks: Buffer[] = [];
+  let byteLength = 0;
+  for await (const chunk of process.stdin) {
+    const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
+    const remaining = MAX_HOOK_INPUT_BYTES + 1 - byteLength;
+    if (remaining <= 0) return { input: '', oversized: true };
+    if (value.byteLength > remaining) return { input: '', oversized: true };
+    chunks.push(value);
+    byteLength += value.byteLength;
+    if (byteLength > MAX_HOOK_INPUT_BYTES) return { input: '', oversized: true };
+  }
+  return { input: Buffer.concat(chunks).toString('utf8'), oversized: false };
 }
 
 function execute(service: ExperienceService, parsed: ParsedArguments): unknown {
@@ -259,7 +314,7 @@ function invalidCommand(command: string | undefined): SyntaxError {
     ? `Unknown command form for ${command}.`
     : 'Unknown command.');
 }
-function usage(): string { return 'Usage: ael <init|experience add|validate|inspect|lessons list|retrieve|export|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote> [options]'; }
+function usage(): string { return 'Usage: ael <init|experience add|validate|inspect|lessons list|retrieve|export|capture hook --source codex|cursor|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote> [options]'; }
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } {
   return error instanceof DomainError || error instanceof RuntimeServiceError
     ? { code: error.code, message: error.message }

@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
+import { ingestPassiveHook, type HookIngressResult } from '../capture/hook-ingress.js';
+import type { PassiveHookSource } from '../capture/hook-adapters/contracts.js';
 import type { ExperienceImport, KnowledgeEntry, KnowledgeState } from '../domain/types.js';
 import { validateImport } from '../domain/validation.js';
 import { defaultDatabasePath } from '../storage/database.js';
@@ -108,6 +110,10 @@ export class ExperienceService {
 
   knowledgePromote(repository: string, inputPath: string) {
     return this.runtime.promoteKnowledge(repository, inputPath);
+  }
+
+  captureHook(source: PassiveHookSource, input: string, now: () => string = () => new Date().toISOString()): HookIngressResult {
+    return ingestPassiveHook({ source, input, databasePath: this.databasePath, now });
   }
 
   private openStore(): ExperienceStore {
