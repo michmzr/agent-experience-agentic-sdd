@@ -4,14 +4,14 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": ".agents/hooks/ael-passive-capture.sh codex" }
+          { "type": "command", "command": "\"$(git rev-parse --show-toplevel)/.agents/hooks/ael-passive-capture.sh\" codex" }
         ]
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": ".agents/hooks/ael-passive-capture.sh codex", "timeout": 3 }
+          { "type": "command", "command": "\"$(git rev-parse --show-toplevel)/.agents/hooks/ael-passive-capture.sh\" codex", "timeout": 3 }
         ]
       }
     ],
@@ -19,7 +19,7 @@
       {
         "matcher": "Bash|apply_patch|mcp__.*",
         "hooks": [
-          { "type": "command", "command": ".agents/hooks/ael-passive-capture.sh codex" }
+          { "type": "command", "command": "\"$(git rev-parse --show-toplevel)/.agents/hooks/ael-passive-capture.sh\" codex" }
         ]
       }
     ],
@@ -27,7 +27,7 @@
       {
         "matcher": "Bash|apply_patch|mcp__.*",
         "hooks": [
-          { "type": "command", "command": ".agents/hooks/ael-passive-capture.sh codex" }
+          { "type": "command", "command": "\"$(git rev-parse --show-toplevel)/.agents/hooks/ael-passive-capture.sh\" codex" }
         ]
       }
     ]
