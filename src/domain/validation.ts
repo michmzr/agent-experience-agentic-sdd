@@ -127,7 +127,7 @@ function isCanonicalTimestamp(value: unknown): value is string {
 function validSessionLifetime(session: ExperienceImport['sessions'][number]): boolean {
   return isCanonicalTimestamp(session.startedAt)
     && (session.endedAt === undefined
-      || (isCanonicalTimestamp(session.endedAt) && session.endedAt >= session.startedAt));
+      || (isCanonicalTimestamp(session.endedAt) && Date.parse(session.endedAt) >= Date.parse(session.startedAt)));
 }
 
 function hasValidMetadataShape(value: unknown): value is KnowledgeMetadata {
@@ -180,8 +180,8 @@ export function validateImport(record: ExperienceImport): ValidationResult {
     const session = sessionsById.get(event.sessionId);
     return !isCanonicalTimestamp(event.occurredAt)
       || session === undefined
-      || event.occurredAt < session.startedAt
-      || (session.endedAt !== undefined && event.occurredAt > session.endedAt);
+      || Date.parse(event.occurredAt) < Date.parse(session.startedAt)
+      || (session.endedAt !== undefined && Date.parse(event.occurredAt) > Date.parse(session.endedAt));
   })) return invalid('INVALID_RELATIONSHIP', 'Event occurs outside its session lifetime.');
   if (record.observations.some((observation) => observation.eventIds.length === 0)) return invalid('INVALID_RELATIONSHIP', 'Observation requires at least one event.');
   if (record.observations.some((observation) => observation.eventIds.some((id) => !eventIds.has(id)))) return invalid('MISSING_REFERENCE', 'Observation references a missing event.');
