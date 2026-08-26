@@ -287,6 +287,14 @@ export class ExperienceStore {
       if (current === undefined) throw new TypeError('Cannot end a missing session.');
       if (current.source !== source) throw new TypeError('Session end source conflicts with the stored session.');
       if (Date.parse(endedAt) < Date.parse(current.startedAt)) throw new TypeError('Session end cannot precede its start.');
+      const eventRows = this.database.prepare('SELECT occurred_at FROM events WHERE session_id = ?').all(id) as Array<{ occurred_at: string }>;
+      const latestEventAt = eventRows.reduce<string | undefined>((latest, row) => {
+        if (latest === undefined || Date.parse(row.occurred_at) > Date.parse(latest)) return row.occurred_at;
+        return latest;
+      }, undefined);
+      if (latestEventAt !== undefined && Date.parse(endedAt) < Date.parse(latestEventAt)) {
+        throw new TypeError('Session end cannot precede its latest event.');
+      }
       if (current.endedAt !== undefined) {
         if (current.endedAt !== endedAt) throw new TypeError('Conflicting duplicate session end.');
         this.database.exec('COMMIT');
@@ -711,7 +719,7 @@ export class ExperienceStore {
   }
 
   private assertSameSession(row: SessionRow, session: Session): void {
-    if (row.source !== session.source || row.started_at !== session.startedAt || row.ended_at !== (session.endedAt ?? null) || row.repository_id !== (session.repositoryId ?? null)
+    if (row.source !== session.source || row.started_at !== session.startedAt || row.repository_id !== (session.repositoryId ?? null)
       || row.workspace_id !== (session.workspaceId ?? null) || row.user_id !== (session.userId ?? null)) {
       throw new TypeError('Conflicting duplicate session identity.');
     }

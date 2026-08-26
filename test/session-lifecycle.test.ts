@@ -23,11 +23,28 @@ test('closes a session once and treats the same close as idempotent', () => {
   assert.equal(store.appendIncremental({ session }).inserted, true);
   assert.equal(store.endSession('codex', session.id, endedAt).inserted, true);
   assert.equal(store.endSession('codex', session.id, endedAt).inserted, false);
+  assert.equal(store.appendIncremental({ session }).inserted, false);
+  assert.throws(() => store.appendIncremental({ session: { ...session, startedAt: '2026-08-26T08:01:00.000Z' } }), /conflicting.*session identity/i);
   assert.deepEqual(store.loadSession(session.id), { ...session, endedAt });
   assert.throws(
     () => store.endSession('codex', session.id, '2026-08-26T08:31:00.000Z'),
     /conflicting.*session end/i
   );
+  store.close();
+});
+
+test('rejects a session end before the latest persisted event', () => {
+  const store = new ExperienceStore(databasePath());
+  const session = { id: 'session-1' as SessionId, source: 'codex' as const, startedAt };
+  const event = adaptCodexCapture({
+    event_id: 'latest-event', session_id: session.id, event_kind: 'pre_action',
+    occurred_at: '2026-08-26T08:20:00.000Z', tool: 'git', action: 'status',
+    cwd: '/work/repo', summary: 'Run git status.'
+  });
+  store.appendIncremental({ session, event });
+
+  assert.throws(() => store.endSession('codex', session.id, '2026-08-26T08:10:00.000Z'), /event|end/i);
+  assert.equal(store.loadSession(session.id)?.endedAt, undefined);
   store.close();
 });
 
@@ -47,20 +64,18 @@ test('rejects missing, mismatched, and pre-start session ends atomically', () =>
 test('migrates a version 10 session row as open without rewriting it', () => {
   const path = databasePath();
   const seed = new ExperienceStore(path);
-  seed.appendIncremental({ session: { id: 'legacy' as SessionId, source: 'codex', startedAt } });
+  const legacySession = { id: 'legacy' as SessionId, source: 'codex' as const, startedAt };
+  const legacyEvent = adaptCodexCapture({
+    event_id: 'legacy-event', session_id: legacySession.id, event_kind: 'pre_action',
+    occurred_at: '2026-08-26T08:01:00.000Z', tool: 'git', action: 'status',
+    cwd: '/work/repo', summary: 'Run git status.'
+  });
+  seed.appendIncremental({ session: legacySession, event: legacyEvent });
   seed.close();
 
   const legacy = new DatabaseSync(path);
   legacy.exec(`
-    PRAGMA foreign_keys = OFF;
-    ALTER TABLE sessions RENAME TO sessions_with_end;
-    CREATE TABLE sessions (
-      id TEXT PRIMARY KEY, source TEXT NOT NULL, started_at TEXT NOT NULL,
-      repository_id TEXT, workspace_id TEXT, user_id TEXT
-    );
-    INSERT INTO sessions (id, source, started_at, repository_id, workspace_id, user_id)
-      SELECT id, source, started_at, repository_id, workspace_id, user_id FROM sessions_with_end;
-    DROP TABLE sessions_with_end;
+    ALTER TABLE sessions DROP COLUMN ended_at;
     DELETE FROM schema_migrations WHERE version = 11;
   `);
   legacy.close();
@@ -69,6 +84,14 @@ test('migrates a version 10 session row as open without rewriting it', () => {
   assert.deepEqual(store.loadSession('legacy' as SessionId), {
     id: 'legacy', source: 'codex', startedAt
   });
+  assert.deepEqual(store.listCapturedEventsPage().entries.map(({ sourceEventId }) => sourceEventId), ['legacy-event']);
+  const postMigrationEvent = adaptCodexCapture({
+    event_id: 'post-migration-event', session_id: legacySession.id, event_kind: 'pre_action',
+    occurred_at: '2026-08-26T08:02:00.000Z', tool: 'git', action: 'diff',
+    cwd: '/work/repo', summary: 'Run git diff.'
+  });
+  assert.equal(store.appendIncremental({ event: postMigrationEvent }).inserted, true);
+  assert.deepEqual(store.listCapturedEventsPage().entries.map(({ sourceEventId }) => sourceEventId), ['legacy-event', 'post-migration-event']);
   store.close();
 });
 
