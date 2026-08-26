@@ -2,7 +2,7 @@
 
 ## Status
 
-In review.
+Approved.
 
 ## Problem
 
@@ -121,7 +121,7 @@ Hook commands and project configuration contain no secrets. Diagnostics contain 
 
 The database migration adds nullable `ended_at` without rewriting existing session records. Old databases remain readable after migration, and existing sessions remain open. Imports and adapters that omit `endedAt` remain valid.
 
-The serialized import format accepts optional `endedAt` on sessions after its schema version is advanced according to the repository's existing compatibility policy. Older supported repository documents remain readable.
+The unversioned private `ExperienceImport` format accepts optional `endedAt` as a backward-compatible additive field. Existing imports that omit it remain valid. Versioned shared repository-knowledge documents are unchanged.
 
 Passive project hooks are opt-in through checked-in `.cursor` and `.codex` configuration. Removing those configuration entries disables new capture without deleting existing local records.
 
