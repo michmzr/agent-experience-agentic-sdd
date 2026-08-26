@@ -54,7 +54,7 @@ test('resolves the Codex wrapper from a repository subdirectory', () => {
     const probe = spawnSync('/bin/sh', ['-c', command!], {
       cwd: join(process.cwd(), 'test'),
       env: { ...process.env, AEL_DATA_DIR: dataDirectory },
-      input: JSON.stringify({ session_id: 'configuration-probe', hook_event_name: 'SessionStart' }),
+      input: JSON.stringify({ session_id: 'configuration-probe', hook_event_name: 'SessionStart', source: 'startup' }),
       encoding: 'utf8'
     });
     assert.equal(probe.status, 0, probe.stderr);

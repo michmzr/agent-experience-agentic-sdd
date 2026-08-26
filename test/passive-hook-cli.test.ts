@@ -121,7 +121,7 @@ test('maps persistence failures to a generic fail-open diagnostic', async () => 
   const result = await runCliAsync(
     ['capture', 'hook', '--source', 'codex', '--data-dir', notDirectory],
     {
-      hookInput: JSON.stringify({ session_id: 'session-1', hook_event_name: 'SessionStart' }),
+      hookInput: JSON.stringify({ session_id: 'session-1', hook_event_name: 'SessionStart', source: 'startup' }),
       now
     }
   );
@@ -145,7 +145,7 @@ test('fails open promptly when the hook database is busy', async () => {
     const result = await runCliAsync(
       ['capture', 'hook', '--source', 'codex', '--data-dir', dataDir],
       {
-        hookInput: JSON.stringify({ session_id: 'locked-session', hook_event_name: 'SessionStart' }),
+        hookInput: JSON.stringify({ session_id: 'locked-session', hook_event_name: 'SessionStart', source: 'startup' }),
         now
       }
     );
@@ -177,7 +177,7 @@ test('closes failed hook store migrations instead of leaking database connection
       const result = await runCliAsync(
         ['capture', 'hook', '--source', 'codex', '--data-dir', dataDir],
         {
-          hookInput: JSON.stringify({ session_id: `locked-session-${attempt}`, hook_event_name: 'SessionStart' }),
+          hookInput: JSON.stringify({ session_id: `locked-session-${attempt}`, hook_event_name: 'SessionStart', source: 'startup' }),
           now
         }
       );
