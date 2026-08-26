@@ -723,6 +723,9 @@ export class ExperienceStore {
       || row.workspace_id !== (session.workspaceId ?? null) || row.user_id !== (session.userId ?? null)) {
       throw new TypeError('Conflicting duplicate session identity.');
     }
+    if (session.endedAt !== undefined && row.ended_at !== session.endedAt) {
+      throw new TypeError('Conflicting duplicate session end.');
+    }
   }
 
   private insertCaptureEvent(event: CapturedEventRecord): void {

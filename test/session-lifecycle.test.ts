@@ -24,6 +24,11 @@ test('closes a session once and treats the same close as idempotent', () => {
   assert.equal(store.endSession('codex', session.id, endedAt).inserted, true);
   assert.equal(store.endSession('codex', session.id, endedAt).inserted, false);
   assert.equal(store.appendIncremental({ session }).inserted, false);
+  assert.equal(store.appendIncremental({ session: { ...session, endedAt } }).inserted, false);
+  assert.throws(
+    () => store.appendIncremental({ session: { ...session, endedAt: '2026-08-26T08:31:00.000Z' } }),
+    /conflicting.*session end/i
+  );
   assert.throws(() => store.appendIncremental({ session: { ...session, startedAt: '2026-08-26T08:01:00.000Z' } }), /conflicting.*session identity/i);
   assert.deepEqual(store.loadSession(session.id), { ...session, endedAt });
   assert.throws(
