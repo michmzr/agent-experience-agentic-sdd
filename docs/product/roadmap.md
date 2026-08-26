@@ -31,6 +31,21 @@ Deliverables:
 - shared repository knowledge promotion;
 - graceful degradation and last-known-good runtime snapshot.
 
+## Milestone 2.5: passive agent capture
+
+Status: Specification in review on 2026-08-26.
+
+Goal: connect Cursor and Codex project hooks to private local capture without warning about, asking about or blocking agent actions.
+
+Deliverables:
+
+- passive Cursor and Codex technical-action hook ingress;
+- session start and immutable session end persistence;
+- backward-compatible SQLite and import-schema migration;
+- fail-open hook behavior with privacy-safe diagnostics;
+- project-local `.cursor` and `.codex` hook configuration;
+- cross-source lifecycle, privacy and integration verification.
+
 ## Milestone 3: richer optimization
 
 Deliverables:
