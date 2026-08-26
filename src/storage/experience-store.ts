@@ -60,6 +60,7 @@ interface SessionRow {
   id: string;
   source: Session['source'];
   started_at: string;
+  ended_at: string | null;
   repository_id: string | null;
   workspace_id: string | null;
   user_id: string | null;
@@ -254,6 +255,10 @@ const captureEffectBundleMigration = `
   );
 `;
 
+const sessionEndMigration = `
+  ALTER TABLE sessions ADD COLUMN ended_at TEXT;
+`;
+
 export class ExperienceStore {
   private readonly database: DatabaseSync;
 
@@ -266,6 +271,36 @@ export class ExperienceStore {
     this.database.close();
   }
 
+  loadSession(id: SessionId): Session | undefined {
+    const row = this.database.prepare(`
+      SELECT id, source, started_at, ended_at, repository_id, workspace_id, user_id
+      FROM sessions WHERE id = ?
+    `).get(id) as unknown as SessionRow | undefined;
+    return row === undefined ? undefined : sessionFromRow(row);
+  }
+
+  endSession(source: Session['source'], id: SessionId, endedAt: string): IncrementalAppendResult {
+    assertCanonicalTimestamp(endedAt);
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const current = this.loadSession(id);
+      if (current === undefined) throw new TypeError('Cannot end a missing session.');
+      if (current.source !== source) throw new TypeError('Session end source conflicts with the stored session.');
+      if (Date.parse(endedAt) < Date.parse(current.startedAt)) throw new TypeError('Session end cannot precede its start.');
+      if (current.endedAt !== undefined) {
+        if (current.endedAt !== endedAt) throw new TypeError('Conflicting duplicate session end.');
+        this.database.exec('COMMIT');
+        return Object.freeze({ inserted: false });
+      }
+      this.database.prepare('UPDATE sessions SET ended_at = ? WHERE id = ?').run(endedAt, id);
+      this.database.exec('COMMIT');
+      return Object.freeze({ inserted: true });
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   import(record: ExperienceImport): void {
     const validation = validateImport(record);
     if (!validation.ok) throw new Error(`${validation.code}: ${validation.message}`);
@@ -273,8 +308,8 @@ export class ExperienceStore {
 
     this.database.exec('BEGIN IMMEDIATE');
     try {
-      const sessions = this.database.prepare('INSERT INTO sessions (id, source, started_at, repository_id, workspace_id, user_id) VALUES (?, ?, ?, ?, ?, ?)');
-      for (const item of record.sessions) sessions.run(item.id, item.source, item.startedAt, item.repositoryId ?? null, item.workspaceId ?? null, item.userId ?? null);
+      const sessions = this.database.prepare('INSERT INTO sessions (id, source, started_at, ended_at, repository_id, workspace_id, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)');
+      for (const item of record.sessions) sessions.run(item.id, item.source, item.startedAt, item.endedAt ?? null, item.repositoryId ?? null, item.workspaceId ?? null, item.userId ?? null);
       const events = this.database.prepare('INSERT INTO events (id, session_id, kind, occurred_at, tool, path, tags_json, outcome, exit_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
       for (const item of record.events) events.run(item.id, item.sessionId, item.kind, item.occurredAt, item.tool ?? null, item.path ?? null, JSON.stringify(normalizeTags(item.tags ?? [])), item.outcome ?? null, item.exitStatus ?? null);
       const observations = this.database.prepare('INSERT INTO observations (id, statement) VALUES (?, ?)');
@@ -611,6 +646,10 @@ export class ExperienceStore {
         this.database.exec(captureEffectBundleMigration);
         this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(10, new Date().toISOString());
       }
+      if (!applied.has(11)) {
+        this.database.exec(sessionEndMigration);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(11, new Date().toISOString());
+      }
       this.database.exec('COMMIT');
     } catch (error) {
       this.database.exec('ROLLBACK');
@@ -643,7 +682,7 @@ export class ExperienceStore {
     if (session !== undefined && (session.id !== event.sessionId || session.source !== event.source)) {
       throw new TypeError('Capture session does not match normalized event provenance.');
     }
-    const existing = this.database.prepare('SELECT id, source, started_at, repository_id, workspace_id, user_id FROM sessions WHERE id = ?').get(event.sessionId) as unknown as SessionRow | undefined;
+    const existing = this.database.prepare('SELECT id, source, started_at, ended_at, repository_id, workspace_id, user_id FROM sessions WHERE id = ?').get(event.sessionId) as unknown as SessionRow | undefined;
     if (existing === undefined) {
       if (session === undefined) throw new TypeError('Capture requires a new session record.');
       this.insertOrVerifySession(session);
@@ -654,24 +693,25 @@ export class ExperienceStore {
     assertIncrementalSession(persisted);
     if (existing.source !== event.source) throw new TypeError('Capture source conflicts with the existing session.');
     if (session !== undefined) this.assertSameSession(existing, session);
-    if (event.occurredAt < persisted.startedAt) throw new TypeError('Capture event cannot precede its session start.');
+    if (Date.parse(event.occurredAt) < Date.parse(persisted.startedAt)) throw new TypeError('Capture event cannot precede its session start.');
+    if (persisted.endedAt !== undefined && Date.parse(event.occurredAt) > Date.parse(persisted.endedAt)) throw new TypeError('Capture event cannot occur after its session end.');
   }
 
   private insertOrVerifySession(session: Session): boolean {
-    const existing = this.database.prepare('SELECT id, source, started_at, repository_id, workspace_id, user_id FROM sessions WHERE id = ?').get(session.id) as unknown as SessionRow | undefined;
+    const existing = this.database.prepare('SELECT id, source, started_at, ended_at, repository_id, workspace_id, user_id FROM sessions WHERE id = ?').get(session.id) as unknown as SessionRow | undefined;
     if (existing !== undefined) {
       this.assertSameSession(existing, session);
       return false;
     }
     const validation = validateImport({ sessions: [session], events: [], observations: [], clusters: [], candidates: [], evidence: [], knowledge: [] });
     if (!validation.ok) throw new TypeError(`${validation.code}: ${validation.message}`);
-    this.database.prepare('INSERT INTO sessions (id, source, started_at, repository_id, workspace_id, user_id) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(session.id, session.source, session.startedAt, session.repositoryId ?? null, session.workspaceId ?? null, session.userId ?? null);
+    this.database.prepare('INSERT INTO sessions (id, source, started_at, ended_at, repository_id, workspace_id, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(session.id, session.source, session.startedAt, session.endedAt ?? null, session.repositoryId ?? null, session.workspaceId ?? null, session.userId ?? null);
     return true;
   }
 
   private assertSameSession(row: SessionRow, session: Session): void {
-    if (row.source !== session.source || row.started_at !== session.startedAt || row.repository_id !== (session.repositoryId ?? null)
+    if (row.source !== session.source || row.started_at !== session.startedAt || row.ended_at !== (session.endedAt ?? null) || row.repository_id !== (session.repositoryId ?? null)
       || row.workspace_id !== (session.workspaceId ?? null) || row.user_id !== (session.userId ?? null)) {
       throw new TypeError('Conflicting duplicate session identity.');
     }
@@ -688,10 +728,11 @@ export class ExperienceStore {
       ...(event.outcome === undefined ? {} : { outcome: event.outcome === 'succeeded' ? 'passed' : event.outcome }),
       ...(event.exitStatus === undefined ? {} : { exitStatus: event.exitStatus })
     };
-    const session = this.database.prepare('SELECT id, source, started_at, repository_id, workspace_id, user_id FROM sessions WHERE id = ?').get(event.sessionId) as unknown as SessionRow;
+    const session = this.database.prepare('SELECT id, source, started_at, ended_at, repository_id, workspace_id, user_id FROM sessions WHERE id = ?').get(event.sessionId) as unknown as SessionRow;
     const persistedSession = sessionFromRow(session);
     assertIncrementalSession(persistedSession);
-    if (event.occurredAt < persistedSession.startedAt) throw new TypeError('Capture event cannot precede its session start.');
+    if (Date.parse(event.occurredAt) < Date.parse(persistedSession.startedAt)) throw new TypeError('Capture event cannot precede its session start.');
+    if (persistedSession.endedAt !== undefined && Date.parse(event.occurredAt) > Date.parse(persistedSession.endedAt)) throw new TypeError('Capture event cannot occur after its session end.');
     const validation = validateImport({ sessions: [persistedSession], events: [domainEvent], observations: [], clusters: [], candidates: [], evidence: [], knowledge: [] });
     if (!validation.ok) throw new TypeError(`${validation.code}: ${validation.message}`);
     this.database.prepare('INSERT INTO events (id, session_id, kind, occurred_at, tool, path, tags_json, outcome, exit_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
@@ -785,7 +826,7 @@ export class ExperienceStore {
     assertIncrementalCandidateResources(bundle);
     const candidateId = bundle.candidate.id as CandidateLessonId;
     const evidenceCandidateId = (bundle.evidence.candidateId ?? bundle.candidate.id) as CandidateLessonId;
-    const sessionRow = this.database.prepare('SELECT id, source, started_at, repository_id, workspace_id, user_id FROM sessions WHERE id = ?').get(event.sessionId) as unknown as SessionRow;
+    const sessionRow = this.database.prepare('SELECT id, source, started_at, ended_at, repository_id, workspace_id, user_id FROM sessions WHERE id = ?').get(event.sessionId) as unknown as SessionRow;
     const domainEvent = this.domainEvent(event);
     const record: ExperienceImport = {
       sessions: [sessionFromRow(sessionRow)], events: [domainEvent],
@@ -1021,6 +1062,7 @@ function sessionFromRow(row: SessionRow): Session {
     id: row.id as SessionId,
     source: row.source,
     startedAt: row.started_at,
+    ...(row.ended_at === null ? {} : { endedAt: row.ended_at }),
     ...(row.repository_id === null ? {} : { repositoryId: row.repository_id as Session['repositoryId'] }),
     ...(row.workspace_id === null ? {} : { workspaceId: row.workspace_id as Session['workspaceId'] }),
     ...(row.user_id === null ? {} : { userId: row.user_id as Session['userId'] })
@@ -1200,9 +1242,13 @@ function stableJson(value: unknown): string {
 
 function assertIncrementalSession(session: Session): void {
   if (!session || typeof session !== 'object') throw new TypeError('Incremental session is invalid.');
-  assertOnlyIncrementalKeys(session as unknown as Record<string, unknown>, ['id', 'source', 'startedAt', 'repositoryId', 'workspaceId', 'userId']);
+  assertOnlyIncrementalKeys(session as unknown as Record<string, unknown>, ['id', 'source', 'startedAt', 'endedAt', 'repositoryId', 'workspaceId', 'userId']);
   if (session.source !== 'codex' && session.source !== 'claude-code' && session.source !== 'cursor') throw new TypeError('Incremental session source is invalid.');
   assertCanonicalTimestamp(session.startedAt);
+  if (session.endedAt !== undefined) {
+    assertCanonicalTimestamp(session.endedAt);
+    if (Date.parse(session.endedAt) < Date.parse(session.startedAt)) throw new TypeError('Incremental session end cannot precede its start.');
+  }
   for (const [field, value] of [
     ['session id', session.id], ['repository id', session.repositoryId],
     ['workspace id', session.workspaceId], ['user id', session.userId]
