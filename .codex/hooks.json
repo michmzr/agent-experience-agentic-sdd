@@ -3,6 +3,7 @@
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "startup",
         "hooks": [
           { "type": "command", "command": "\"$(git rev-parse --show-toplevel)/.agents/hooks/ael-passive-capture.sh\" codex" }
         ]

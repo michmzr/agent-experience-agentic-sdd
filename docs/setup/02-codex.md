@@ -11,7 +11,7 @@ As of 2026-08-24, Codex supports project instructions through `AGENTS.md` and hi
 
 ## Passive project capture
 
-This repository includes `.codex/hooks.json` for passive session and technical tool-event capture. Run `pnpm build` after installing dependencies and before relying on the project hooks, because the shared wrapper invokes `dist/src/cli.js` from the Git repository top level.
+This repository includes `.codex/hooks.json` for passive session and technical tool-event capture. Its `SessionStart` hook matches `startup` only. Resume, clear and compact lifecycle events do not invoke the wrapper, so only startup creates a captured session. A closed session is never reopened. Run `pnpm build` after installing dependencies and before relying on the project hooks, because the shared wrapper invokes `dist/src/cli.js` from the Git repository top level.
 
 Capture remains local. The SQLite database uses `AEL_DATA_DIR` when set, or the platform default documented in the root README. Only normalized session and technical events are retained. Prompt text, assistant or tool transcripts, raw hook payloads and credential-like values are excluded.
 

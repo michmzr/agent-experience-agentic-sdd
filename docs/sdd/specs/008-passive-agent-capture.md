@@ -73,6 +73,8 @@ The `Session` domain contract gains optional `endedAt`. SQLite `sessions` gains 
 
 Session lifecycle storage remains separate from technical capture events. A session start creates or idempotently confirms the session row. A session end closes that row.
 
+The Codex `SessionStart` project hook matches `startup` only. Resume, clear and compact lifecycle events are no-ops for passive capture and do not invoke the wrapper. A closed session is never reopened.
+
 ### Project configuration
 
 Cursor configuration lives under `.cursor/` and Codex configuration under `.codex/`. Both call the same built project CLI and select a source adapter explicitly. The checked-in configuration registers only technical and session-lifecycle events.
