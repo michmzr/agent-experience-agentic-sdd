@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -157,6 +157,39 @@ test('fails open promptly when the hook database is busy', async () => {
       stdout: '',
       stderr: 'AEL_CAPTURE_PERSISTENCE_FAILED: Passive capture skipped.\n'
     });
+  } finally {
+    blocker.exec('ROLLBACK');
+    blocker.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('closes failed hook store migrations instead of leaking database connections', async () => {
+  const dataDir = temporaryDataDirectory();
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const initialized = new ExperienceStore(databasePath);
+  initialized.close();
+  const blocker = new DatabaseSync(databasePath);
+  blocker.exec('BEGIN IMMEDIATE');
+  const descriptorsBefore = readdirSync('/dev/fd').length;
+  try {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const result = await runCliAsync(
+        ['capture', 'hook', '--source', 'codex', '--data-dir', dataDir],
+        {
+          hookInput: JSON.stringify({ session_id: `locked-session-${attempt}`, hook_event_name: 'SessionStart' }),
+          now
+        }
+      );
+      assert.deepEqual(result, {
+        exitCode: 0,
+        stdout: '',
+        stderr: 'AEL_CAPTURE_PERSISTENCE_FAILED: Passive capture skipped.\n'
+      });
+    }
+
+    const descriptorsAfter = readdirSync('/dev/fd').length;
+    assert.ok(descriptorsAfter <= descriptorsBefore + 1, `open descriptors grew from ${descriptorsBefore} to ${descriptorsAfter}`);
   } finally {
     blocker.exec('ROLLBACK');
     blocker.close();

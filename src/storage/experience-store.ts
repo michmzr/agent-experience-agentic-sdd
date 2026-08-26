@@ -263,8 +263,18 @@ export class ExperienceStore {
   private readonly database: DatabaseSync;
 
   constructor(databasePath?: string, options: ExperienceDatabaseOptions = {}) {
-    this.database = openExperienceDatabase(databasePath, options);
-    this.migrate();
+    const database = openExperienceDatabase(databasePath, options);
+    this.database = database;
+    try {
+      this.migrate();
+    } catch (error) {
+      try {
+        database.close();
+      } catch {
+        // Preserve the migration failure if cleanup itself fails.
+      }
+      throw error;
+    }
   }
 
   close(): void {
