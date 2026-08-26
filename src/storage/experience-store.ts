@@ -711,6 +711,7 @@ export class ExperienceStore {
       this.assertSameSession(existing, session);
       return false;
     }
+    if (session.endedAt !== undefined) throw new TypeError('New sessions must start open; close them with endSession.');
     const validation = validateImport({ sessions: [session], events: [], observations: [], clusters: [], candidates: [], evidence: [], knowledge: [] });
     if (!validation.ok) throw new TypeError(`${validation.code}: ${validation.message}`);
     this.database.prepare('INSERT INTO sessions (id, source, started_at, ended_at, repository_id, workspace_id, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)')

@@ -66,6 +66,17 @@ test('rejects missing, mismatched, and pre-start session ends atomically', () =>
   store.close();
 });
 
+test('rejects an orphan closed session append without writing a row', () => {
+  const store = new ExperienceStore(databasePath());
+  const session = {
+    id: 'orphan-closed' as SessionId, source: 'codex' as const, startedAt, endedAt
+  };
+
+  assert.throws(() => store.appendIncremental({ session }), /open|session end/i);
+  assert.equal(store.loadSession(session.id), undefined);
+  store.close();
+});
+
 test('migrates a version 10 session row as open without rewriting it', () => {
   const path = databasePath();
   const seed = new ExperienceStore(path);
