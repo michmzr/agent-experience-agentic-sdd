@@ -33,7 +33,7 @@ Deliverables:
 
 ## Milestone 2.5: passive agent capture
 
-Status: Specification approved on 2026-08-26. Implementation not started.
+Status: Complete on 2026-08-26. Acceptance passed: 426 tests passed, 0 failed and 0 skipped; migration 11, cross-source lifecycle capture, duplicate delivery, privacy exclusion and fail-open wrapper checks passed. Verification: `docs/verification/2026-08-26-milestone-2-5-passive-agent-capture.md`.
 
 Goal: connect Cursor and Codex project hooks to private local capture without warning about, asking about or blocking agent actions.
 
