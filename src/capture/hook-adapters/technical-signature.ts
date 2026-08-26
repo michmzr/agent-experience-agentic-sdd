@@ -92,7 +92,7 @@ function shellTokens(command: string): string[] {
 }
 
 function scalarArguments(payload: Readonly<Record<string, unknown>>): readonly string[] {
-  const entries = Object.entries(payload);
+  const entries = Object.entries(payload).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
   if (entries.length > MAX_CAPTURE_ARGUMENTS) throw rejectedLimit();
   return entries.map(([key, value]) => {
     if (!scalarKeyPattern.test(key)) throw rejected();

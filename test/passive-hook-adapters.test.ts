@@ -115,7 +115,7 @@ test('maps MCP calls to top-level scalar arguments without nested raw payloads',
   if (record.event.signature.kind === 'action') {
     assert.equal(record.event.signature.tool, 'mcp');
     assert.equal(record.event.signature.action, 'github/create-issue');
-    assert.deepEqual(record.event.signature.arguments, ['owner=octo', 'repo=repo', 'draft=false', 'count=2']);
+    assert.deepEqual(record.event.signature.arguments, ['count=2', 'draft=false', 'owner=octo', 'repo=repo']);
   }
   assert.equal(JSON.stringify(record).includes('tool_input'), false);
 
@@ -126,6 +126,30 @@ test('maps MCP calls to top-level scalar arguments without nested raw payloads',
     tool_use_id: 'mcp-2',
     tool_input: { owner: 'octo', metadata: { nested: true } }
   }, preTime), /passive hook|private|credential|limit/i);
+});
+
+test('sorts MCP scalar arguments so reordered pre and post payloads correlate', () => {
+  const pre = technical(adaptPassiveHook('codex', {
+    session_id: 'session-1',
+    hook_event_name: 'PreToolUse',
+    tool_name: 'mcp__github__create_issue',
+    tool_use_id: 'mcp-reordered',
+    tool_input: { repo: 'repo', owner: 'octo', count: 2, draft: false }
+  }, preTime));
+  const post = technical(adaptPassiveHook('codex', {
+    session_id: 'session-1',
+    hook_event_name: 'PostToolUse',
+    tool_name: 'mcp__github__create_issue',
+    tool_use_id: 'mcp-reordered',
+    tool_input: { draft: false, count: 2, owner: 'octo', repo: 'repo' }
+  }, postTime));
+
+  assert.equal(post.event.relatedEventId, pre.event.sourceEventId);
+  assert.deepEqual(post.event.signature, pre.event.signature);
+  assert.equal(post.event.signature.kind, 'action');
+  if (post.event.signature.kind === 'action') {
+    assert.deepEqual(post.event.signature.arguments, ['count=2', 'draft=false', 'owner=octo', 'repo=repo']);
+  }
 });
 
 test('maps file edits without patch or content fields', () => {
