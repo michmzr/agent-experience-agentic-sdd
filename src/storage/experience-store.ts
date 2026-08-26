@@ -694,7 +694,7 @@ export class ExperienceStore {
     if (existing === undefined) {
       if (session === undefined) throw new TypeError('Capture requires a new session record.');
       this.insertOrVerifySession(session);
-      if (event.occurredAt < session.startedAt) throw new TypeError('Capture event cannot precede its session start.');
+      if (Date.parse(event.occurredAt) < Date.parse(session.startedAt)) throw new TypeError('Capture event cannot precede its session start.');
       return;
     }
     const persisted = sessionFromRow(existing);
@@ -766,7 +766,7 @@ export class ExperienceStore {
     if (related === undefined || related.phase !== 'pre-action') throw new TypeError('Post-result capture requires an existing related pre-action.');
     if (related.session_id !== event.sessionId) throw new TypeError('Post-result capture session does not match its related pre-action.');
     if (related.signature_json !== JSON.stringify(event.signature)) throw new TypeError('Post-result capture signature does not match its related pre-action.');
-    if (event.occurredAt < related.occurred_at) throw new TypeError('Post-result capture cannot precede its related pre-action.');
+    if (Date.parse(event.occurredAt) < Date.parse(related.occurred_at)) throw new TypeError('Post-result capture cannot precede its related pre-action.');
   }
 
   private insertOrVerifyEnforcementSnapshot(event: CapturedEventRecord, input: CaptureEnforcementSnapshot): boolean {

@@ -126,3 +126,36 @@ test('rejects technical events after session closure without adding a capture ro
   assert.deepEqual(store.listCapturedEventsPage().entries, []);
   store.close();
 });
+
+test('accepts a technical event after its session start across expanded years', () => {
+  const store = new ExperienceStore(databasePath());
+  const session = { id: 'expanded-session' as SessionId, source: 'codex' as const, startedAt: '9999-01-01T00:00:00.000Z' };
+  const event = adaptCodexCapture({
+    event_id: 'expanded-event', session_id: session.id, event_kind: 'pre_action',
+    occurred_at: '+010000-01-01T00:00:00.000Z', tool: 'git', action: 'status',
+    cwd: '/work/repo', summary: 'Run git status.'
+  });
+
+  assert.doesNotThrow(() => store.appendIncremental({ session, event }));
+  store.close();
+});
+
+test('accepts a post-result after its related pre-action across expanded years', () => {
+  const store = new ExperienceStore(databasePath());
+  const session = { id: 'expanded-related-session' as SessionId, source: 'codex' as const, startedAt: '9999-01-01T00:00:00.000Z' };
+  const pre = adaptCodexCapture({
+    event_id: 'expanded-pre', session_id: session.id, event_kind: 'pre_action',
+    occurred_at: '9999-01-01T00:00:00.000Z', tool: 'git', action: 'status',
+    cwd: '/work/repo', summary: 'Run git status.'
+  });
+  const post = adaptCodexCapture({
+    event_id: 'expanded-post', session_id: session.id, event_kind: 'post_result',
+    occurred_at: '+010000-01-01T00:00:00.000Z', tool: 'git', action: 'status',
+    cwd: '/work/repo', summary: 'Git status completed.', outcome: 'succeeded',
+    exit_status: 0, related_event_id: 'expanded-pre'
+  });
+
+  store.appendIncremental({ session, event: pre });
+  assert.doesNotThrow(() => store.appendIncremental({ event: post }));
+  store.close();
+});
