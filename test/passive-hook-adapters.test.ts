@@ -77,6 +77,44 @@ test('maps session start and end without transcript or user identity fields', ()
   });
 });
 
+test('ignores Codex non-startup lifecycle starts without changing immutable session state', () => {
+  const startup = adaptPassiveHook('codex', {
+    session_id: 'session-1',
+    hook_event_name: 'SessionStart',
+    source: 'startup'
+  }, preTime);
+  assert.deepEqual(startup, {
+    kind: 'session-start',
+    session: { id: 'session-1', source: 'codex', startedAt: preTime }
+  });
+
+  for (const source of ['resume', 'compact', 'clear']) {
+    assert.equal(adaptPassiveHook('codex', {
+      session_id: 'session-1',
+      hook_event_name: 'SessionStart',
+      source
+    }, postTime), undefined, source);
+  }
+});
+
+test('ignores Codex resume after session end instead of reopening the session', () => {
+  assert.deepEqual(adaptPassiveHook('codex', {
+    session_id: 'session-1',
+    hook_event_name: 'SessionEnd'
+  }, postTime), {
+    kind: 'session-end',
+    source: 'codex',
+    sessionId: 'session-1',
+    endedAt: postTime
+  });
+
+  assert.equal(adaptPassiveHook('codex', {
+    session_id: 'session-1',
+    hook_event_name: 'SessionStart',
+    source: 'resume'
+  }, '2026-08-26T08:00:02.000Z'), undefined);
+});
+
 test('correlates pre and post tool hooks with stable source identities', () => {
   const pre = technical(adaptPassiveHook('codex', {
     session_id: 'session-1',
@@ -273,7 +311,8 @@ test('rejects unsafe lifecycle identifiers without returning their values', () =
   assert.throws(
     () => adaptPassiveHook('codex', {
       session_id: marker,
-      hook_event_name: 'SessionStart'
+      hook_event_name: 'SessionStart',
+      source: 'startup'
     }, preTime),
     (error: unknown) => error instanceof Error
       && /passive hook/i.test(error.message)

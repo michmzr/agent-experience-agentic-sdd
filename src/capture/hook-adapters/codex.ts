@@ -12,6 +12,7 @@ export function adaptCodexPassiveHook(payload: unknown, receivedAt: string): Pas
   const record = hookRecord(payload);
   switch (record.hook_event_name) {
     case 'SessionStart':
+      if (record.source !== 'startup') return undefined;
       return Object.freeze({
         kind: 'session-start',
         session: Object.freeze({ id: sessionId(record.session_id), source: 'codex', startedAt: receivedAt })
