@@ -38,6 +38,7 @@ export interface Session {
   id: SessionId;
   source: AgentSource;
   startedAt: string;
+  endedAt?: string;
   repositoryId?: RepositoryId;
   workspaceId?: WorkspaceId;
   userId?: UserId;

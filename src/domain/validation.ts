@@ -28,7 +28,7 @@ const incrementalIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,511}$/;
 const collectionKeys = ['sessions', 'events', 'observations', 'clusters', 'candidates', 'evidence', 'knowledge'] as const;
 const metadataKeys = ['scope', 'repositoryId', 'path', 'tool', 'tags', 'createdAt', 'approvalKind', 'approvedAt', 'activation', 'mergedProvenance'] as const;
 const allowedEntityKeys: Record<typeof collectionKeys[number], readonly string[]> = {
-  sessions: ['id', 'source', 'startedAt', 'repositoryId', 'workspaceId', 'userId'],
+  sessions: ['id', 'source', 'startedAt', 'endedAt', 'repositoryId', 'workspaceId', 'userId'],
   events: ['id', 'sessionId', 'kind', 'occurredAt', 'tool', 'path', 'tags', 'outcome', 'exitStatus'],
   observations: ['id', 'eventIds', 'statement'],
   clusters: ['id', 'observationIds'],
@@ -94,7 +94,7 @@ function hasValidEntityShape(collection: typeof collectionKeys[number], value: u
   switch (collection) {
     case 'sessions':
       return hasStringFields(entity, ['id', 'source', 'startedAt'])
-        && hasOptionalStringFields(entity, ['repositoryId', 'workspaceId', 'userId']);
+        && hasOptionalStringFields(entity, ['endedAt', 'repositoryId', 'workspaceId', 'userId']);
     case 'events':
       return hasStringFields(entity, ['id', 'sessionId', 'kind', 'occurredAt'])
         && hasOptionalStringFields(entity, ['tool', 'path', 'outcome'])
@@ -116,6 +116,18 @@ function hasValidEntityShape(collection: typeof collectionKeys[number], value: u
 
 function isValidTimestamp(value: unknown): value is string {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value));
+}
+
+function isCanonicalTimestamp(value: unknown): value is string {
+  return typeof value === 'string'
+    && !Number.isNaN(Date.parse(value))
+    && new Date(value).toISOString() === value;
+}
+
+function validSessionLifetime(session: ExperienceImport['sessions'][number]): boolean {
+  return isCanonicalTimestamp(session.startedAt)
+    && (session.endedAt === undefined
+      || (isCanonicalTimestamp(session.endedAt) && session.endedAt >= session.startedAt));
 }
 
 function hasValidMetadataShape(value: unknown): value is KnowledgeMetadata {
@@ -162,6 +174,15 @@ export function validateImport(record: ExperienceImport): ValidationResult {
   const evidenceIds = identifiers(record.evidence);
 
   if (record.events.some((event) => !sessionIds.has(event.sessionId))) return invalid('MISSING_REFERENCE', 'Event references a missing session.');
+  const sessionsById = new Map(record.sessions.map((session) => [session.id, session]));
+  if (record.sessions.some((session) => !validSessionLifetime(session))) return invalid('INVALID_RELATIONSHIP', 'Session lifetime is invalid.');
+  if (record.events.some((event) => {
+    const session = sessionsById.get(event.sessionId);
+    return !isCanonicalTimestamp(event.occurredAt)
+      || session === undefined
+      || event.occurredAt < session.startedAt
+      || (session.endedAt !== undefined && event.occurredAt > session.endedAt);
+  })) return invalid('INVALID_RELATIONSHIP', 'Event occurs outside its session lifetime.');
   if (record.observations.some((observation) => observation.eventIds.length === 0)) return invalid('INVALID_RELATIONSHIP', 'Observation requires at least one event.');
   if (record.observations.some((observation) => observation.eventIds.some((id) => !eventIds.has(id)))) return invalid('MISSING_REFERENCE', 'Observation references a missing event.');
   if (record.clusters.some((cluster) => cluster.observationIds.length === 0)) return invalid('INVALID_RELATIONSHIP', 'Cluster requires at least one observation.');
