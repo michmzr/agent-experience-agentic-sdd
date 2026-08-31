@@ -115,7 +115,19 @@ interface ProposalRow {
   status: 'proposed';
 }
 
+interface RepositoryRow {
+  repository_id: string;
+  repository_root: string;
+  observed_at: string;
+}
+
 export type KnowledgeScope = 'global' | 'repository';
+
+export interface RepositoryRegistration {
+  readonly id: string;
+  readonly root: string;
+  readonly observedAt: string;
+}
 
 export interface RetrievalFilter {
   readonly scope?: KnowledgeScope;
@@ -259,6 +271,14 @@ const sessionEndMigration = `
   ALTER TABLE sessions ADD COLUMN ended_at TEXT;
 `;
 
+const repositoryRegistryMigration = `
+  CREATE TABLE IF NOT EXISTS repositories (
+    repository_id TEXT PRIMARY KEY,
+    repository_root TEXT NOT NULL,
+    observed_at TEXT NOT NULL
+  );
+`;
+
 export class ExperienceStore {
   private readonly database: DatabaseSync;
 
@@ -279,6 +299,31 @@ export class ExperienceStore {
 
   close(): void {
     this.database.close();
+  }
+
+  registerRepository(registration: RepositoryRegistration): void {
+    if (!registration || typeof registration.id !== 'string' || !registration.id.trim()
+      || typeof registration.root !== 'string' || !registration.root.trim()) {
+      throw new TypeError('Repository registration requires an identifier and root.');
+    }
+    assertCanonicalTimestamp(registration.observedAt);
+    this.database.prepare(`
+      INSERT INTO repositories (repository_id, repository_root, observed_at) VALUES (?, ?, ?)
+      ON CONFLICT(repository_id) DO UPDATE SET
+        repository_root = excluded.repository_root,
+        observed_at = excluded.observed_at
+    `).run(registration.id, registration.root, registration.observedAt);
+  }
+
+  listRepositories(): readonly RepositoryRegistration[] {
+    const rows = this.database.prepare(`
+      SELECT repository_id, repository_root, observed_at FROM repositories ORDER BY repository_root
+    `).all() as unknown as RepositoryRow[];
+    return rows.map((row) => Object.freeze({
+      id: row.repository_id,
+      root: row.repository_root,
+      observedAt: row.observed_at
+    }));
   }
 
   loadSession(id: SessionId): Session | undefined {
@@ -667,6 +712,10 @@ export class ExperienceStore {
       if (!applied.has(11)) {
         this.database.exec(sessionEndMigration);
         this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(11, new Date().toISOString());
+      }
+      if (!applied.has(12)) {
+        this.database.exec(repositoryRegistryMigration);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(12, new Date().toISOString());
       }
       this.database.exec('COMMIT');
     } catch (error) {
