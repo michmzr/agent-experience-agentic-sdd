@@ -7,6 +7,7 @@ import { discoverCursorExports, readCursorMarkdownExport } from './adapters/curs
 import type { NormalizedSession } from './contracts.js';
 import { createDefaultReviewRuntime, defaultReviewProfile } from './default-reviewers.js';
 import { groupReviewFindings, type ReviewFinding as OrchestratorFinding } from './orchestrator.js';
+import { consolidateProjectReviewFindings, isProjectReviewFinding } from './project-improvements.js';
 import { createReviewProposals } from './proposals.js';
 import { type ReviewRuntime, type ReviewProfile } from './runtime.js';
 import { sanitizeForReview } from './sanitizer.js';
@@ -47,12 +48,21 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
   const artifact = sanitizeForReview(normalized);
   const runtime = dependencies.runtime ?? createDefaultReviewRuntime();
   const run = await runtime.run({ artifact, profile: input.profile ?? defaultReviewProfile, allowExpensiveChecks: input.allowExpensiveChecks });
-  const findings = run.results.flatMap((result) => result.findings.map((finding) => ({
-    reviewerId: result.reviewerId,
+  const rawFindings = run.results.flatMap((result) => result.findings.map((finding) => ({ reviewerId: result.reviewerId, finding })));
+  const typedProjectFindings = rawFindings.map(({ finding }) => finding).filter(isProjectReviewFinding);
+  const invalidProjectFindings = rawFindings
+    .map(({ finding }) => finding)
+    .filter((finding) => finding.code === 'project-improvement' && !isProjectReviewFinding(finding));
+  const projectReview = consolidateProjectReviewFindings(
+    [...typedProjectFindings, ...invalidProjectFindings],
+    new Set(artifact.session.events.map((event) => event.id))
+  );
+  const findings = rawFindings.filter(({ finding }) => finding.code !== 'project-improvement').map(({ reviewerId, finding }) => ({
+    reviewerId,
     findingId: finding.findingId,
     rootCauseId: finding.rootCauseId,
     recommendation: finding.recommendation
-  }))) as OrchestratorFinding[];
+  })) as OrchestratorFinding[];
   const groups = groupReviewFindings(findings);
   const intelligence = createReviewProposals({
     sessionId: artifact.session.sessionId,
@@ -63,7 +73,29 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
       proposal: { category: 'workflow' as const, title: recommendation(group.recommendation) }
     }))
   });
-  return { source: input.source, selectedSession: artifact.session.sessionId, profile: run.profile, skippedReviewerIds: run.skippedReviewerIds, findings: groups, ...intelligence };
+  const projectIntelligence = createReviewProposals({
+    sessionId: artifact.session.sessionId,
+    findings: projectReview.improvements.map((improvement) => ({
+      id: improvement.id,
+      statement: `Project improvement ${improvement.rootCauseId}`,
+      lessonKind: 'heuristic' as LessonKind,
+      proposal: { category: improvement.category, title: improvement.recommendation },
+      severity: improvement.severity,
+      evidenceEventIds: improvement.evidenceEventIds
+    }))
+  });
+  return {
+    source: input.source,
+    selectedSession: artifact.session.sessionId,
+    profile: run.profile,
+    skippedReviewerIds: run.skippedReviewerIds,
+    runtimeDiagnostics: run.diagnostics,
+    findings: groups,
+    projectImprovements: projectReview.improvements,
+    projectReviewDiagnostics: projectReview.diagnostics,
+    candidates: [...intelligence.candidates, ...projectIntelligence.candidates],
+    proposals: [...intelligence.proposals, ...projectIntelligence.proposals]
+  };
 }
 
 async function resolveSelectedSession(input: ManualReviewInput, dependencies: ManualReviewDependencies): Promise<string> {

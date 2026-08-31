@@ -1,9 +1,11 @@
 import type { LessonKind } from '../domain/types.js';
+import { projectFindingSeverities } from './project-improvements.js';
 
-const proposalCategories = ['documentation', 'knowledge', 'code', 'tooling', 'skill', 'workflow', 'architecture'] as const;
+const proposalCategories = ['documentation', 'knowledge', 'code', 'tooling', 'skill', 'workflow', 'architecture', 'developer-experience', 'project-management'] as const;
 const specificationCategories = new Set<ProposalCategory>(['code', 'tooling', 'skill', 'workflow', 'architecture']);
 
 export type ProposalCategory = (typeof proposalCategories)[number];
+export type ProposalSeverity = (typeof projectFindingSeverities)[number];
 
 export interface ReviewFindingForProposal {
   readonly id: string;
@@ -13,6 +15,8 @@ export interface ReviewFindingForProposal {
     readonly category: ProposalCategory;
     readonly title: string;
   };
+  readonly severity?: ProposalSeverity;
+  readonly evidenceEventIds?: readonly string[];
 }
 
 export interface CandidateLesson {
@@ -32,6 +36,8 @@ export interface ImprovementProposal {
   readonly category: ProposalCategory;
   readonly title: string;
   readonly requiresSpecification: boolean;
+  readonly severity?: ProposalSeverity;
+  readonly evidenceEventIds?: readonly string[];
 }
 
 export interface CreateReviewProposalsInput {
@@ -54,6 +60,8 @@ export function createReviewProposals(input: CreateReviewProposalsInput): Review
     requireText(finding.statement, 'Finding statement');
     requireText(finding.proposal.title, 'Proposal title');
     if (!proposalCategories.includes(finding.proposal.category)) throw new Error('Proposal category is unsupported.');
+    if (finding.severity !== undefined && !projectFindingSeverities.includes(finding.severity)) throw new Error('Proposal severity is unsupported.');
+    if (finding.evidenceEventIds !== undefined) validateEvidenceEventIds(finding.evidenceEventIds);
     if (findingIds.has(finding.id)) throw new Error(`Duplicate finding id: ${finding.id}.`);
     findingIds.add(finding.id);
   }
@@ -82,8 +90,21 @@ function createProposal(sessionId: string, finding: ReviewFindingForProposal, ca
     candidateId,
     category: finding.proposal.category,
     title: finding.proposal.title,
-    requiresSpecification: specificationCategories.has(finding.proposal.category)
+    requiresSpecification: specificationCategories.has(finding.proposal.category),
+    ...(finding.severity === undefined ? {} : { severity: finding.severity }),
+    ...(finding.evidenceEventIds === undefined ? {} : { evidenceEventIds: [...finding.evidenceEventIds] })
   };
+}
+
+function validateEvidenceEventIds(eventIds: readonly string[]): void {
+  if (eventIds.length === 0) throw new Error('Evidence event ids must be nonempty, unique, nonblank strings.');
+  const unique = new Set<string>();
+  for (const eventId of eventIds) {
+    if (eventId.trim().length === 0 || eventId.trim() !== eventId || unique.has(eventId)) {
+      throw new Error('Evidence event ids must be nonempty, unique, nonblank strings.');
+    }
+    unique.add(eventId);
+  }
 }
 
 function requireText(value: string, label: string): void {

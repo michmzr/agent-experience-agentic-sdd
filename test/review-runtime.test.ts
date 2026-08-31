@@ -35,6 +35,23 @@ test('runs independent reviewers concurrently but returns results in profile ord
   assert.deepEqual(result.results.map((entry) => entry.reviewerId), ['slow', 'fast']);
   assert.deepEqual(result.results.map((entry) => entry.findings[0].code), ['slow', 'fast']);
   assert.deepEqual(result.skippedReviewerIds, []);
+  assert.deepEqual(result.diagnostics, []);
+});
+
+test('isolates a failed reviewer without exposing its error or suppressing successful reviewers', async () => {
+  const runtime = new ReviewRuntime({
+    profiles: [{ id: 'local', version: '1', reviewerIds: ['broken', 'good'] }],
+    reviewers: [
+      { id: 'broken', expensive: false, async review() { throw new Error('private reviewer failure'); } },
+      delayedReviewer('good', 0)
+    ]
+  });
+
+  const result = await runtime.run({ artifact, profile: { id: 'local', version: '1' }, allowExpensiveChecks: false });
+
+  assert.deepEqual(result.results.map((entry) => entry.reviewerId), ['good']);
+  assert.deepEqual(result.diagnostics, [{ reviewerId: 'broken', code: 'REVIEWER_FAILED' }]);
+  assert.equal(JSON.stringify(result).includes('private reviewer failure'), false);
 });
 
 test('does not execute expensive reviewers without explicit permission', async () => {
