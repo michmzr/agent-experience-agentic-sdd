@@ -12,7 +12,7 @@ import {
   isProjectReviewFinding,
   type ProjectReviewDiagnostic
 } from './project-improvements.js';
-import { createReviewProposals } from './proposals.js';
+import { createReviewProposals, type ReviewFindingForProposal } from './proposals.js';
 import { type ReviewRuntime, type ReviewProfile } from './runtime.js';
 import { sanitizeForReview } from './sanitizer.js';
 import { isWithinRepository, resolveRepositoryIdentity, type RepositoryIdentityResolver } from './repository-identity.js';
@@ -72,25 +72,27 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
     recommendation: finding.recommendation
   })) as OrchestratorFinding[];
   const groups = groupReviewFindings(findings);
-  const intelligence = createReviewProposals({
-    sessionId: artifact.session.sessionId,
-    findings: groups.map((group) => ({
-      id: group.rootCauseId,
-      statement: `Review finding ${group.rootCauseId}`,
-      lessonKind: 'successful-workflow' as LessonKind,
-      proposal: { category: 'workflow' as const, title: recommendation(group.recommendation) }
-    }))
-  });
-  const projectIntelligence = createReviewProposals({
-    sessionId: artifact.session.sessionId,
-    findings: projectReview.improvements.map((improvement) => ({
+  const legacyProposalFindings: readonly ReviewFindingForProposal[] = groups.map((group) => ({
+    id: group.rootCauseId,
+    statement: `Review finding ${group.rootCauseId}`,
+    lessonKind: 'successful-workflow' as LessonKind,
+    proposal: { category: 'workflow' as const, title: recommendation(group.recommendation) }
+  }));
+  const projectProposalFindings: readonly ReviewFindingForProposal[] = projectReview.improvements.map((improvement) => ({
       id: improvement.id,
       statement: `Project improvement ${improvement.rootCauseId}`,
       lessonKind: 'heuristic' as LessonKind,
       proposal: { category: improvement.category, title: improvement.recommendation },
       severity: improvement.severity,
       evidenceEventIds: improvement.evidenceEventIds
-    }))
+  }));
+  const legacyFindingIds = new Set(legacyProposalFindings.map((finding) => finding.id));
+  const proposalCollisionDiagnostics = projectProposalFindings
+    .filter((finding) => legacyFindingIds.has(finding.id))
+    .map((finding) => ({ code: 'PROPOSAL_ID_COLLISION' as const, findingId: finding.id }));
+  const intelligence = createReviewProposals({
+    sessionId: artifact.session.sessionId,
+    findings: [...legacyProposalFindings, ...projectProposalFindings.filter((finding) => !legacyFindingIds.has(finding.id))]
   });
   return {
     source: input.source,
@@ -100,9 +102,9 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
     runtimeDiagnostics: run.diagnostics,
     findings: groups,
     projectImprovements: projectReview.improvements,
-    projectReviewDiagnostics,
-    candidates: [...intelligence.candidates, ...projectIntelligence.candidates],
-    proposals: [...intelligence.proposals, ...projectIntelligence.proposals]
+    projectReviewDiagnostics: [...projectReviewDiagnostics, ...proposalCollisionDiagnostics].sort(compareProjectReviewDiagnostics),
+    candidates: intelligence.candidates,
+    proposals: intelligence.proposals
   };
 }
 

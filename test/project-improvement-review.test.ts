@@ -116,3 +116,58 @@ test('does not create a project improvement or proposal from a single observatio
   assert.deepEqual(review.projectImprovements, []);
   assert.deepEqual(review.proposals, []);
 });
+
+test('withholds a colliding project proposal while retaining the legacy proposal', async () => {
+  const root = codexRoot([
+    { kind: 'tool', occurredAt: '2026-08-24T10:00:00.000Z', text: 'architecture boundary', exitStatus: 1 },
+    { kind: 'tool', occurredAt: '2026-08-24T10:01:00.000Z', text: 'architecture boundary', exitStatus: 1 }
+  ]);
+  const runtime = new ReviewRuntime({
+    profiles: [{ id: 'project', version: '1', reviewerIds: ['legacy', 'architecture'] }],
+    reviewers: [
+      {
+        id: 'legacy',
+        expensive: false,
+        async review() {
+          return [{
+            code: 'legacy',
+            findingId: 'legacy:collision',
+            rootCauseId: 'project-improvement:architecture:module-boundary',
+            recommendation: 'Keep the established workflow'
+          }];
+        }
+      },
+      {
+        id: 'architecture',
+        expensive: false,
+        async review(artifact) {
+          return artifact.session.events.map((event) => ({
+            code: 'project-improvement' as const,
+            findingId: `architecture:${event.id}`,
+            rootCauseId: 'module-boundary',
+            recommendation: 'Separate the affected module boundary',
+            category: 'architecture' as const,
+            severity: 'high' as const,
+            evidenceEventIds: [event.id]
+          }));
+        }
+      }
+    ]
+  });
+
+  const review = await runManualReview(
+    { source: 'codex', root, session: 'session.jsonl', profile: { id: 'project', version: '1' }, allowExpensiveChecks: false },
+    { runtime }
+  );
+
+  assert.equal(review.projectImprovements.length, 1);
+  assert.deepEqual(review.projectReviewDiagnostics, [{
+    code: 'PROPOSAL_ID_COLLISION',
+    findingId: 'project-improvement:architecture:module-boundary'
+  }]);
+  assert.deepEqual(review.candidates.map((candidate) => candidate.findingId), ['project-improvement:architecture:module-boundary']);
+  assert.deepEqual(review.proposals.map((proposal) => proposal.findingId), ['project-improvement:architecture:module-boundary']);
+  assert.equal(review.proposals[0]?.title, 'Keep the established workflow');
+  assert.equal(new Set(review.candidates.map((candidate) => candidate.id)).size, review.candidates.length);
+  assert.equal(new Set(review.proposals.map((proposal) => proposal.id)).size, review.proposals.length);
+});

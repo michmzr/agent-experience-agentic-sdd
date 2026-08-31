@@ -68,7 +68,9 @@ export class ReviewRuntime {
     const skippedReviewerIds = selected.filter((reviewer) => !input.allowExpensiveChecks && reviewer.expensive).map((reviewer) => reviewer.id);
     const outcomes = await Promise.all(runnable.map(async (reviewer) => {
       try {
-        return { kind: 'result' as const, reviewerId: reviewer.id, findings: await reviewer.review(input.artifact) };
+        const findings = await reviewer.review(input.artifact);
+        if (!isReviewFindingList(findings)) return { kind: 'diagnostic' as const, reviewerId: reviewer.id, code: 'REVIEWER_FAILED' as const };
+        return { kind: 'result' as const, reviewerId: reviewer.id, findings };
       } catch {
         return { kind: 'diagnostic' as const, reviewerId: reviewer.id, code: 'REVIEWER_FAILED' as const };
       }
@@ -96,4 +98,16 @@ function indexBy<T>(items: readonly T[], getKey: (item: T) => string, itemName: 
     indexed.set(key, item);
   }
   return indexed;
+}
+
+function isReviewFindingList(value: unknown): value is readonly ReviewFinding[] {
+  return Array.isArray(value) && value.every(isReviewFinding);
+}
+
+function isReviewFinding(value: unknown): value is ReviewFinding {
+  return typeof value === 'object'
+    && value !== null
+    && !Array.isArray(value)
+    && typeof (value as { readonly code?: unknown }).code === 'string'
+    && (value as { readonly code: string }).code.trim().length > 0;
 }

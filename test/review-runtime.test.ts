@@ -54,6 +54,29 @@ test('isolates a failed reviewer without exposing its error or suppressing succe
   assert.equal(JSON.stringify(result).includes('private reviewer failure'), false);
 });
 
+test('isolates malformed reviewer payloads without suppressing independent reviewers', async () => {
+  const runtime = new ReviewRuntime({
+    profiles: [{ id: 'local', version: '1', reviewerIds: ['null', 'non-array', 'null-entry', 'invalid', 'good'] }],
+    reviewers: [
+      { id: 'null', expensive: false, async review() { return null as never; } },
+      { id: 'non-array', expensive: false, async review() { return { code: 'not-an-array' } as never; } },
+      { id: 'null-entry', expensive: false, async review() { return [null] as never; } },
+      { id: 'invalid', expensive: false, async review() { return [{ code: '   ' }] as never; } },
+      delayedReviewer('good', 0)
+    ]
+  });
+
+  const result = await runtime.run({ artifact, profile: { id: 'local', version: '1' }, allowExpensiveChecks: false });
+
+  assert.deepEqual(result.results.map((entry) => entry.reviewerId), ['good']);
+  assert.deepEqual(result.diagnostics, [
+    { reviewerId: 'null', code: 'REVIEWER_FAILED' },
+    { reviewerId: 'non-array', code: 'REVIEWER_FAILED' },
+    { reviewerId: 'null-entry', code: 'REVIEWER_FAILED' },
+    { reviewerId: 'invalid', code: 'REVIEWER_FAILED' }
+  ]);
+});
+
 test('does not execute expensive reviewers without explicit permission', async () => {
   let expensiveCalls = 0;
   const runtime = new ReviewRuntime({
