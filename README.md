@@ -41,7 +41,12 @@ Capture is fail-open. A missing build or capture failure writes only a generic d
 ## Commands
 
 ```text
-ael init [--scope global|repo]
+ael init --scope global
+ael init --scope repo --hooks codex|cursor|codex,cursor
+ael list records [--repository-id <id>|--repository <git-root>] [--json]
+ael stats [--repository-id <id>|--repository <git-root>] [--json]
+ael status [--repository-id <id>|--repository <git-root>] [--json]
+ael status-global [--repository-id <id>|--repository <git-root>] [--json]
 ael experience add --input record.json
 ael validate [--scope global|repo] [--json]
 ael inspect <id>
@@ -60,6 +65,8 @@ ael knowledge promote --repository <path> --input document.json [--json]
 ```
 
 Pass `--data-dir <directory>` to every command to select a private local data directory. The default is `~/Library/Application Support/AgentExperience` on macOS and `$XDG_DATA_HOME/agent-experience` or `~/.local/share/agent-experience` on Linux. Use `--json` for deterministic structured results and diagnostics. Runtime ALLOW and WARN decisions return exit code 0. Runtime BLOCK decisions, domain failures, and storage failures return 1. Invalid command syntax returns 2.
+
+`ael init` launched in an interactive terminal presents a multi-select list for Codex and Cursor hooks. Repository initialization outside an interactive terminal requires `--scope repo --hooks`. A repeated repository initialization keeps previously required hook sources and adds the selected sources. `status` returns exit code 1 if a required hook is unavailable. `status-global` lists every registered repository and always returns a report. `--repository` must name the Git top-level directory; `--repository-id` and `--repository` cannot be combined.
 
 Explicit session IDs run without a prompt and may read an injected external artifact store. Interactive selection and `latest` require `--repository` to name a directory inside a Git repository. The command resolves its canonical Git top level and accepts only artifacts whose real paths resolve inside that same top level. The prompt exposes only session IDs and recency, then requires confirmation before reading the selected artifact. Non-Git stores and different or nested repositories cannot qualify for interactive selection.
 

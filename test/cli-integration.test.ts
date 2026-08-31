@@ -14,7 +14,7 @@ test('imports, validates, lists, inspects, retrieves, and exports a fixture', ()
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-cli-'));
   const repository = mkdtempSync(join(tmpdir(), 'ael-export-'));
   try {
-    assert.equal(runCli(['init', '--data-dir', dataDir]).exitCode, 0);
+    assert.equal(runCli(['init', '--scope', 'global', '--data-dir', dataDir]).exitCode, 0);
     assert.equal(runCli(['experience', 'add', '--input', fixture('positive-workflow.json'), '--data-dir', dataDir]).exitCode, 0);
     assert.equal(runCli(['validate', '--json', '--data-dir', dataDir]).exitCode, 0);
     assert.match(runCli(['lessons', 'list', '--json', '--data-dir', dataDir]).stdout, /knowledge-1/);
@@ -104,7 +104,7 @@ test('exposes the package bin as an executable compiled CLI', () => {
     const packageJson = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'));
     assert.equal(packageJson.bin.ael, './dist/src/cli.js');
     assert.equal(readFileSync(join(process.cwd(), packageJson.bin.ael), 'utf8').startsWith('#!/usr/bin/env node\n'), true);
-    const output = execFileSync(process.execPath, [join(process.cwd(), packageJson.bin.ael), 'init', '--data-dir', dataDir], { encoding: 'utf8' });
+    const output = execFileSync(process.execPath, [join(process.cwd(), packageJson.bin.ael), 'init', '--scope', 'global', '--data-dir', dataDir], { encoding: 'utf8' });
     assert.match(output, /^Initialized local experience store at /);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
@@ -115,8 +115,9 @@ test('runs the declared development script and an installed package bin', () => 
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-development-'));
   const packageDirectory = mkdtempSync(join(tmpdir(), 'ael-package-'));
   const installDirectory = mkdtempSync(join(tmpdir(), 'ael-install-'));
+  const repository = mkdtempSync(join(tmpdir(), 'ael-package-repository-'));
   try {
-    const developmentOutput = execFileSync('pnpm', ['run', 'ael', '--', 'init', '--data-dir', dataDir], { cwd: process.cwd(), encoding: 'utf8' });
+    const developmentOutput = execFileSync('pnpm', ['run', 'ael', '--', 'init', '--scope', 'global', '--data-dir', dataDir], { cwd: process.cwd(), encoding: 'utf8' });
     assert.match(developmentOutput, /^Initialized local experience store at /m);
 
     execFileSync('pnpm', ['pack', '--pack-destination', packageDirectory], { cwd: process.cwd(), encoding: 'utf8' });
@@ -131,17 +132,27 @@ test('runs the declared development script and an installed package bin', () => 
     const invalid = spawnSync(executable, ['invalid-command'], { encoding: 'utf8' });
     assert.equal(invalid.status, 2, `${invalid.stdout}\n${invalid.stderr}`);
     assert.match(invalid.stderr, /Unknown command/);
+    assert.equal(spawnSync('git', ['init', '--quiet'], { cwd: repository }).status, 0);
+    assert.equal(spawnSync('git', ['config', 'user.email', 'tests@example.invalid'], { cwd: repository }).status, 0);
+    assert.equal(spawnSync('git', ['config', 'user.name', 'AEL tests'], { cwd: repository }).status, 0);
+    assert.equal(spawnSync('git', ['commit', '--quiet', '--allow-empty', '-m', 'fixture'], { cwd: repository }).status, 0);
+    const initialized = spawnSync(executable, ['init', '--scope', 'repo', '--hooks', 'cursor', '--data-dir', dataDir, '--json'], { cwd: repository, encoding: 'utf8' });
+    assert.equal(initialized.status, 0, `${initialized.stdout}\n${initialized.stderr}`);
+    const status = spawnSync(executable, ['status', '--data-dir', dataDir, '--json'], { cwd: repository, encoding: 'utf8' });
+    assert.equal(status.status, 0, `${status.stdout}\n${status.stderr}`);
+    assert.match(status.stdout, /"status":"ready"/);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
     rmSync(packageDirectory, { recursive: true, force: true });
     rmSync(installDirectory, { recursive: true, force: true });
+    rmSync(repository, { recursive: true, force: true });
   }
 });
 
 test('renders deterministic command-specific human success output', () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-human-'));
   try {
-    assert.match(runCli(['init', '--data-dir', dataDir]).stdout, /^Initialized local experience store at /);
+    assert.match(runCli(['init', '--scope', 'global', '--data-dir', dataDir]).stdout, /^Initialized local experience store at /);
     assert.equal(runCli(['experience', 'add', '--input', fixture('positive-workflow.json'), '--data-dir', dataDir]).stdout, 'Imported 1 knowledge entry.\n');
     assert.equal(runCli(['validate', '--data-dir', dataDir]).stdout, 'Validation passed.\n');
     assert.equal(runCli(['inspect', 'knowledge-1', '--data-dir', dataDir]).stdout, 'knowledge-1 [verified]\nUse the reviewed workflow for safety-sensitive changes.\nEvidence: evidence-1\n');

@@ -12,11 +12,14 @@ import { discoverReviewSessions, runManualReview, type ManualReviewDependencies 
 import { createProcessTerminalHost, TerminalReviewSelectionPrompt, type TerminalHost } from './review/terminal-prompt.js';
 import { verifyHookReadiness } from './cli/hook-readiness.js';
 import { resolveRepository, resolveRepositoryRoot } from './repository/local-repository.js';
-import { installHooks, parseHookSelection, verifyInstalledHooks } from './cli/hook-installation.js';
+import { installHooks, parseHookSelection, TerminalHookSelectionPrompt, type HookSelectionPrompt, verifyInstalledHooks } from './cli/hook-installation.js';
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string; }
 export interface RunCliAsyncOptions {
   readonly terminal?: TerminalHost;
+  readonly hookSelectionPrompt?: HookSelectionPrompt;
+  readonly workingDirectory?: string;
+  readonly cliEntrypoint?: string;
   readonly reviewDependencies?: ManualReviewDependencies;
   readonly hookInput?: string;
   readonly now?: () => string;
@@ -29,13 +32,13 @@ const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'v
 const reviewSources = new Set(['codex', 'claude-code', 'cursor'] as const);
 const knownCommands = new Set(['init', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks']);
 
-export function runCli(args: string[]): CliResult {
+export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint'> = {}): CliResult {
   if (args.length === 1 && args[0] === '--help') return { exitCode: 0, stdout: `${usage()}\n`, stderr: '' };
   try {
     const parsed = parseArguments(args);
     const json = parsed.options.has('json');
     const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
-    return success(execute(service, parsed), json, parsed.positionals);
+    return success(execute(service, parsed, options), json, parsed.positionals);
   } catch (error) {
     const syntax = error instanceof SyntaxError;
     const diagnostic = toDiagnostic(error, syntax ? 'INVALID_SYNTAX' : 'STORAGE_ERROR');
@@ -47,7 +50,13 @@ export function runCli(args: string[]): CliResult {
 
 export async function runCliAsync(args: string[], options: RunCliAsyncOptions = {}): Promise<CliResult> {
   if (isCaptureHookCommand(args)) return runCaptureHookCli(args, options);
-  if (args[0] !== 'review') return runCli(args);
+  if (args[0] === 'init' && !args.includes('--hooks') && !args.includes('--scope')) {
+    const terminal = options.terminal ?? (process.stdin.isTTY ? createProcessTerminalHost() : undefined);
+    if (terminal === undefined) return runCli(args, options);
+    const sources = await (options.hookSelectionPrompt ?? new TerminalHookSelectionPrompt(terminal)).choose();
+    return runCli([...args, '--scope', 'repo', '--hooks', sources.join(',')], options);
+  }
+  if (args[0] !== 'review') return runCli(args, options);
   try {
     const parsed = parseArguments(args); const json = parsed.options.has('json');
     const request = parseReviewRequest(parsed);
@@ -115,15 +124,20 @@ async function readBoundedStdin(): Promise<{ readonly input: string; readonly ov
   return { input: Buffer.concat(chunks).toString('utf8'), oversized: false };
 }
 
-function execute(service: ExperienceService, parsed: ParsedArguments): unknown {
+function execute(service: ExperienceService, parsed: ParsedArguments, options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint'>): unknown {
   const [command, subcommand, ...rest] = parsed.positionals;
   if (command === 'init' && subcommand === undefined && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'scope', 'hooks']);
-    if (optionalScope(parsed.options) !== 'repository') return service.init();
+    const scope = optionalScope(parsed.options);
+    if (scope === undefined) throw new SyntaxError('Initialization requires --scope global or --scope repo.');
+    if (scope === 'global') {
+      if (parsed.options.has('hooks')) throw new SyntaxError('--hooks may be used only with --scope repo.');
+      return service.init();
+    }
     const sources = parseHookSelection(requiredString(parsed.options, 'hooks'));
-    const repository = resolveRepositoryRoot(process.cwd());
+    const repository = resolveRepositoryRoot(options.workingDirectory ?? process.cwd());
     if (!repository) throw new DomainError('REPOSITORY_ROOT_REQUIRED', 'Repository initialization requires a Git top-level directory.');
-    const entrypoint = fileURLToPath(import.meta.url);
+    const entrypoint = options.cliEntrypoint ?? fileURLToPath(import.meta.url);
     installHooks({ repositoryRoot: repository.root, sources, cliEntrypoint: entrypoint });
     const verified = verifyInstalledHooks({ repositoryRoot: repository.root, sources, cliEntrypoint: entrypoint });
     if (verified.status !== 'ready') throw new DomainError('HOOKS_NOT_READY', 'Selected hooks could not be verified.');
@@ -154,16 +168,16 @@ function execute(service: ExperienceService, parsed: ParsedArguments): unknown {
     return service.export(filterOptions(parsed.options));
   }
   if (command === 'list' && subcommand === 'records' && rest.length === 0) {
-    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.listRecords(repositoryId(parsed.options));
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.listRecords(repositoryId(parsed.options, options.workingDirectory));
   }
   if (command === 'stats' && subcommand === undefined && rest.length === 0) {
-    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.stats(repositoryId(parsed.options));
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.stats(repositoryId(parsed.options, options.workingDirectory));
   }
   if (command === 'status-global' && subcommand === undefined && rest.length === 0) {
-    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.statusGlobal(optionalRepositoryId(parsed.options));
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.statusGlobal(optionalRepositoryId(parsed.options)?.id);
   }
   if (command === 'status' && subcommand === undefined && rest.length === 0) {
-    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.status(repositoryId(parsed.options));
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.status(repositorySelection(parsed.options, options.workingDirectory));
   }
   if (command === 'runtime' && subcommand === 'evaluate' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'input', 'json', 'profile', 'refresh']);
@@ -270,20 +284,23 @@ function optionalState(options: Map<string, string | true>): KnowledgeState | un
 function filterOptions(options: Map<string, string | true>) {
   return { scope: optionalScope(options), repositoryId: optionalString(options, 'repository-id'), state: optionalState(options), tag: optionalString(options, 'tag') };
 }
-function optionalRepositoryId(options: Map<string, string | true>): string | undefined {
+function optionalRepositoryId(options: Map<string, string | true>): { readonly id: string; readonly root?: string } | undefined {
   const explicit = optionalString(options, 'repository-id'); const path = optionalString(options, 'repository');
   if (explicit !== undefined && path !== undefined) throw new SyntaxError('Repository id and repository path cannot be combined.');
-  if (path === undefined) return explicit;
+  if (path === undefined) return explicit === undefined ? undefined : { id: explicit };
   const repository = resolveRepositoryRoot(path);
   if (repository === undefined) throw new DomainError('REPOSITORY_ROOT_REQUIRED', 'Repository path must be a Git top-level directory.');
-  return repository.id;
+  return repository;
 }
-function repositoryId(options: Map<string, string | true>): string {
+function repositorySelection(options: Map<string, string | true>, workingDirectory?: string): { readonly id: string; readonly root?: string } {
   const selected = optionalRepositoryId(options);
   if (selected !== undefined) return selected;
-  const repository = resolveRepository(process.cwd());
+  const repository = resolveRepository(workingDirectory ?? process.cwd());
   if (repository === undefined) throw new DomainError('REPOSITORY_REQUIRED', 'A Git repository is required.');
-  return repository.id;
+  return repository;
+}
+function repositoryId(options: Map<string, string | true>, workingDirectory?: string): string {
+  return repositorySelection(options, workingDirectory).id;
 }
 function success(value: unknown, json: boolean, positionals: readonly string[]): CliResult {
   const exitCode = (positionals[0] === 'runtime' && positionals[1] === 'evaluate' && (value as { outcome?: string }).outcome === 'BLOCK')
@@ -299,9 +316,12 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
   if (command === 'inspect') return formatKnowledge(value as KnowledgeRecord, true);
   if (command === 'lessons' || command === 'retrieve') return formatKnowledgeList(value as KnowledgeRecord[]);
   if (command === 'list' && subcommand === 'records') return formatRecords(value as Array<{ session: { id: string; source: string; startedAt: string; endedAt?: string }; events: Array<{ phase: string; occurredAt: string; summary: string; outcome?: string }> }>);
-  if (command === 'stats') { const stats = value as { sessions: number; events: number; knowledge: number }; return `Sessions: ${stats.sessions}\nEvents: ${stats.events}\nKnowledge: ${stats.knowledge}`; }
-  if (command === 'status') { const status = value as { status: string; repositoryId: string; sources: Array<{ source: string; status: string }> }; return `Repository ${status.repositoryId}: ${status.status}\n${status.sources.map((source) => `${source.source}: ${source.status}`).join('\n')}`; }
-  if (command === 'status-global') { const status = value as { repositories: Array<{ id: string; status: string }> }; return status.repositories.length ? status.repositories.map((repository) => `${repository.id}: ${repository.status}`).join('\n') : 'No registered repositories.'; }
+  if (command === 'stats') return formatStatistics(value as { sessions: number; events: number; knowledge: number; firstRecordedAt?: string; lastRecordedAt?: string; sources: Record<string, number>; phases: Record<string, number> });
+  if (command === 'status') return formatRepositoryStatus(value as { status: string; repository: { id: string; root?: string }; selectedSources: readonly string[]; cli: { entrypoint: string; available: boolean }; database: { path: string; available: boolean }; sources: readonly { source: string; status: string; code?: string }[] });
+  if (command === 'status-global') {
+    const status = value as { status: string; database: { path: string; available: boolean }; cli: { entrypoint: string; available: boolean }; repositories: Array<{ status: string; repository: { id: string; root?: string }; selectedSources: readonly string[]; sources: readonly { source: string; status: string; code?: string }[] }> };
+    return [`AEL: ${status.status}`, `CLI: ${status.cli.available ? 'available' : 'unavailable'} (${status.cli.entrypoint})`, `Database: ${status.database.available ? 'available' : 'unavailable'} (${status.database.path})`, status.repositories.length ? status.repositories.map((repository) => formatRepositoryStatus(repository)).join('\n\n') : 'No registered repositories.'].join('\n');
+  }
   if (command === 'export') {
     const knowledge = (value as { knowledge: KnowledgeRecord[] }).knowledge;
     return `Exported ${countLabel(knowledge.length, 'knowledge entry')}.${knowledge.length ? `\n${formatKnowledgeList(knowledge)}` : ''}`;
@@ -339,6 +359,27 @@ interface KnowledgeRecord { readonly id: string; readonly state: string; readonl
 function formatRecords(records: readonly { session: { id: string; source: string; startedAt: string; endedAt?: string }; events: readonly { phase: string; occurredAt: string; summary: string; outcome?: string }[] }[]): string {
   return records.length ? records.map(({ session, events }) => [`${session.id} [${session.source}]`, `Started: ${session.startedAt}`, ...(session.endedAt ? [`Ended: ${session.endedAt}`] : []), ...events.map((event) => `  ${event.occurredAt} ${event.phase}: ${event.summary}${event.outcome ? ` (${event.outcome})` : ''}`)].join('\n')).join('\n\n') : 'No records found.';
 }
+function formatStatistics(stats: { sessions: number; events: number; knowledge: number; firstRecordedAt?: string; lastRecordedAt?: string; sources: Record<string, number>; phases: Record<string, number> }): string {
+  return [
+    `Sessions: ${stats.sessions}`,
+    `Events: ${stats.events}`,
+    `Knowledge: ${stats.knowledge}`,
+    ...(stats.firstRecordedAt ? [`First recorded: ${stats.firstRecordedAt}`] : []),
+    ...(stats.lastRecordedAt ? [`Last recorded: ${stats.lastRecordedAt}`] : []),
+    `Sources: ${Object.entries(stats.sources).map(([source, count]) => `${source}=${count}`).join(', ')}`,
+    `Phases: ${Object.entries(stats.phases).map(([phase, count]) => `${phase}=${count}`).join(', ')}`
+  ].join('\n');
+}
+function formatRepositoryStatus(status: { status: string; repository: { id: string; root?: string }; selectedSources: readonly string[]; cli?: { entrypoint: string; available: boolean }; database?: { path: string; available: boolean }; sources: readonly { source: string; status: string; code?: string }[] }): string {
+  return [
+    `Repository ${status.repository.id}: ${status.status}`,
+    ...(status.repository.root ? [`Root: ${status.repository.root}`] : []),
+    `Required hooks: ${status.selectedSources.length ? status.selectedSources.join(', ') : 'none'}`,
+    ...(status.cli ? [`CLI: ${status.cli.available ? 'available' : 'unavailable'} (${status.cli.entrypoint})`] : []),
+    ...(status.database ? [`Database: ${status.database.available ? 'available' : 'unavailable'} (${status.database.path})`] : []),
+    ...status.sources.map((source) => `${source.source}: ${source.status}${source.code ? ` (${source.code})` : ''}`)
+  ].join('\n');
+}
 function formatKnowledgeList(entries: readonly KnowledgeRecord[]): string { return entries.length ? entries.map((entry) => formatKnowledge(entry, false)).join('\n') : 'No knowledge entries found.'; }
 function formatKnowledge(entry: KnowledgeRecord, includeEvidence: boolean): string { return `${entry.id} [${entry.state}]${entry.authoritative ? ' [authoritative]' : ''}\n${entry.statement}${includeEvidence ? `\nEvidence: ${entry.evidenceIds.join(', ')}` : ''}`; }
 function countLabel(count: number, singular: string): string { return `${count} ${count === 1 ? singular : `${singular}s`}`; }
@@ -370,7 +411,7 @@ function invalidCommand(command: string | undefined): SyntaxError {
     ? `Unknown command form for ${command}.`
     : 'Unknown command.');
 }
-function usage(): string { return 'Usage: ael <init|experience add|validate|inspect|lessons list|retrieve|export|capture hook --source codex|cursor|hooks verify --worktree path|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote> [options]'; }
+function usage(): string { return 'Usage: ael <init --scope global|repo [--hooks codex,cursor]|list records|stats|status|status-global|experience add|validate|inspect|lessons list|retrieve|export|capture hook --source codex|cursor|hooks verify --worktree path|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote> [options]'; }
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } {
   return error instanceof DomainError || error instanceof RuntimeServiceError
     ? { code: error.code, message: error.message }

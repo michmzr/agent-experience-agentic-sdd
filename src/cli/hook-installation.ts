@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import type { TerminalHost } from '../review/terminal-prompt.js';
 
 export type HookSource = 'codex' | 'cursor';
 export interface HookSelectionPrompt { choose(): Promise<readonly HookSource[]>; }
@@ -8,6 +9,16 @@ export type HookInstallationStatus =
   | { readonly status: 'not-ready'; readonly sources: readonly { readonly source: HookSource; readonly status: 'unavailable'; readonly code: string }[] };
 
 const sources: readonly HookSource[] = ['codex', 'cursor'];
+
+export class TerminalHookSelectionPrompt implements HookSelectionPrompt {
+  constructor(private readonly terminal: TerminalHost) {}
+
+  async choose(): Promise<readonly HookSource[]> {
+    this.terminal.write('Select hooks to install (comma-separated):\n1. Codex\n2. Cursor\n');
+    const answer = await this.terminal.readLine('Select one or more numbers: ');
+    return parseHookSelection(answer.split(',').map((value) => value.trim() === '1' ? 'codex' : value.trim() === '2' ? 'cursor' : value.trim()).join(','));
+  }
+}
 
 export function parseHookSelection(value: string): readonly HookSource[] {
   const selected = value.split(',').map((source) => source.trim()).filter(Boolean);
@@ -35,8 +46,8 @@ export function verifyInstalledHooks(input: { repositoryRoot: string; sources: r
   const wrapperPath = join(input.repositoryRoot, '.agents', 'hooks', 'ael-passive-capture.sh');
   const unavailable = selected.flatMap((source) => {
     const path = configurationPath(input.repositoryRoot, source);
-    const config = readConfiguration(path);
-    const valid = existsSync(input.cliEntrypoint) && existsSync(wrapperPath) && (statSync(wrapperPath).mode & 0o111) !== 0 && includesAelHook(config, source);
+    const configuration = readConfigurationForVerification(path);
+    const valid = configuration !== undefined && existsSync(input.cliEntrypoint) && executable(wrapperPath) && includesAelHook(configuration, source, wrapperPath);
     return valid ? [] : [{ source, status: 'unavailable' as const, code: 'HOOK_UNAVAILABLE' }];
   });
   return unavailable.length ? { status: 'not-ready', sources: unavailable } : { status: 'ready', sources: selected.map((source) => ({ source, status: 'ready' as const })) };
@@ -55,12 +66,38 @@ function readConfiguration(path: string): Record<string, unknown> {
     return value as Record<string, unknown>;
   } catch { throw new SyntaxError(`Hook configuration is not valid JSON: ${path}.`); }
 }
+function readConfigurationForVerification(path: string): Record<string, unknown> | undefined {
+  try { return readConfiguration(path); } catch { return undefined; }
+}
 function merge(current: Record<string, unknown>, source: HookSource, root: string): Record<string, unknown> {
   const hooks = typeof current.hooks === 'object' && current.hooks !== null && !Array.isArray(current.hooks) ? current.hooks as Record<string, unknown> : {};
   const command = source === 'codex' ? `"${join(root, '.agents/hooks/ael-passive-capture.sh')}" codex` : '.agents/hooks/ael-passive-capture.sh cursor';
   const names = source === 'codex' ? ['SessionStart', 'SessionEnd', 'PreToolUse', 'PostToolUse'] : ['sessionStart', 'sessionEnd', 'preToolUse', 'postToolUse'];
   return { ...current, ...(source === 'cursor' ? { version: 1 } : {}), hooks: { ...hooks, ...Object.fromEntries(names.map((name) => [name, source === 'codex' ? [{ hooks: [{ type: 'command', command }] }] : [{ command }]])) } };
 }
-function includesAelHook(config: Record<string, unknown>, source: HookSource): boolean { return JSON.stringify(config).includes(source === 'codex' ? 'ael-passive-capture.sh" codex' : 'ael-passive-capture.sh cursor'); }
+function includesAelHook(config: Record<string, unknown>, source: HookSource, wrapperPath: string): boolean {
+  const expected = source === 'codex' ? `"${wrapperPath}" codex` : '.agents/hooks/ael-passive-capture.sh cursor';
+  return strings(config).includes(expected);
+}
+function strings(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value)) return value.flatMap(strings);
+  if (value && typeof value === 'object') return Object.values(value).flatMap(strings);
+  return [];
+}
+function executable(path: string): boolean {
+  try { return existsSync(path) && (statSync(path).mode & 0o111) !== 0; } catch { return false; }
+}
 function writeAtomic(path: string, content: string, mode: number): void { const temporary = `${path}.ael-tmp`; writeFileSync(temporary, content, { mode }); chmodSync(temporary, mode); renameSync(temporary, path); }
-function wrapper(cliEntrypoint: string): string { return `#!/bin/sh\nrepository_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0\nnode "${cliEntrypoint}" capture hook --source "$1" || { printf '%s\\n' 'AEL_CAPTURE_UNAVAILABLE: Passive capture skipped.' >&2; exit 0; }\n`; }
+function wrapper(cliEntrypoint: string): string {
+  return [
+    '#!/bin/sh', '', 'source_name="$1"', 'repository_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0', `cli="${cliEntrypoint}"`, '',
+    'if [ ! -f "$cli" ]; then', "  printf '%s\\n' 'AEL_CAPTURE_UNAVAILABLE: Passive capture skipped.' >&2", '  exit 0', 'fi', '',
+    'node_is_compatible() {', `  "$1" -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 17) ? 0 : 1)' >/dev/null 2>&1`, '}', '',
+    'node_command=$(command -v node 2>/dev/null || true)', 'if [ -n "$node_command" ] && ! node_is_compatible "$node_command"; then', '  node_command=', 'fi', 'if [ -z "$node_command" ]; then', '  for candidate in \\',
+    '    "${NVM_BIN:-}/node" \\', '    "${VOLTA_HOME:-}/bin/node" \\', '    "${HOME:-}/.knode/bin/node" \\', '    "${HOME:-}/.volta/bin/node" \\', '    "/opt/homebrew/bin/node" \\', '    "/usr/local/bin/node"',
+    '  do', '    if [ -x "$candidate" ] && node_is_compatible "$candidate"; then', '      node_command="$candidate"', '      break', '    fi', '  done', 'fi',
+    'if [ -z "$node_command" ]; then', "  printf '%s\\n' 'AEL_CAPTURE_UNAVAILABLE: Passive capture skipped.' >&2", '  exit 0', 'fi', '',
+    '"$node_command" "$cli" capture hook --source "$source_name" || {', "  printf '%s\\n' 'AEL_CAPTURE_UNAVAILABLE: Passive capture skipped.' >&2", '  exit 0', '}', '', 'exit 0', ''
+  ].join('\n');
+}

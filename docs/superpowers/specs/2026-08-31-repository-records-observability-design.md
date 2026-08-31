@@ -10,7 +10,7 @@ This increment adds read-only CLI commands for inspecting raw captured records, 
 
 ## Decision
 
-AEL will keep a private local registry of repositories with at least one installed and statically verified AEL hook, or that have written passive-capture data. Each entry records the canonical Git top-level path and uses that same path as the repository identifier. The registry gives `status-global` a bounded and truthful source for previously configured repositories without scanning user directories.
+AEL will keep a private local registry of repositories with at least one installed and statically verified AEL hook, or that have written passive-capture data. Each entry records the canonical Git top-level path and derives a stable SHA-256 repository identifier from it. The registry gives `status-global` a bounded and truthful source for previously configured repositories without scanning user directories.
 
 Existing imported records with a repository identifier but no registry entry remain visible through an explicit `--repository-id` filter. Their location is unavailable until the repository is registered by repository-scope `ael init` or a future passive capture from that repository.
 

@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import { verifyInstalledHooks } from '../cli/hook-installation.js';
+import { resolveRepositoryRoot } from '../repository/local-repository.js';
 
 import { ingestPassiveHook, type HookIngressResult } from '../capture/hook-ingress.js';
 import type { PassiveHookSource } from '../capture/hook-adapters/contracts.js';
@@ -99,27 +100,40 @@ export class ExperienceService {
   listRecords(repositoryId: string) { const store = this.openStore(); try { return store.listRepositoryRecords(repositoryId); } finally { store.close(); } }
   stats(repositoryId: string) { const store = this.openStore(); try { return store.repositoryStats(repositoryId); } finally { store.close(); } }
   statusGlobal(repositoryId?: string) {
+    const entrypoint = fileURLToPath(new URL('../cli.js', import.meta.url));
+    const database = { path: this.databasePath, available: existsSync(this.databasePath) };
+    if (!database.available) return { status: 'not-ready' as const, database, cli: { entrypoint, available: existsSync(entrypoint) }, repositories: [] };
     const store = this.openStore();
     try {
-      const entrypoint = fileURLToPath(new URL('../cli.js', import.meta.url));
-      const repositories = store.listRepositories().filter(({ id }) => repositoryId === undefined || id === repositoryId).map((repository) => {
-        const selectedSources = repository.selectedSources ?? [];
-        const hooks = selectedSources.length ? verifyInstalledHooks({ repositoryRoot: repository.root, sources: selectedSources, cliEntrypoint: entrypoint }) : { status: 'not-ready' as const, sources: [] };
-        return { ...repository, status: hooks.status, sources: hooks.sources };
-      });
-      return { status: 'ready' as const, databasePath: this.databasePath, cli: { entrypoint, available: existsSync(entrypoint) }, repositories };
+      const repositories = store.listRepositories()
+        .filter(({ id }) => repositoryId === undefined || id === repositoryId)
+        .map((repository) => this.repositoryStatus(repository, entrypoint));
+      return { status: 'ready' as const, database, cli: { entrypoint, available: existsSync(entrypoint) }, repositories };
     } finally { store.close(); }
   }
-  status(repositoryId: string) {
+  status(input: { id: string; root?: string }) {
+    const entrypoint = fileURLToPath(new URL('../cli.js', import.meta.url));
+    const database = { path: this.databasePath, available: existsSync(this.databasePath) };
+    if (!database.available) return this.repositoryStatus({ id: input.id, root: input.root, observedAt: '', selectedSources: [] }, entrypoint, database);
     const store = this.openStore();
     try {
-      const repository = store.listRepositories().find(({ id }) => id === repositoryId);
-      const entrypoint = fileURLToPath(new URL('../cli.js', import.meta.url));
-      const selectedSources = repository?.selectedSources ?? [];
-      if (!repository || selectedSources.length === 0) return { status: 'not-ready' as const, repositoryId, cli: { entrypoint, available: existsSync(entrypoint) }, sources: [] };
-      const hooks = verifyInstalledHooks({ repositoryRoot: repository.root, sources: selectedSources, cliEntrypoint: entrypoint });
-      return { status: hooks.status, repositoryId, cli: { entrypoint, available: existsSync(entrypoint) }, sources: hooks.sources };
+      const registered = store.listRepositories().find(({ id }) => id === input.id);
+      return this.repositoryStatus(registered ?? { id: input.id, root: input.root, observedAt: '', selectedSources: [] }, entrypoint, database);
     } finally { store.close(); }
+  }
+
+  private repositoryStatus(repository: { id: string; root?: string; observedAt: string; selectedSources?: readonly ('codex' | 'cursor')[] }, entrypoint: string, database = { path: this.databasePath, available: existsSync(this.databasePath) }) {
+    const selectedSources = repository.selectedSources ?? [];
+    const cli = { entrypoint, available: existsSync(entrypoint) };
+    const root = repository.root;
+    if (!root || !resolveRepositoryRoot(root) || !database.available || !selectedSources.length) {
+      return {
+        status: 'not-ready' as const, repository: { id: repository.id, ...(root === undefined ? {} : { root }) }, selectedSources,
+        cli, database, sources: selectedSources.map((source) => ({ source, status: 'unavailable' as const, code: root ? 'HOOK_UNAVAILABLE' : 'REPOSITORY_UNAVAILABLE' }))
+      };
+    }
+    const hooks = verifyInstalledHooks({ repositoryRoot: root, sources: selectedSources, cliEntrypoint: entrypoint });
+    return { status: hooks.status, repository: { id: repository.id, root }, selectedSources, cli, database, sources: hooks.sources };
   }
 
   runtimeEvaluate(inputPath: string, profileId?: BuiltInRuntimeProfileId, refresh = false): PublicGateDecision {
