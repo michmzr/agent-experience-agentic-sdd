@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved on 2026-08-31.
+Approved with initialization amendments on 2026-08-31.
 
 ## Scope
 
@@ -10,9 +10,9 @@ This increment adds read-only CLI commands for inspecting raw captured records, 
 
 ## Decision
 
-AEL will keep a private local registry of repositories that have been initialized for repository scope or have written passive-capture data. Each entry records the canonical Git top-level path and uses that same path as the repository identifier. The registry gives `status-global` a bounded and truthful source for previously configured repositories without scanning user directories.
+AEL will keep a private local registry of repositories with at least one installed and statically verified AEL hook, or that have written passive-capture data. Each entry records the canonical Git top-level path and uses that same path as the repository identifier. The registry gives `status-global` a bounded and truthful source for previously configured repositories without scanning user directories.
 
-Existing imported records with a repository identifier but no registry entry remain visible through an explicit `--repository-id` filter. Their location is unavailable until the repository is registered by `ael init --scope repo` or a future passive capture from that repository.
+Existing imported records with a repository identifier but no registry entry remain visible through an explicit `--repository-id` filter. Their location is unavailable until the repository is registered by repository-scope `ael init` or a future passive capture from that repository.
 
 ## Command contract
 
@@ -21,6 +21,7 @@ ael list records [--repository-id <id>] [--json]
 ael stats [--repository-id <id>] [--json]
 ael status [--repository-id <id>] [--json]
 ael status-global [--repository-id <id>] [--json]
+ael init [--scope global|repo] [--hooks codex,cursor] [--json]
 ```
 
 For `list records`, `stats`, and `status`, an explicit `--repository-id` has precedence. Without it, the command resolves the canonical Git top level of the current working directory and uses that path as the repository identifier. A non-Git working directory without an explicit identifier returns a typed repository-required diagnostic.
@@ -37,13 +38,19 @@ All commands preserve the existing `--data-dir` and `--json` behavior. Human-rea
 
 ## Repository registration and capture
 
-`ael init --scope repo` resolves the current Git top level and writes or refreshes its registry entry. A global initialization continues to initialize only the selected local data store.
+Repository initialization requires one or more installed AEL hooks. In an interactive terminal, `ael init` resolves the current Git top level and presents a keyboard-operable multi-select list with `Codex` and `Cursor`. The user selects one or both hook targets and confirms the selection. AEL installs only the selected integration files and does not remove an existing unselected integration.
+
+Outside an interactive terminal, repository initialization requires `--hooks codex`, `--hooks cursor`, or `--hooks codex,cursor`. Omitting the option is a syntax error. An empty hook selection is invalid in every mode.
+
+Installation creates or updates the selected agent hook configuration and the shared executable wrapper. It preserves unrelated entries in existing JSON hook files and fails before mutation if that JSON cannot be safely parsed or merged. The wrapper is generated from a packaged template, invokes the effective AEL CLI entrypoint determined at initialization, resolves the Git top level, and retains the current Node-version fallback and fail-open behavior.
+
+After writing files, `ael init` runs static verification for every selected hook: configuration registration, wrapper presence and executability, and reachable CLI entrypoint. It reports a typed failure and does not register the repository when any selected hook cannot be verified. A successful repository initialization writes or refreshes the registry entry. Global initialization continues to initialize only the selected local data store and cannot install project hooks.
 
 Passive-hook ingestion resolves the repository root supplied by the project wrapper and records it on newly created sessions. The wrapper already resolves the Git top level before invoking the CLI. The capture path must remain fail-open and preserve its current bounded, generic diagnostics. A repository-resolution failure must not make a hook block or warn the agent.
 
 ## Status reporting
 
-`status` reports the canonical repository root and identifier, the effective AEL CLI entrypoint, the selected private database path and availability, and static status for Codex and Cursor hook configuration. Each hook result states whether its configuration file, shared wrapper, and built project CLI exist. Status inspection must not execute a hook or write an event.
+`status` reports the canonical repository root and identifier, the effective AEL CLI entrypoint, the selected private database path and availability, and static status for Codex and Cursor hook configuration. Each hook result states whether its configuration file, shared wrapper, and generated CLI entrypoint exist. Status inspection must not execute a hook or write an event.
 
 `status-global` reports the same CLI and database facts once, then reports every registry entry with its canonical path, repository identifier, last observed time, and static Codex and Cursor hook status. It reads only registered paths. Missing, moved, or no-longer-Git directories are reported as unavailable rather than removed from the registry.
 
@@ -57,8 +64,8 @@ Repository resolution errors, malformed explicit identifiers, unknown registry e
 
 ## Verification
 
-Tests will cover explicit and current-directory repository selection, precedence of the explicit filter, registry creation by repository initialization and passive capture, raw-record ordering and redaction-safe formatting, aggregate counts and date bounds, empty results, static Codex and Cursor hook statuses, moved repositories, global status filtering, JSON determinism, and unchanged fail-open hook behavior.
+Tests will cover the interactive multi-select flow, required non-interactive `--hooks` selection, invalid empty selection, safe configuration merge, rejection of malformed existing configuration, static post-install verification, registry creation only after verified installation or passive capture, explicit and current-directory repository selection, precedence of the explicit filter, raw-record ordering and redaction-safe formatting, aggregate counts and date bounds, empty results, static Codex and Cursor hook statuses, moved repositories, global status filtering, JSON determinism, and unchanged fail-open hook behavior.
 
 ## Out of scope
 
-Recursive scanning of the filesystem, probing other package managers for installations, executing hooks during status checks, remote synchronization, and changing the capture privacy model are outside this increment.
+Recursive scanning of the filesystem, probing other package managers for installations, executing hooks during status checks, automatic removal of unselected hooks, remote synchronization, and changing the capture privacy model are outside this increment.
