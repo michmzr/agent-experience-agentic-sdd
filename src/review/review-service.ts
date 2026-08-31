@@ -37,7 +37,7 @@ export interface ManualReviewDependencies {
 }
 
 export interface ReviewServiceDiagnostic {
-  readonly code: 'PROPOSAL_ID_COLLISION' | 'PROJECT_REVIEWER_INVALID' | 'REVIEWER_RESULT_INVALID';
+  readonly code: 'DUPLICATE_REVIEWER_FINDING_ID' | 'PROPOSAL_ID_COLLISION' | 'PROJECT_REVIEWER_INVALID' | 'REVIEWER_RESULT_INVALID';
   readonly findingId?: string;
   readonly reviewerId?: string;
 }
@@ -59,14 +59,16 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
   const runtime = dependencies.runtime ?? createDefaultReviewRuntime();
   const run = await runtime.run({ artifact, profile: input.profile ?? defaultReviewProfile, allowExpensiveChecks: input.allowExpensiveChecks });
   const knownEventIds = new Set(artifact.session.events.map((event) => event.id));
-  const projectReviewerReviews = run.results.map((result) => validateProjectReviewerFindings(result.reviewerId, result.findings, knownEventIds));
-  const projectFindings = projectReviewerReviews.flatMap((review) => review.findings);
+  const duplicateReviewerIds = crossReviewerDuplicateReviewerIds(run.results);
+  const reviewerReviews = run.results.map((result) => duplicateReviewerIds.has(result.reviewerId)
+    ? invalidReviewerResult(result.reviewerId, 'DUPLICATE_REVIEWER_FINDING_ID')
+    : validateReviewerResult(result.reviewerId, result.findings, knownEventIds));
+  const projectFindings = reviewerReviews.flatMap((review) => review.projectFindings);
   const projectReview = consolidateProjectReviewFindings(
     projectFindings,
     knownEventIds
   );
-  const legacyReviewerReviews = run.results.map((result) => validateLegacyReviewerFindings(result.reviewerId, result.findings));
-  const findings = legacyReviewerReviews.flatMap((review) => review.findings);
+  const findings = reviewerReviews.flatMap((review) => review.legacyFindings);
   const groups = groupReviewFindings(findings);
   const legacyProposalFindings: readonly ReviewFindingForProposal[] = groups.map((group) => ({
     id: group.rootCauseId,
@@ -88,8 +90,7 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
     .filter((finding) => legacyFindingIds.has(finding.id))
     .map((finding) => ({ code: 'PROPOSAL_ID_COLLISION' as const, findingId: finding.id }));
   const serviceDiagnostics: readonly ReviewServiceDiagnostic[] = [
-    ...projectReviewerReviews.flatMap((review) => review.diagnostic ? [review.diagnostic] : []),
-    ...legacyReviewerReviews.flatMap((review) => review.diagnostic ? [review.diagnostic] : []),
+    ...reviewerReviews.flatMap((review) => review.diagnostic ? [review.diagnostic] : []),
     ...collisionDiagnostics
   ].sort(compareServiceDiagnostics);
   const intelligence = createReviewProposals({
@@ -161,45 +162,70 @@ function recommendation(value: { readonly state: 'agreed'; readonly value: strin
   return value.state === 'agreed' ? value.value : value.values.join(' | ');
 }
 
-function validateProjectReviewerFindings(
+interface ValidatedReviewerResult {
+  readonly reviewerId: string;
+  readonly projectFindings: readonly ProjectReviewFinding[];
+  readonly legacyFindings: readonly OrchestratorFinding[];
+  readonly diagnostic?: ReviewServiceDiagnostic;
+}
+
+type ReviewerResultDiagnosticCode = Exclude<ReviewServiceDiagnostic['code'], 'PROPOSAL_ID_COLLISION'>;
+
+function validateReviewerResult(
   reviewerId: string,
   findings: readonly unknown[],
   knownEventIds: ReadonlySet<string>
-): { readonly findings: readonly ProjectReviewFinding[]; readonly diagnostic?: ReviewServiceDiagnostic } {
-  const projectFindings = findings.filter(isProjectOutput);
-  if (projectFindings.length === 0) return { findings: [] };
+): ValidatedReviewerResult {
+  const projectFindingIds = new Set<string>();
 
-  const findingIds = new Set<string>();
-  const validFindings: ProjectReviewFinding[] = [];
-  for (const finding of projectFindings) {
-    if (!isProjectReviewFinding(finding)
-      || finding.evidenceEventIds.some((eventId) => !knownEventIds.has(eventId))
-      || findingIds.has(finding.findingId)) {
-      return { findings: [], diagnostic: { code: 'PROJECT_REVIEWER_INVALID', reviewerId } };
+  for (const finding of findings) {
+    if (isProjectOutput(finding)) {
+      if (!isProjectReviewFinding(finding)
+        || finding.evidenceEventIds.some((eventId) => !knownEventIds.has(eventId))
+        || projectFindingIds.has(finding.findingId)) {
+        return invalidReviewerResult(reviewerId, 'PROJECT_REVIEWER_INVALID');
+      }
+      projectFindingIds.add(finding.findingId);
+      continue;
     }
-    findingIds.add(finding.findingId);
-    validFindings.push(finding);
+    if (!isLegacyFinding(finding)) return invalidReviewerResult(reviewerId, 'REVIEWER_RESULT_INVALID');
   }
-  return { findings: validFindings };
-}
 
-function validateLegacyReviewerFindings(
-  reviewerId: string,
-  findings: readonly unknown[]
-): { readonly findings: readonly OrchestratorFinding[]; readonly diagnostic?: ReviewServiceDiagnostic } {
-  const legacyFindings = findings.filter((finding) => !isProjectOutput(finding));
-  if (legacyFindings.length === 0) return { findings: [] };
-  if (!legacyFindings.every(isLegacyFinding)) {
-    return { findings: [], diagnostic: { code: 'REVIEWER_RESULT_INVALID', reviewerId } };
-  }
-  return {
-    findings: legacyFindings.map((finding) => ({
+  const projectFindings = findings.filter(isProjectOutput).filter(isProjectReviewFinding);
+  const legacyFindings = findings
+    .filter((finding): finding is Omit<OrchestratorFinding, 'reviewerId'> => !isProjectOutput(finding) && isLegacyFinding(finding))
+    .map((finding) => ({
       reviewerId,
       findingId: finding.findingId,
       rootCauseId: finding.rootCauseId,
       recommendation: finding.recommendation
-    }))
-  };
+  }));
+
+  return { reviewerId, projectFindings, legacyFindings };
+}
+
+function invalidReviewerResult(
+  reviewerId: string,
+  code: ReviewerResultDiagnosticCode
+): ValidatedReviewerResult {
+  return { reviewerId, projectFindings: [], legacyFindings: [], diagnostic: { code, reviewerId } };
+}
+
+function crossReviewerDuplicateReviewerIds(results: readonly { readonly reviewerId: string; readonly findings: readonly unknown[] }[]): ReadonlySet<string> {
+  const reviewersByFindingId = new Map<string, Set<string>>();
+  for (const result of results) {
+    for (const finding of result.findings) {
+      if (!isRecord(finding) || !hasText(finding.findingId)) continue;
+      const reviewers = reviewersByFindingId.get(finding.findingId);
+      if (reviewers) reviewers.add(result.reviewerId);
+      else reviewersByFindingId.set(finding.findingId, new Set([result.reviewerId]));
+    }
+  }
+  return new Set(
+    [...reviewersByFindingId.values()]
+      .filter((reviewers) => reviewers.size > 1)
+      .flatMap((reviewers) => [...reviewers])
+  );
 }
 
 function isProjectOutput(value: unknown): value is { readonly code: 'project-improvement' } {
