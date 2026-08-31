@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import { runCli } from '../src/cli.js';
@@ -26,4 +29,13 @@ test('accepts a Git top-level repository path and rejects a nested path', () => 
   const nested = runCli(['stats', '--repository', 'src', '--json']);
   assert.equal(nested.exitCode, 1);
   assert.match(nested.stdout, /REPOSITORY_ROOT_REQUIRED/);
+});
+
+test('returns a nonzero status when repository hooks are unavailable', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-status-'));
+  try {
+    const result = runCli(['status', '--repository', process.cwd(), '--json', '--data-dir', dataDir]);
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stdout, /"status":"not-ready"/);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });

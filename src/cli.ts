@@ -152,6 +152,9 @@ function execute(service: ExperienceService, parsed: ParsedArguments): unknown {
   if (command === 'status-global' && subcommand === undefined && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.statusGlobal(optionalRepositoryId(parsed.options));
   }
+  if (command === 'status' && subcommand === undefined && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.status(repositoryId(parsed.options));
+  }
   if (command === 'runtime' && subcommand === 'evaluate' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'input', 'json', 'profile', 'refresh']);
     return service.runtimeEvaluate(requiredString(parsed.options, 'input'), optionalRuntimeProfile(parsed.options), parsed.options.has('refresh'));
@@ -274,6 +277,7 @@ function repositoryId(options: Map<string, string | true>): string {
 }
 function success(value: unknown, json: boolean, positionals: readonly string[]): CliResult {
   const exitCode = (positionals[0] === 'runtime' && positionals[1] === 'evaluate' && (value as { outcome?: string }).outcome === 'BLOCK')
+    || (positionals[0] === 'status' && (value as { status?: string }).status !== 'ready')
     || (positionals[0] === 'hooks' && positionals[1] === 'verify' && (value as { status?: string }).status !== 'ready') ? 1 : 0;
   return json ? { exitCode, stdout: `${JSON.stringify(value)}\n`, stderr: '' } : { exitCode, stdout: `${humanOutput(value, positionals)}\n`, stderr: '' };
 }

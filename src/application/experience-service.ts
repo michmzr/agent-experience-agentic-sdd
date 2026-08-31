@@ -1,5 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
+import { verifyInstalledHooks } from '../cli/hook-installation.js';
 
 import { ingestPassiveHook, type HookIngressResult } from '../capture/hook-ingress.js';
 import type { PassiveHookSource } from '../capture/hook-adapters/contracts.js';
@@ -93,6 +96,17 @@ export class ExperienceService {
   listRecords(repositoryId: string) { const store = this.openStore(); try { return store.listRepositoryRecords(repositoryId); } finally { store.close(); } }
   stats(repositoryId: string) { const store = this.openStore(); try { return store.repositoryStats(repositoryId); } finally { store.close(); } }
   statusGlobal(repositoryId?: string) { const store = this.openStore(); try { const repositories = store.listRepositories(); return { databasePath: this.databasePath, repositories: repositoryId ? repositories.filter(({ id }) => id === repositoryId) : repositories }; } finally { store.close(); } }
+  status(repositoryId: string) {
+    const store = this.openStore();
+    try {
+      const repository = store.listRepositories().find(({ id }) => id === repositoryId);
+      const entrypoint = fileURLToPath(new URL('../cli.js', import.meta.url));
+      const selectedSources = repository?.selectedSources ?? [];
+      if (!repository || selectedSources.length === 0) return { status: 'not-ready' as const, repositoryId, cli: { entrypoint, available: existsSync(entrypoint) }, sources: [] };
+      const hooks = verifyInstalledHooks({ repositoryRoot: repository.root, sources: selectedSources, cliEntrypoint: entrypoint });
+      return { status: hooks.status, repositoryId, cli: { entrypoint, available: existsSync(entrypoint) }, sources: hooks.sources };
+    } finally { store.close(); }
+  }
 
   runtimeEvaluate(inputPath: string, profileId?: BuiltInRuntimeProfileId, refresh = false): PublicGateDecision {
     return this.runtime.evaluate({ inputPath, ...(profileId === undefined ? {} : { profileId }), refresh });
