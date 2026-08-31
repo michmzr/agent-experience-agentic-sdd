@@ -10,7 +10,7 @@ import { groupReviewFindings, type ReviewFinding as OrchestratorFinding } from '
 import {
   consolidateProjectReviewFindings,
   isProjectReviewFinding,
-  type ProjectReviewDiagnostic
+  type ProjectReviewFinding
 } from './project-improvements.js';
 import { createReviewProposals, type ReviewFindingForProposal } from './proposals.js';
 import { type ReviewRuntime, type ReviewProfile } from './runtime.js';
@@ -37,8 +37,9 @@ export interface ManualReviewDependencies {
 }
 
 export interface ReviewServiceDiagnostic {
-  readonly code: 'PROPOSAL_ID_COLLISION';
-  readonly findingId: string;
+  readonly code: 'PROPOSAL_ID_COLLISION' | 'PROJECT_REVIEWER_INVALID' | 'REVIEWER_RESULT_INVALID';
+  readonly findingId?: string;
+  readonly reviewerId?: string;
 }
 
 export interface ReviewSessionDescriptor {
@@ -57,25 +58,15 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
   const artifact = sanitizeForReview(normalized);
   const runtime = dependencies.runtime ?? createDefaultReviewRuntime();
   const run = await runtime.run({ artifact, profile: input.profile ?? defaultReviewProfile, allowExpensiveChecks: input.allowExpensiveChecks });
-  const rawFindings = run.results.flatMap((result) => result.findings.map((finding) => ({ reviewerId: result.reviewerId, finding })));
-  const projectOutputFindings = rawFindings
-    .map(({ finding }) => finding)
-    .filter((finding) => finding.code === 'project-improvement');
-  const projectFindings = projectOutputFindings.filter(isProjectReviewFinding);
-  const malformedProjectDiagnostics = projectOutputFindings
-    .filter((finding) => !isProjectReviewFinding(finding))
-    .map(invalidProjectFindingDiagnostic);
+  const knownEventIds = new Set(artifact.session.events.map((event) => event.id));
+  const projectReviewerReviews = run.results.map((result) => validateProjectReviewerFindings(result.reviewerId, result.findings, knownEventIds));
+  const projectFindings = projectReviewerReviews.flatMap((review) => review.findings);
   const projectReview = consolidateProjectReviewFindings(
     projectFindings,
-    new Set(artifact.session.events.map((event) => event.id))
+    knownEventIds
   );
-  const projectReviewDiagnostics = [...projectReview.diagnostics, ...malformedProjectDiagnostics].sort(compareProjectReviewDiagnostics);
-  const findings = rawFindings.filter(({ finding }) => finding.code !== 'project-improvement').map(({ reviewerId, finding }) => ({
-    reviewerId,
-    findingId: finding.findingId,
-    rootCauseId: finding.rootCauseId,
-    recommendation: finding.recommendation
-  })) as OrchestratorFinding[];
+  const legacyReviewerReviews = run.results.map((result) => validateLegacyReviewerFindings(result.reviewerId, result.findings));
+  const findings = legacyReviewerReviews.flatMap((review) => review.findings);
   const groups = groupReviewFindings(findings);
   const legacyProposalFindings: readonly ReviewFindingForProposal[] = groups.map((group) => ({
     id: group.rootCauseId,
@@ -89,13 +80,18 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
       lessonKind: 'heuristic' as LessonKind,
       proposal: { category: improvement.category, title: improvement.recommendation },
       severity: improvement.severity,
-      evidenceEventIds: improvement.evidenceEventIds
+      evidenceEventIds: improvement.evidenceEventIds,
+      findingIds: improvement.findingIds
   }));
   const legacyFindingIds = new Set(legacyProposalFindings.map((finding) => finding.id));
-  const serviceDiagnostics: readonly ReviewServiceDiagnostic[] = projectProposalFindings
+  const collisionDiagnostics: readonly ReviewServiceDiagnostic[] = projectProposalFindings
     .filter((finding) => legacyFindingIds.has(finding.id))
-    .map((finding) => ({ code: 'PROPOSAL_ID_COLLISION' as const, findingId: finding.id }))
-    .sort(compareServiceDiagnostics);
+    .map((finding) => ({ code: 'PROPOSAL_ID_COLLISION' as const, findingId: finding.id }));
+  const serviceDiagnostics: readonly ReviewServiceDiagnostic[] = [
+    ...projectReviewerReviews.flatMap((review) => review.diagnostic ? [review.diagnostic] : []),
+    ...legacyReviewerReviews.flatMap((review) => review.diagnostic ? [review.diagnostic] : []),
+    ...collisionDiagnostics
+  ].sort(compareServiceDiagnostics);
   const intelligence = createReviewProposals({
     sessionId: artifact.session.sessionId,
     findings: [...legacyProposalFindings, ...projectProposalFindings.filter((finding) => !legacyFindingIds.has(finding.id))]
@@ -108,7 +104,7 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
     runtimeDiagnostics: run.diagnostics,
     findings: groups,
     projectImprovements: projectReview.improvements,
-    projectReviewDiagnostics,
+    projectReviewDiagnostics: projectReview.diagnostics,
     serviceDiagnostics,
     candidates: intelligence.candidates,
     proposals: intelligence.proposals
@@ -165,9 +161,56 @@ function recommendation(value: { readonly state: 'agreed'; readonly value: strin
   return value.state === 'agreed' ? value.value : value.values.join(' | ');
 }
 
-function invalidProjectFindingDiagnostic(value: unknown): ProjectReviewDiagnostic {
-  const findingId = isRecord(value) && hasText(value.findingId) ? value.findingId : undefined;
-  return findingId ? { code: 'INVALID_PROJECT_FINDING', findingId } : { code: 'INVALID_PROJECT_FINDING' };
+function validateProjectReviewerFindings(
+  reviewerId: string,
+  findings: readonly unknown[],
+  knownEventIds: ReadonlySet<string>
+): { readonly findings: readonly ProjectReviewFinding[]; readonly diagnostic?: ReviewServiceDiagnostic } {
+  const projectFindings = findings.filter(isProjectOutput);
+  if (projectFindings.length === 0) return { findings: [] };
+
+  const findingIds = new Set<string>();
+  const validFindings: ProjectReviewFinding[] = [];
+  for (const finding of projectFindings) {
+    if (!isProjectReviewFinding(finding)
+      || finding.evidenceEventIds.some((eventId) => !knownEventIds.has(eventId))
+      || findingIds.has(finding.findingId)) {
+      return { findings: [], diagnostic: { code: 'PROJECT_REVIEWER_INVALID', reviewerId } };
+    }
+    findingIds.add(finding.findingId);
+    validFindings.push(finding);
+  }
+  return { findings: validFindings };
+}
+
+function validateLegacyReviewerFindings(
+  reviewerId: string,
+  findings: readonly unknown[]
+): { readonly findings: readonly OrchestratorFinding[]; readonly diagnostic?: ReviewServiceDiagnostic } {
+  const legacyFindings = findings.filter((finding) => !isProjectOutput(finding));
+  if (legacyFindings.length === 0) return { findings: [] };
+  if (!legacyFindings.every(isLegacyFinding)) {
+    return { findings: [], diagnostic: { code: 'REVIEWER_RESULT_INVALID', reviewerId } };
+  }
+  return {
+    findings: legacyFindings.map((finding) => ({
+      reviewerId,
+      findingId: finding.findingId,
+      rootCauseId: finding.rootCauseId,
+      recommendation: finding.recommendation
+    }))
+  };
+}
+
+function isProjectOutput(value: unknown): value is { readonly code: 'project-improvement' } {
+  return isRecord(value) && value.code === 'project-improvement';
+}
+
+function isLegacyFinding(value: unknown): value is Omit<OrchestratorFinding, 'reviewerId'> {
+  return isRecord(value)
+    && hasText(value.findingId)
+    && hasText(value.rootCauseId)
+    && hasText(value.recommendation);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -178,12 +221,10 @@ function hasText(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-function compareProjectReviewDiagnostics(left: ProjectReviewDiagnostic, right: ProjectReviewDiagnostic): number {
-  return compareText(left.code, right.code) || compareText(left.findingId ?? '', right.findingId ?? '');
-}
-
 function compareServiceDiagnostics(left: ReviewServiceDiagnostic, right: ReviewServiceDiagnostic): number {
-  return compareText(left.code, right.code) || compareText(left.findingId, right.findingId);
+  return compareText(left.code, right.code)
+    || compareText(left.reviewerId ?? '', right.reviewerId ?? '')
+    || compareText(left.findingId ?? '', right.findingId ?? '');
 }
 
 function compareText(left: string, right: string): number {

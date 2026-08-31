@@ -12,14 +12,20 @@ function codexSessionRoot(): string {
   return root;
 }
 
-test('selects the explicit default versioned review profile and rejects unknown identifiers or versions', async () => {
+test('selects default v2 implicitly while retaining explicit default v1 compatibility', async () => {
   const root = codexSessionRoot();
   const selected = await runCliAsync(['review', 'session', '--source', 'codex', '--root', root, '--session', 'session.jsonl', '--profile', 'default@1', '--json']);
+  const defaultSelected = await runCliAsync(['review', 'session', '--source', 'codex', '--root', root, '--session', 'session.jsonl', '--json']);
+  const v2Selected = await runCliAsync(['review', 'session', '--source', 'codex', '--root', root, '--session', 'session.jsonl', '--profile', 'default@2', '--json']);
 
   assert.equal(selected.exitCode, 0);
   assert.deepEqual(JSON.parse(selected.stdout).profile, { id: 'default', version: '1' });
+  assert.equal(defaultSelected.exitCode, 0);
+  assert.deepEqual(JSON.parse(defaultSelected.stdout).profile, { id: 'default', version: '2' });
+  assert.equal(v2Selected.exitCode, 0);
+  assert.deepEqual(JSON.parse(v2Selected.stdout).profile, { id: 'default', version: '2' });
 
-  for (const profile of ['default@2', 'unknown@1']) {
+  for (const profile of ['default@3', 'unknown@1']) {
     const unknown = await runCliAsync(['review', 'session', '--source', 'codex', '--root', root, '--session', 'session.jsonl', '--profile', profile, '--json']);
     assert.deepEqual(JSON.parse(unknown.stdout), { error: { code: 'REVIEW_ERROR', message: 'Review failed.' } }, profile);
     assert.equal(unknown.exitCode, 1, profile);

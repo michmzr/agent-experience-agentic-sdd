@@ -62,13 +62,12 @@ test('isolates a failed reviewer without exposing its error or suppressing succe
 
 test('isolates malformed reviewer payloads without suppressing independent reviewers', async () => {
   const runtime = new ReviewRuntime({
-    profiles: [{ id: 'local', version: '1', reviewerIds: ['null', 'non-array', 'null-entry', 'invalid', 'legacy-incomplete', 'good'] }],
+    profiles: [{ id: 'local', version: '1', reviewerIds: ['null', 'non-array', 'null-entry', 'invalid', 'good'] }],
     reviewers: [
       { id: 'null', expensive: false, async review() { return null as never; } },
       { id: 'non-array', expensive: false, async review() { return { code: 'not-an-array' } as never; } },
       { id: 'null-entry', expensive: false, async review() { return [null] as never; } },
       { id: 'invalid', expensive: false, async review() { return [{ code: '   ' }] as never; } },
-      { id: 'legacy-incomplete', expensive: false, async review() { return [{ code: 'legacy' }] as never; } },
       delayedReviewer('good', 0)
     ]
   });
@@ -80,9 +79,20 @@ test('isolates malformed reviewer payloads without suppressing independent revie
     { reviewerId: 'null', code: 'REVIEWER_FAILED' },
     { reviewerId: 'non-array', code: 'REVIEWER_FAILED' },
     { reviewerId: 'null-entry', code: 'REVIEWER_FAILED' },
-    { reviewerId: 'invalid', code: 'REVIEWER_FAILED' },
-    { reviewerId: 'legacy-incomplete', code: 'REVIEWER_FAILED' }
+    { reviewerId: 'invalid', code: 'REVIEWER_FAILED' }
   ]);
+});
+
+test('accepts the minimal extensible review finding contract at the runtime boundary', async () => {
+  const runtime = new ReviewRuntime({
+    profiles: [{ id: 'local', version: '1', reviewerIds: ['minimal'] }],
+    reviewers: [{ id: 'minimal', expensive: false, async review() { return [{ code: 'legacy' }]; } }]
+  });
+
+  const result = await runtime.run({ artifact, profile: { id: 'local', version: '1' }, allowExpensiveChecks: false });
+
+  assert.deepEqual(result.results, [{ reviewerId: 'minimal', findings: [{ code: 'legacy' }] }]);
+  assert.deepEqual(result.diagnostics, []);
 });
 
 test('does not execute expensive reviewers without explicit permission', async () => {

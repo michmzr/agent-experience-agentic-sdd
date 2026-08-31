@@ -2,24 +2,44 @@ import type { NormalizedSessionEvent } from './contracts.js';
 import type { ProjectReviewFinding } from './project-improvements.js';
 import { ReviewRuntime, type ReviewFinding, type ReviewProfile, type Reviewer } from './runtime.js';
 
-export const defaultReviewProfile: Pick<ReviewProfile, 'id' | 'version'> = Object.freeze({ id: 'default', version: '1' });
+export const defaultReviewProfile: Pick<ReviewProfile, 'id' | 'version'> = Object.freeze({ id: 'default', version: '2' });
+export const defaultReviewProfileV1: Pick<ReviewProfile, 'id' | 'version'> = Object.freeze({ id: 'default', version: '1' });
 
-const defaultReviewers: readonly Reviewer[] = [
+const sharedReviewersBeforeSpecialists: readonly Reviewer[] = [
   keywordReviewer('prompt-effectiveness', ['prompt', 'instruction', 'acceptance', 'ambig'], 'prompt-effectiveness'),
   workflowReviewer(),
   failedEventReviewer('failures-learning', 'failure-learning'),
   keywordReviewer('temporary-artifacts', ['temporary', 'artifact', 'scratch', 'workaround'], 'temporary-artifact'),
-  keywordReviewer('code-changes', ['code', 'changed', 'patch', 'diff'], 'code-change'),
-  projectReviewer('architecture', 'architecture', [['module-boundary', ['architecture', 'boundary', 'dependency', 'module'], 'Separate the affected module boundary']]),
-  projectReviewer('developer-experience', 'developer-experience', [['developer-workflow-friction', ['developer experience', 'developer-experience', 'dx', 'friction'], 'Remove the recurring developer workflow friction']]),
-  projectReviewer('project-management', 'project-management', [['milestone-ownership', ['project', 'milestone', 'plan', 'ownership'], 'Clarify milestone ownership and delivery scope']]),
+  keywordReviewer('code-changes', ['code', 'changed', 'patch', 'diff'], 'code-change')
+];
+
+const defaultV1SpecialistReviewers: readonly Reviewer[] = [
+  keywordReviewer('architecture', ['architecture', 'boundary', 'dependency', 'module'], 'architecture'),
+  keywordReviewer('developer-experience', ['developer experience', 'developer-experience', 'dx', 'friction'], 'developer-experience'),
+  keywordReviewer('project-management', ['project', 'milestone', 'plan', 'ownership'], 'project-management')
+];
+
+const defaultV2SpecialistReviewers: readonly Reviewer[] = [
+  projectReviewer('architecture-project-specialist', 'architecture', [['module-boundary', ['architecture', 'boundary', 'dependency', 'module'], 'Separate the affected module boundary']]),
+  projectReviewer('developer-experience-project-specialist', 'developer-experience', [['developer-workflow-friction', ['developer experience', 'developer-experience', 'dx', 'friction'], 'Remove the recurring developer workflow friction']]),
+  projectReviewer('project-management-project-specialist', 'project-management', [['milestone-ownership', ['project', 'milestone', 'plan', 'ownership'], 'Clarify milestone ownership and delivery scope']])
+];
+
+const sharedReviewersAfterSpecialists: readonly Reviewer[] = [
   privacyReviewer(),
   failedEventReviewer('diagnostics', 'diagnostic-failure', true, false)
 ];
 
+const defaultV1Reviewers = [...sharedReviewersBeforeSpecialists, ...defaultV1SpecialistReviewers, ...sharedReviewersAfterSpecialists];
+const defaultV2Reviewers = [...sharedReviewersBeforeSpecialists, ...defaultV2SpecialistReviewers, ...sharedReviewersAfterSpecialists];
+const defaultReviewers = [...defaultV1Reviewers, ...defaultV2SpecialistReviewers];
+
 export function createDefaultReviewRuntime(): ReviewRuntime {
   return new ReviewRuntime({
-    profiles: [{ ...defaultReviewProfile, reviewerIds: defaultReviewers.map(({ id }) => id) }],
+    profiles: [
+      { ...defaultReviewProfileV1, reviewerIds: defaultV1Reviewers.map(({ id }) => id) },
+      { ...defaultReviewProfile, reviewerIds: defaultV2Reviewers.map(({ id }) => id) }
+    ],
     reviewers: defaultReviewers
   });
 }

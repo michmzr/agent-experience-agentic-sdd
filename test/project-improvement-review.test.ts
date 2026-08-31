@@ -67,9 +67,10 @@ test('creates one evidence-backed architecture proposal without duplicating it i
 
   assert.equal(review.findings.length, 0);
   assert.equal(review.projectImprovements.length, 1);
-  assert.deepEqual(review.projectReviewDiagnostics, [
-    { code: 'INVALID_PROJECT_FINDING', findingId: 'invalid' },
-    { code: 'INVALID_PROJECT_FINDING', findingId: 'malformed' }
+  assert.deepEqual(review.projectReviewDiagnostics, []);
+  assert.deepEqual(review.serviceDiagnostics, [
+    { code: 'PROJECT_REVIEWER_INVALID', reviewerId: 'invalid' },
+    { code: 'PROJECT_REVIEWER_INVALID', reviewerId: 'malformed' }
   ]);
   assert.deepEqual(review.runtimeDiagnostics, [{ reviewerId: 'broken', code: 'REVIEWER_FAILED' }]);
   assert.deepEqual(review.proposals, [{
@@ -81,10 +82,106 @@ test('creates one evidence-backed architecture proposal without duplicating it i
     title: 'Separate the affected module boundary',
     requiresSpecification: true,
     severity: 'high',
-    evidenceEventIds: review.projectImprovements[0]?.evidenceEventIds
+    evidenceEventIds: review.projectImprovements[0]?.evidenceEventIds,
+    findingIds: review.projectImprovements[0]?.findingIds
   }]);
   assert.equal(JSON.stringify(review).includes('reviewer secret'), false);
 });
+
+test('rejects every project contribution from a poisoned reviewer while retaining independent corroboration', async () => {
+  const root = codexRoot([
+    { kind: 'tool', occurredAt: '2026-08-24T10:00:00.000Z', text: 'architecture boundary 1', exitStatus: 1 },
+    { kind: 'tool', occurredAt: '2026-08-24T10:01:00.000Z', text: 'architecture boundary 2', exitStatus: 1 },
+    { kind: 'tool', occurredAt: '2026-08-24T10:02:00.000Z', text: 'architecture boundary 3', exitStatus: 1 },
+    { kind: 'tool', occurredAt: '2026-08-24T10:03:00.000Z', text: 'architecture boundary 4', exitStatus: 1 }
+  ]);
+  const runtime = new ReviewRuntime({
+    profiles: [{ id: 'project', version: '1', reviewerIds: ['malformed', 'unknown', 'duplicate', 'healthy'] }],
+    reviewers: [
+      {
+        id: 'malformed', expensive: false, async review(artifact) {
+          return [
+            ...artifact.session.events.slice(0, 2).map((event) => projectFinding('malformed', event.id)),
+            { ...projectFinding('malformed', artifact.session.events[0]?.id ?? ''), findingId: 'malformed:bad', severity: 'critical' }
+          ];
+        }
+      },
+      {
+        id: 'unknown', expensive: false, async review(artifact) {
+          return [
+            ...artifact.session.events.slice(0, 2).map((event) => projectFinding('unknown', event.id)),
+            { ...projectFinding('unknown', 'unknown-event'), findingId: 'unknown:bad' }
+          ];
+        }
+      },
+      {
+        id: 'duplicate', expensive: false, async review(artifact) {
+          const [first, second, third] = artifact.session.events;
+          return [
+            projectFinding('duplicate', first?.id ?? ''),
+            projectFinding('duplicate', second?.id ?? ''),
+            { ...projectFinding('duplicate', third?.id ?? ''), findingId: `duplicate:${first?.id}` }
+          ];
+        }
+      },
+      {
+        id: 'healthy', expensive: false, async review(artifact) {
+          return artifact.session.events.slice(2).map((event) => projectFinding('healthy', event.id));
+        }
+      }
+    ]
+  });
+
+  const review = await runManualReview(
+    { source: 'codex', root, session: 'session.jsonl', profile: { id: 'project', version: '1' }, allowExpensiveChecks: false },
+    { runtime }
+  );
+
+  assert.deepEqual(review.serviceDiagnostics, [
+    { code: 'PROJECT_REVIEWER_INVALID', reviewerId: 'duplicate' },
+    { code: 'PROJECT_REVIEWER_INVALID', reviewerId: 'malformed' },
+    { code: 'PROJECT_REVIEWER_INVALID', reviewerId: 'unknown' }
+  ]);
+  assert.equal(review.projectImprovements.length, 1);
+  assert.equal(review.projectImprovements[0]?.findingIds.length, 2);
+  assert.equal(review.projectImprovements[0]?.findingIds.every((findingId) => findingId.startsWith('healthy:')), true);
+  assert.deepEqual(review.proposals[0]?.findingIds, review.projectImprovements[0]?.findingIds);
+});
+
+test('rejects incomplete legacy reviewer findings at the service boundary while retaining valid reviewers', async () => {
+  const root = codexRoot([{ kind: 'tool', occurredAt: '2026-08-24T10:00:00.000Z', text: 'review evidence', exitStatus: 0 }]);
+  const runtime = new ReviewRuntime({
+    profiles: [{ id: 'project', version: '1', reviewerIds: ['minimal', 'valid'] }],
+    reviewers: [
+      { id: 'minimal', expensive: false, async review() { return [{ code: 'legacy' }]; } },
+      {
+        id: 'valid', expensive: false, async review() {
+          return [{ code: 'legacy', findingId: 'valid:1', rootCauseId: 'valid-root', recommendation: 'Keep the valid workflow' }];
+        }
+      }
+    ]
+  });
+
+  const review = await runManualReview(
+    { source: 'codex', root, session: 'session.jsonl', profile: { id: 'project', version: '1' }, allowExpensiveChecks: false },
+    { runtime }
+  );
+
+  assert.deepEqual(review.serviceDiagnostics, [{ code: 'REVIEWER_RESULT_INVALID', reviewerId: 'minimal' }]);
+  assert.deepEqual(review.findings.map((finding) => finding.rootCauseId), ['valid-root']);
+});
+
+function projectFinding(reviewerId: string, eventId: string) {
+  return {
+    code: 'project-improvement' as const,
+    findingId: `${reviewerId}:${eventId}`,
+    rootCauseId: 'module-boundary',
+    recommendation: 'Separate the affected module boundary',
+    category: 'architecture' as const,
+    severity: 'high' as const,
+    evidenceEventIds: [eventId]
+  };
+}
 
 test('does not create a project improvement or proposal from a single observation', async () => {
   const root = codexRoot([{ kind: 'tool', occurredAt: '2026-08-24T10:00:00.000Z', text: 'architecture boundary', exitStatus: 1 }]);

@@ -13,7 +13,8 @@ test('keeps generated lessons as candidates and preserves session to finding to 
         lessonKind: 'failure',
         proposal: { category: 'code', title: 'Expose verification failure' },
         severity: 'high',
-        evidenceEventIds: ['event-2', 'event-3']
+        evidenceEventIds: ['event-2', 'event-3'],
+        findingIds: ['reviewer:event-2', 'reviewer:event-3']
       },
       {
         id: 'finding-a',
@@ -61,7 +62,8 @@ test('keeps generated lessons as candidates and preserves session to finding to 
       title: 'Expose verification failure',
       requiresSpecification: true,
       severity: 'high',
-      evidenceEventIds: ['event-2', 'event-3']
+      evidenceEventIds: ['event-2', 'event-3'],
+      findingIds: ['reviewer:event-2', 'reviewer:event-3']
     }
   ]);
 });
@@ -104,6 +106,22 @@ test('rejects incomplete and ambiguous proposal input', () => {
     sessionId: 'session-1',
     findings: [{ id: 'finding-1', statement: 'A finding.', lessonKind: 'heuristic', proposal: { category: 'documentation', title: 'Good' }, evidenceEventIds: [] }]
   }), /evidence/i);
+  assert.throws(() => createReviewProposals({
+    sessionId: 'session-1',
+    findings: [{ id: 'finding-1', statement: 'A finding.', lessonKind: 'heuristic', proposal: { category: 'documentation', title: 'Good' }, findingIds: [] }]
+  }), /finding ids/i);
+  assert.throws(() => createReviewProposals({
+    sessionId: 'session-1',
+    findings: [{ id: 'finding-1', statement: 'A finding.', lessonKind: 'heuristic', proposal: { category: 'documentation', title: 'Good' }, findingIds: ['reviewer:1', 'reviewer:1'] }]
+  }), /finding ids/i);
+  assert.throws(() => createReviewProposals({
+    sessionId: 'session-1',
+    findings: [{ id: 'finding-1', statement: 'A finding.', lessonKind: 'heuristic', proposal: { category: 'documentation', title: 'Good' }, findingIds: ['  '] }]
+  }), /finding ids/i);
+  assert.throws(() => createReviewProposals({
+    sessionId: 'session-1',
+    findings: [{ id: 'finding-1', statement: 'A finding.', lessonKind: 'heuristic', proposal: { category: 'documentation', title: 'Good' }, findingIds: [1] as never }]
+  }), /finding ids/i);
   assert.throws(() => createReviewProposals({
     sessionId: 'session-1',
     findings: [{ id: 'finding-1', statement: 'A finding.', lessonKind: 'heuristic', proposal: { category: 'documentation', title: 'Good' }, evidenceEventIds: ['event-1', ' event-1 '] }]

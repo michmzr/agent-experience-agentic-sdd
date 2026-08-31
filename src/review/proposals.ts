@@ -17,6 +17,7 @@ export interface ReviewFindingForProposal {
   };
   readonly severity?: ProposalSeverity;
   readonly evidenceEventIds?: readonly string[];
+  readonly findingIds?: readonly string[];
 }
 
 export interface CandidateLesson {
@@ -38,6 +39,7 @@ export interface ImprovementProposal {
   readonly requiresSpecification: boolean;
   readonly severity?: ProposalSeverity;
   readonly evidenceEventIds?: readonly string[];
+  readonly findingIds?: readonly string[];
 }
 
 export interface CreateReviewProposalsInput {
@@ -62,6 +64,7 @@ export function createReviewProposals(input: CreateReviewProposalsInput): Review
     if (!proposalCategories.includes(finding.proposal.category)) throw new Error('Proposal category is unsupported.');
     if (finding.severity !== undefined && !projectFindingSeverities.includes(finding.severity)) throw new Error('Proposal severity is unsupported.');
     if (finding.evidenceEventIds !== undefined) validateEvidenceEventIds(finding.evidenceEventIds);
+    if (finding.findingIds !== undefined) validateFindingIds(finding.findingIds);
     if (findingIds.has(finding.id)) throw new Error(`Duplicate finding id: ${finding.id}.`);
     findingIds.add(finding.id);
   }
@@ -92,18 +95,27 @@ function createProposal(sessionId: string, finding: ReviewFindingForProposal, ca
     title: finding.proposal.title,
     requiresSpecification: specificationCategories.has(finding.proposal.category),
     ...(finding.severity === undefined ? {} : { severity: finding.severity }),
-    ...(finding.evidenceEventIds === undefined ? {} : { evidenceEventIds: [...finding.evidenceEventIds] })
+    ...(finding.evidenceEventIds === undefined ? {} : { evidenceEventIds: [...finding.evidenceEventIds] }),
+    ...(finding.findingIds === undefined ? {} : { findingIds: [...finding.findingIds] })
   };
 }
 
 function validateEvidenceEventIds(eventIds: readonly string[]): void {
-  if (eventIds.length === 0) throw new Error('Evidence event ids must be nonempty, unique, nonblank strings.');
+  validateIdentifiers(eventIds, 'Evidence event ids');
+}
+
+function validateFindingIds(findingIds: readonly string[]): void {
+  validateIdentifiers(findingIds, 'Finding ids');
+}
+
+function validateIdentifiers(ids: readonly string[], label: string): void {
+  if (!Array.isArray(ids) || ids.length === 0) throw new Error(`${label} must be nonempty, unique, nonblank strings.`);
   const unique = new Set<string>();
-  for (const eventId of eventIds) {
-    if (eventId.trim().length === 0 || eventId.trim() !== eventId || unique.has(eventId)) {
-      throw new Error('Evidence event ids must be nonempty, unique, nonblank strings.');
+  for (const id of ids) {
+    if (typeof id !== 'string' || id.trim().length === 0 || id.trim() !== id || unique.has(id)) {
+      throw new Error(`${label} must be nonempty, unique, nonblank strings.`);
     }
-    unique.add(eventId);
+    unique.add(id);
   }
 }
 

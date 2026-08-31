@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createDefaultReviewRuntime, defaultReviewProfile } from '../src/review/default-reviewers.js';
+import { createDefaultReviewRuntime, defaultReviewProfile, defaultReviewProfileV1 } from '../src/review/default-reviewers.js';
 import { sanitizeForReview } from '../src/review/sanitizer.js';
 
 const artifact = sanitizeForReview({
@@ -17,11 +17,98 @@ const artifact = sanitizeForReview({
   ]
 });
 
-test('default profile v1 includes every required deterministic reviewer perspective in stable order', async () => {
+test('default profile v2 includes project specialists with deterministic reviewer identities', async () => {
   const [, toolOneEvent, metadataEvent, toolTwoEvent] = artifact.session.events;
   const result = await createDefaultReviewRuntime().run({
     artifact,
     profile: defaultReviewProfile,
+    allowExpensiveChecks: true
+  });
+
+  assert.deepEqual(result.profile, { id: 'default', version: '2' });
+  assert.deepEqual(result.results.map(({ reviewerId }) => reviewerId), [
+    'prompt-effectiveness',
+    'workflow',
+    'failures-learning',
+    'temporary-artifacts',
+    'code-changes',
+    'architecture-project-specialist',
+    'developer-experience-project-specialist',
+    'project-management-project-specialist',
+    'privacy',
+    'diagnostics'
+  ]);
+  assert.deepEqual(
+    result.results.map(({ reviewerId, findings }) => [reviewerId, findings.map(({ code }) => code.split(':')[0])]),
+    [
+      ['prompt-effectiveness', ['prompt-effectiveness']],
+      ['workflow', ['workflow-failed', 'workflow-passed']],
+      ['failures-learning', ['failure-learning']],
+      ['temporary-artifacts', ['temporary-artifact']],
+      ['code-changes', ['code-change']],
+      ['architecture-project-specialist', ['project-improvement', 'project-improvement']],
+      ['developer-experience-project-specialist', ['project-improvement']],
+      ['project-management-project-specialist', ['project-improvement']],
+      ['privacy', ['review-message', 'review-metadata']],
+      ['diagnostics', ['diagnostic-failure']]
+    ]
+  );
+
+  const findingsByReviewer = new Map(result.results.map(({ reviewerId, findings }) => [reviewerId, findings]));
+  assert.deepEqual(
+    findingsByReviewer.get('architecture-project-specialist')?.find((finding) => finding.findingId === `architecture-project-specialist:${toolOneEvent.id}`),
+    {
+      code: 'project-improvement',
+      findingId: `architecture-project-specialist:${toolOneEvent.id}`,
+      rootCauseId: 'module-boundary',
+      recommendation: 'Separate the affected module boundary',
+      category: 'architecture',
+      severity: 'high',
+      evidenceEventIds: [toolOneEvent.id]
+    }
+  );
+  assert.deepEqual(
+    findingsByReviewer.get('architecture-project-specialist')?.find((finding) => finding.findingId === `architecture-project-specialist:${toolTwoEvent.id}`),
+    {
+      code: 'project-improvement',
+      findingId: `architecture-project-specialist:${toolTwoEvent.id}`,
+      rootCauseId: 'module-boundary',
+      recommendation: 'Separate the affected module boundary',
+      category: 'architecture',
+      severity: 'medium',
+      evidenceEventIds: [toolTwoEvent.id]
+    }
+  );
+  assert.deepEqual(
+    findingsByReviewer.get('developer-experience-project-specialist'),
+    [{
+      code: 'project-improvement',
+      findingId: `developer-experience-project-specialist:${toolOneEvent.id}`,
+      rootCauseId: 'developer-workflow-friction',
+      recommendation: 'Remove the recurring developer workflow friction',
+      category: 'developer-experience',
+      severity: 'high',
+      evidenceEventIds: [toolOneEvent.id]
+    }]
+  );
+  assert.deepEqual(
+    findingsByReviewer.get('project-management-project-specialist'),
+    [{
+      code: 'project-improvement',
+      findingId: `project-management-project-specialist:${metadataEvent.id}`,
+      rootCauseId: 'milestone-ownership',
+      recommendation: 'Clarify milestone ownership and delivery scope',
+      category: 'project-management',
+      severity: 'medium',
+      evidenceEventIds: [metadataEvent.id]
+    }]
+  );
+});
+
+test('default profile v1 preserves the pre-specialist reviewer semantics', async () => {
+  const result = await createDefaultReviewRuntime().run({
+    artifact,
+    profile: defaultReviewProfileV1,
     allowExpensiveChecks: true
   });
 
@@ -38,69 +125,8 @@ test('default profile v1 includes every required deterministic reviewer perspect
     'privacy',
     'diagnostics'
   ]);
-  assert.deepEqual(
-    result.results.map(({ reviewerId, findings }) => [reviewerId, findings.map(({ code }) => code.split(':')[0])]),
-    [
-      ['prompt-effectiveness', ['prompt-effectiveness']],
-      ['workflow', ['workflow-failed', 'workflow-passed']],
-      ['failures-learning', ['failure-learning']],
-      ['temporary-artifacts', ['temporary-artifact']],
-      ['code-changes', ['code-change']],
-      ['architecture', ['project-improvement', 'project-improvement']],
-      ['developer-experience', ['project-improvement']],
-      ['project-management', ['project-improvement']],
-      ['privacy', ['review-message', 'review-metadata']],
-      ['diagnostics', ['diagnostic-failure']]
-    ]
-  );
-
-  const findingsByReviewer = new Map(result.results.map(({ reviewerId, findings }) => [reviewerId, findings]));
-  assert.deepEqual(
-    findingsByReviewer.get('architecture')?.find((finding) => finding.findingId === `architecture:${toolOneEvent.id}`),
-    {
-      code: 'project-improvement',
-      findingId: `architecture:${toolOneEvent.id}`,
-      rootCauseId: 'module-boundary',
-      recommendation: 'Separate the affected module boundary',
-      category: 'architecture',
-      severity: 'high',
-      evidenceEventIds: [toolOneEvent.id]
-    }
-  );
-  assert.deepEqual(
-    findingsByReviewer.get('architecture')?.find((finding) => finding.findingId === `architecture:${toolTwoEvent.id}`),
-    {
-      code: 'project-improvement',
-      findingId: `architecture:${toolTwoEvent.id}`,
-      rootCauseId: 'module-boundary',
-      recommendation: 'Separate the affected module boundary',
-      category: 'architecture',
-      severity: 'medium',
-      evidenceEventIds: [toolTwoEvent.id]
-    }
-  );
-  assert.deepEqual(
-    findingsByReviewer.get('developer-experience'),
-    [{
-      code: 'project-improvement',
-      findingId: `developer-experience:${toolOneEvent.id}`,
-      rootCauseId: 'developer-workflow-friction',
-      recommendation: 'Remove the recurring developer workflow friction',
-      category: 'developer-experience',
-      severity: 'high',
-      evidenceEventIds: [toolOneEvent.id]
-    }]
-  );
-  assert.deepEqual(
-    findingsByReviewer.get('project-management'),
-    [{
-      code: 'project-improvement',
-      findingId: `project-management:${metadataEvent.id}`,
-      rootCauseId: 'milestone-ownership',
-      recommendation: 'Clarify milestone ownership and delivery scope',
-      category: 'project-management',
-      severity: 'medium',
-      evidenceEventIds: [metadataEvent.id]
-    }]
-  );
+  assert.equal(result.results.flatMap(({ findings }) => findings).some((finding) => finding.code === 'project-improvement'), false);
+  assert.deepEqual(result.results.find(({ reviewerId }) => reviewerId === 'architecture')?.findings.map(({ code }) => code.split(':')[0]), ['architecture', 'architecture']);
+  assert.deepEqual(result.results.find(({ reviewerId }) => reviewerId === 'developer-experience')?.findings.map(({ code }) => code.split(':')[0]), ['developer-experience']);
+  assert.deepEqual(result.results.find(({ reviewerId }) => reviewerId === 'project-management')?.findings.map(({ code }) => code.split(':')[0]), ['project-management']);
 });
