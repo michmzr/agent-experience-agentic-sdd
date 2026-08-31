@@ -2,7 +2,7 @@ import { assertSanitizedReviewArtifact, type SanitizedReviewArtifact } from './s
 
 export interface ReviewFinding {
   readonly code: string;
-  readonly [attribute: string]: string;
+  readonly [attribute: string]: unknown;
 }
 
 export interface Reviewer {
