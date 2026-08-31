@@ -17,14 +17,14 @@ Existing imported records with a repository identifier but no registry entry rem
 ## Command contract
 
 ```text
-ael list records [--repository-id <id>] [--json]
-ael stats [--repository-id <id>] [--json]
-ael status [--repository-id <id>] [--json]
-ael status-global [--repository-id <id>] [--json]
+ael list records [--repository-id <id>|--repository <path>] [--json]
+ael stats [--repository-id <id>|--repository <path>] [--json]
+ael status [--repository-id <id>|--repository <path>] [--json]
+ael status-global [--repository-id <id>|--repository <path>] [--json]
 ael init [--scope global|repo] [--hooks codex,cursor] [--json]
 ```
 
-For `list records`, `stats`, and `status`, an explicit `--repository-id` has precedence. Without it, the command resolves the canonical Git top level of the current working directory and uses that path as the repository identifier. A non-Git working directory without an explicit identifier returns a typed repository-required diagnostic.
+For every command, `--repository <path>` resolves a canonical Git top level and its deterministic repository identifier. `--repository-id <id>` selects an already known identifier. The two options are mutually exclusive. Without either option, `list records`, `stats`, and `status` resolve the canonical Git top level of the current working directory. A non-Git directory returns a typed repository-required diagnostic.
 
 `ael init` defaults to repository scope. `ael init --scope global` only initializes the private data store and does not prompt for, install, or verify project hooks.
 
