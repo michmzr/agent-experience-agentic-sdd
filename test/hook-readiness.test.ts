@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { verifyHookReadiness } from '../src/capture/hook-readiness.js';
+import { verifyHookReadiness } from '../src/cli/hook-readiness.js';
+import { runCli } from '../src/cli.js';
 
 function temporaryRoot(): string {
   return mkdtempSync(join(tmpdir(), 'ael-hook-readiness-test-'));
@@ -23,6 +24,19 @@ test('verifies both project hook sources without using the default database', ()
     });
     assert.equal(existsSync(root), true);
     assert.deepEqual(readdirSync(root), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('exposes worktree readiness through the CLI', () => {
+  const root = temporaryRoot();
+  try {
+    assert.deepEqual(runCli(['hooks', 'verify', '--worktree', process.cwd()]), {
+      exitCode: 0,
+      stdout: 'Hook readiness passed for codex, cursor.\n',
+      stderr: ''
+    });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
