@@ -161,7 +161,8 @@ test('withholds a colliding project proposal while retaining the legacy proposal
   );
 
   assert.equal(review.projectImprovements.length, 1);
-  assert.deepEqual(review.projectReviewDiagnostics, [{
+  assert.deepEqual(review.projectReviewDiagnostics, []);
+  assert.deepEqual(review.serviceDiagnostics, [{
     code: 'PROPOSAL_ID_COLLISION',
     findingId: 'project-improvement:architecture:module-boundary'
   }]);

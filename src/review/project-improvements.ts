@@ -22,7 +22,7 @@ export interface ProjectImprovement {
 }
 
 export interface ProjectReviewDiagnostic {
-  readonly code: 'INVALID_PROJECT_FINDING' | 'PROPOSAL_ID_COLLISION' | 'UNRESOLVED_DISAGREEMENT';
+  readonly code: 'INVALID_PROJECT_FINDING' | 'UNRESOLVED_DISAGREEMENT';
   readonly findingId?: string;
 }
 

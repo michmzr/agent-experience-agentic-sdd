@@ -2,6 +2,9 @@ import { assertSanitizedReviewArtifact, type SanitizedReviewArtifact } from './s
 
 export interface ReviewFinding {
   readonly code: string;
+  readonly findingId: string;
+  readonly rootCauseId: string;
+  readonly recommendation: string;
   readonly [attribute: string]: unknown;
 }
 
@@ -105,9 +108,17 @@ function isReviewFindingList(value: unknown): value is readonly ReviewFinding[] 
 }
 
 function isReviewFinding(value: unknown): value is ReviewFinding {
-  return typeof value === 'object'
-    && value !== null
-    && !Array.isArray(value)
-    && typeof (value as { readonly code?: unknown }).code === 'string'
-    && (value as { readonly code: string }).code.trim().length > 0;
+  return isRecord(value)
+    && hasText(value.code)
+    && hasText(value.findingId)
+    && hasText(value.rootCauseId)
+    && hasText(value.recommendation);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
 }

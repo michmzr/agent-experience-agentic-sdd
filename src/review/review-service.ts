@@ -36,6 +36,11 @@ export interface ManualReviewDependencies {
   readonly repositoryIdentityResolver?: RepositoryIdentityResolver;
 }
 
+export interface ReviewServiceDiagnostic {
+  readonly code: 'PROPOSAL_ID_COLLISION';
+  readonly findingId: string;
+}
+
 export interface ReviewSessionDescriptor {
   readonly source: AgentSource;
   readonly id: string;
@@ -87,9 +92,10 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
       evidenceEventIds: improvement.evidenceEventIds
   }));
   const legacyFindingIds = new Set(legacyProposalFindings.map((finding) => finding.id));
-  const proposalCollisionDiagnostics = projectProposalFindings
+  const serviceDiagnostics: readonly ReviewServiceDiagnostic[] = projectProposalFindings
     .filter((finding) => legacyFindingIds.has(finding.id))
-    .map((finding) => ({ code: 'PROPOSAL_ID_COLLISION' as const, findingId: finding.id }));
+    .map((finding) => ({ code: 'PROPOSAL_ID_COLLISION' as const, findingId: finding.id }))
+    .sort(compareServiceDiagnostics);
   const intelligence = createReviewProposals({
     sessionId: artifact.session.sessionId,
     findings: [...legacyProposalFindings, ...projectProposalFindings.filter((finding) => !legacyFindingIds.has(finding.id))]
@@ -102,7 +108,8 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
     runtimeDiagnostics: run.diagnostics,
     findings: groups,
     projectImprovements: projectReview.improvements,
-    projectReviewDiagnostics: [...projectReviewDiagnostics, ...proposalCollisionDiagnostics].sort(compareProjectReviewDiagnostics),
+    projectReviewDiagnostics,
+    serviceDiagnostics,
     candidates: intelligence.candidates,
     proposals: intelligence.proposals
   };
@@ -173,6 +180,10 @@ function hasText(value: unknown): value is string {
 
 function compareProjectReviewDiagnostics(left: ProjectReviewDiagnostic, right: ProjectReviewDiagnostic): number {
   return compareText(left.code, right.code) || compareText(left.findingId ?? '', right.findingId ?? '');
+}
+
+function compareServiceDiagnostics(left: ReviewServiceDiagnostic, right: ReviewServiceDiagnostic): number {
+  return compareText(left.code, right.code) || compareText(left.findingId, right.findingId);
 }
 
 function compareText(left: string, right: string): number {
