@@ -4,9 +4,16 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  agent-experience-layer: 'link:'
+
 importers:
 
   .:
+    dependencies:
+      agent-experience-layer:
+        specifier: 'link:'
+        version: 'link:'
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
