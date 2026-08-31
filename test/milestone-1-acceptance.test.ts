@@ -7,7 +7,7 @@ import test from 'node:test';
 import { CodexSessionAdapter } from '../src/review/adapters/codex.js';
 import { groupReviewFindings, type ReviewFinding as OrchestratorFinding } from '../src/review/orchestrator.js';
 import { createReviewProposals, type ReviewFindingForProposal } from '../src/review/proposals.js';
-import { ReviewRuntime, type Reviewer } from '../src/review/runtime.js';
+import { ReviewRuntime, type ReviewFinding as RuntimeReviewFinding, type Reviewer } from '../src/review/runtime.js';
 import { sanitizeForReview } from '../src/review/sanitizer.js';
 
 const rawSecrets = [
@@ -52,7 +52,12 @@ test('preserves deterministic end-to-end review provenance without leaking raw s
       expensive: true,
       async review() {
         expensiveCalls += 1;
-        return [{ code: 'remote-deep-review' }];
+        return [{
+          code: 'remote-deep-review',
+          findingId: 'remote-deep-review:finding',
+          rootCauseId: 'remote-deep-review',
+          recommendation: 'Run the remote deep review'
+        }];
       }
     }
   ];
@@ -130,7 +135,7 @@ function fixtureReviewer(
     expensive: false,
     async review(artifact) {
       reviewedArtifacts.push(JSON.stringify(artifact));
-      return [finding as { readonly code: string; readonly [attribute: string]: string }];
+      return [finding as RuntimeReviewFinding];
     }
   };
 }

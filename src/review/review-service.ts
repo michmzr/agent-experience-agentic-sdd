@@ -7,7 +7,12 @@ import { discoverCursorExports, readCursorMarkdownExport } from './adapters/curs
 import type { NormalizedSession } from './contracts.js';
 import { createDefaultReviewRuntime, defaultReviewProfile } from './default-reviewers.js';
 import { groupReviewFindings, type ReviewFinding as OrchestratorFinding } from './orchestrator.js';
-import { createReviewProposals } from './proposals.js';
+import {
+  consolidateProjectReviewFindings,
+  isProjectReviewFinding,
+  type ProjectReviewFinding
+} from './project-improvements.js';
+import { createReviewProposals, type ReviewFindingForProposal } from './proposals.js';
 import { type ReviewRuntime, type ReviewProfile } from './runtime.js';
 import { sanitizeForReview } from './sanitizer.js';
 import { isWithinRepository, resolveRepositoryIdentity, type RepositoryIdentityResolver } from './repository-identity.js';
@@ -31,6 +36,12 @@ export interface ManualReviewDependencies {
   readonly repositoryIdentityResolver?: RepositoryIdentityResolver;
 }
 
+export interface ReviewServiceDiagnostic {
+  readonly code: 'DUPLICATE_REVIEWER_FINDING_ID' | 'PROPOSAL_ID_COLLISION' | 'PROJECT_REVIEWER_INVALID' | 'REVIEWER_RESULT_INVALID';
+  readonly findingId?: string;
+  readonly reviewerId?: string;
+}
+
 export interface ReviewSessionDescriptor {
   readonly source: AgentSource;
   readonly id: string;
@@ -47,23 +58,58 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
   const artifact = sanitizeForReview(normalized);
   const runtime = dependencies.runtime ?? createDefaultReviewRuntime();
   const run = await runtime.run({ artifact, profile: input.profile ?? defaultReviewProfile, allowExpensiveChecks: input.allowExpensiveChecks });
-  const findings = run.results.flatMap((result) => result.findings.map((finding) => ({
-    reviewerId: result.reviewerId,
-    findingId: finding.findingId,
-    rootCauseId: finding.rootCauseId,
-    recommendation: finding.recommendation
-  }))) as OrchestratorFinding[];
+  const knownEventIds = new Set(artifact.session.events.map((event) => event.id));
+  const duplicateReviewerIds = crossReviewerDuplicateReviewerIds(run.results);
+  const reviewerReviews = run.results.map((result) => duplicateReviewerIds.has(result.reviewerId)
+    ? invalidReviewerResult(result.reviewerId, 'DUPLICATE_REVIEWER_FINDING_ID')
+    : validateReviewerResult(result.reviewerId, result.findings, knownEventIds));
+  const projectFindings = reviewerReviews.flatMap((review) => review.projectFindings);
+  const projectReview = consolidateProjectReviewFindings(
+    projectFindings,
+    knownEventIds
+  );
+  const findings = reviewerReviews.flatMap((review) => review.legacyFindings);
   const groups = groupReviewFindings(findings);
+  const legacyProposalFindings: readonly ReviewFindingForProposal[] = groups.map((group) => ({
+    id: group.rootCauseId,
+    statement: `Review finding ${group.rootCauseId}`,
+    lessonKind: 'successful-workflow' as LessonKind,
+    proposal: { category: 'workflow' as const, title: recommendation(group.recommendation) }
+  }));
+  const projectProposalFindings: readonly ReviewFindingForProposal[] = projectReview.improvements.map((improvement) => ({
+      id: improvement.id,
+      statement: `Project improvement ${improvement.rootCauseId}`,
+      lessonKind: 'heuristic' as LessonKind,
+      proposal: { category: improvement.category, title: improvement.recommendation },
+      severity: improvement.severity,
+      evidenceEventIds: improvement.evidenceEventIds,
+      findingIds: improvement.findingIds
+  }));
+  const legacyFindingIds = new Set(legacyProposalFindings.map((finding) => finding.id));
+  const collisionDiagnostics: readonly ReviewServiceDiagnostic[] = projectProposalFindings
+    .filter((finding) => legacyFindingIds.has(finding.id))
+    .map((finding) => ({ code: 'PROPOSAL_ID_COLLISION' as const, findingId: finding.id }));
+  const serviceDiagnostics: readonly ReviewServiceDiagnostic[] = [
+    ...reviewerReviews.flatMap((review) => review.diagnostic ? [review.diagnostic] : []),
+    ...collisionDiagnostics
+  ].sort(compareServiceDiagnostics);
   const intelligence = createReviewProposals({
     sessionId: artifact.session.sessionId,
-    findings: groups.map((group) => ({
-      id: group.rootCauseId,
-      statement: `Review finding ${group.rootCauseId}`,
-      lessonKind: 'successful-workflow' as LessonKind,
-      proposal: { category: 'workflow' as const, title: recommendation(group.recommendation) }
-    }))
+    findings: [...legacyProposalFindings, ...projectProposalFindings.filter((finding) => !legacyFindingIds.has(finding.id))]
   });
-  return { source: input.source, selectedSession: artifact.session.sessionId, profile: run.profile, skippedReviewerIds: run.skippedReviewerIds, findings: groups, ...intelligence };
+  return {
+    source: input.source,
+    selectedSession: artifact.session.sessionId,
+    profile: run.profile,
+    skippedReviewerIds: run.skippedReviewerIds,
+    runtimeDiagnostics: run.diagnostics,
+    findings: groups,
+    projectImprovements: projectReview.improvements,
+    projectReviewDiagnostics: projectReview.diagnostics,
+    serviceDiagnostics,
+    candidates: intelligence.candidates,
+    proposals: intelligence.proposals
+  };
 }
 
 async function resolveSelectedSession(input: ManualReviewInput, dependencies: ManualReviewDependencies): Promise<string> {
@@ -114,4 +160,99 @@ async function loadSession(input: ManualReviewInput): Promise<NormalizedSession>
 
 function recommendation(value: { readonly state: 'agreed'; readonly value: string } | { readonly state: 'unresolved-disagreement'; readonly values: readonly string[] }): string {
   return value.state === 'agreed' ? value.value : value.values.join(' | ');
+}
+
+interface ValidatedReviewerResult {
+  readonly reviewerId: string;
+  readonly projectFindings: readonly ProjectReviewFinding[];
+  readonly legacyFindings: readonly OrchestratorFinding[];
+  readonly diagnostic?: ReviewServiceDiagnostic;
+}
+
+type ReviewerResultDiagnosticCode = Exclude<ReviewServiceDiagnostic['code'], 'PROPOSAL_ID_COLLISION'>;
+
+function validateReviewerResult(
+  reviewerId: string,
+  findings: readonly unknown[],
+  knownEventIds: ReadonlySet<string>
+): ValidatedReviewerResult {
+  const findingIds = new Set<string>();
+
+  for (const finding of findings) {
+    if (isProjectOutput(finding)) {
+      if (!isProjectReviewFinding(finding)
+        || finding.evidenceEventIds.some((eventId) => !knownEventIds.has(eventId))) {
+        return invalidReviewerResult(reviewerId, 'PROJECT_REVIEWER_INVALID');
+      }
+    } else if (!isLegacyFinding(finding)) {
+      return invalidReviewerResult(reviewerId, 'REVIEWER_RESULT_INVALID');
+    }
+    if (findingIds.has(finding.findingId)) return invalidReviewerResult(reviewerId, 'DUPLICATE_REVIEWER_FINDING_ID');
+    findingIds.add(finding.findingId);
+  }
+
+  const projectFindings = findings.filter(isProjectOutput).filter(isProjectReviewFinding);
+  const legacyFindings = findings
+    .filter((finding): finding is Omit<OrchestratorFinding, 'reviewerId'> => !isProjectOutput(finding) && isLegacyFinding(finding))
+    .map((finding) => ({
+      reviewerId,
+      findingId: finding.findingId,
+      rootCauseId: finding.rootCauseId,
+      recommendation: finding.recommendation
+  }));
+
+  return { reviewerId, projectFindings, legacyFindings };
+}
+
+function invalidReviewerResult(
+  reviewerId: string,
+  code: ReviewerResultDiagnosticCode
+): ValidatedReviewerResult {
+  return { reviewerId, projectFindings: [], legacyFindings: [], diagnostic: { code, reviewerId } };
+}
+
+function crossReviewerDuplicateReviewerIds(results: readonly { readonly reviewerId: string; readonly findings: readonly unknown[] }[]): ReadonlySet<string> {
+  const reviewersByFindingId = new Map<string, Set<string>>();
+  for (const result of results) {
+    for (const finding of result.findings) {
+      if (!isRecord(finding) || !hasText(finding.findingId)) continue;
+      const reviewers = reviewersByFindingId.get(finding.findingId);
+      if (reviewers) reviewers.add(result.reviewerId);
+      else reviewersByFindingId.set(finding.findingId, new Set([result.reviewerId]));
+    }
+  }
+  return new Set(
+    [...reviewersByFindingId.values()]
+      .filter((reviewers) => reviewers.size > 1)
+      .flatMap((reviewers) => [...reviewers])
+  );
+}
+
+function isProjectOutput(value: unknown): value is { readonly code: 'project-improvement' } {
+  return isRecord(value) && value.code === 'project-improvement';
+}
+
+function isLegacyFinding(value: unknown): value is Omit<OrchestratorFinding, 'reviewerId'> {
+  return isRecord(value)
+    && hasText(value.findingId)
+    && hasText(value.rootCauseId)
+    && hasText(value.recommendation);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function compareServiceDiagnostics(left: ReviewServiceDiagnostic, right: ReviewServiceDiagnostic): number {
+  return compareText(left.code, right.code)
+    || compareText(left.reviewerId ?? '', right.reviewerId ?? '')
+    || compareText(left.findingId ?? '', right.findingId ?? '');
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }

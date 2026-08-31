@@ -2,7 +2,7 @@ import { assertSanitizedReviewArtifact, type SanitizedReviewArtifact } from './s
 
 export interface ReviewFinding {
   readonly code: string;
-  readonly [attribute: string]: string;
+  readonly [attribute: string]: unknown;
 }
 
 export interface Reviewer {
@@ -33,10 +33,16 @@ export interface ReviewerResult {
   readonly findings: readonly ReviewFinding[];
 }
 
+export interface ReviewRuntimeDiagnostic {
+  readonly reviewerId: string;
+  readonly code: 'REVIEWER_FAILED';
+}
+
 export interface ReviewRun {
   readonly profile: Pick<ReviewProfile, 'id' | 'version'>;
   readonly results: readonly ReviewerResult[];
   readonly skippedReviewerIds: readonly string[];
+  readonly diagnostics: readonly ReviewRuntimeDiagnostic[];
 }
 
 export class ReviewRuntime {
@@ -60,9 +66,23 @@ export class ReviewRuntime {
     });
     const runnable = selected.filter((reviewer) => input.allowExpensiveChecks || !reviewer.expensive);
     const skippedReviewerIds = selected.filter((reviewer) => !input.allowExpensiveChecks && reviewer.expensive).map((reviewer) => reviewer.id);
-    const results = await Promise.all(runnable.map(async (reviewer) => ({ reviewerId: reviewer.id, findings: await reviewer.review(input.artifact) })));
+    const outcomes = await Promise.all(runnable.map(async (reviewer) => {
+      try {
+        const findings = await reviewer.review(input.artifact);
+        if (!isReviewFindingList(findings)) return { kind: 'diagnostic' as const, reviewerId: reviewer.id, code: 'REVIEWER_FAILED' as const };
+        return { kind: 'result' as const, reviewerId: reviewer.id, findings };
+      } catch {
+        return { kind: 'diagnostic' as const, reviewerId: reviewer.id, code: 'REVIEWER_FAILED' as const };
+      }
+    }));
+    const results = outcomes.flatMap((outcome): readonly ReviewerResult[] => outcome.kind === 'result'
+      ? [{ reviewerId: outcome.reviewerId, findings: outcome.findings }]
+      : []);
+    const diagnostics = outcomes
+      .filter((outcome): outcome is ReviewRuntimeDiagnostic & { readonly kind: 'diagnostic' } => outcome.kind === 'diagnostic')
+      .map(({ reviewerId, code }) => ({ reviewerId, code }));
 
-    return { profile: { id: profile.id, version: profile.version }, results, skippedReviewerIds };
+    return { profile: { id: profile.id, version: profile.version }, results, skippedReviewerIds, diagnostics };
   }
 }
 
@@ -78,4 +98,21 @@ function indexBy<T>(items: readonly T[], getKey: (item: T) => string, itemName: 
     indexed.set(key, item);
   }
   return indexed;
+}
+
+function isReviewFindingList(value: unknown): value is readonly ReviewFinding[] {
+  return Array.isArray(value) && value.every(isReviewFinding);
+}
+
+function isReviewFinding(value: unknown): value is ReviewFinding {
+  return isRecord(value)
+    && hasText(value.code);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
 }
