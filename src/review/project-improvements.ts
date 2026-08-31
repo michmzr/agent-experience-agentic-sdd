@@ -41,17 +41,23 @@ export function isProjectReviewFinding(value: unknown): value is ProjectReviewFi
 
 export function consolidateProjectReviewFindings(
   findings: readonly unknown[],
-  eventIds: readonly string[]
+  eventIds: ReadonlySet<string> | readonly string[]
 ): { readonly improvements: readonly ProjectImprovement[]; readonly diagnostics: readonly ProjectReviewDiagnostic[] } {
-  const knownEventIds = new Set(eventIds);
+  const knownEventIds: ReadonlySet<string> = isEventIdArray(eventIds) ? new Set(eventIds) : eventIds;
   const validFindings: ProjectReviewFinding[] = [];
   const diagnostics: ProjectReviewDiagnostic[] = [];
+  const findingIds = new Set<string>();
 
   for (const value of findings) {
     if (!isProjectReviewFinding(value) || value.evidenceEventIds.some((eventId) => !knownEventIds.has(eventId))) {
       diagnostics.push(invalidFindingDiagnostic(value));
       continue;
     }
+    if (findingIds.has(value.findingId)) {
+      diagnostics.push({ code: 'INVALID_PROJECT_FINDING', findingId: value.findingId });
+      continue;
+    }
+    findingIds.add(value.findingId);
     validFindings.push(value);
   }
 
@@ -96,6 +102,10 @@ export function consolidateProjectReviewFindings(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isEventIdArray(value: ReadonlySet<string> | readonly string[]): value is readonly string[] {
+  return Array.isArray(value);
 }
 
 function hasText(value: unknown): value is string {

@@ -51,6 +51,28 @@ test('does not treat duplicate evidence from the same event as corroboration', (
   assert.deepEqual(result, { improvements: [], diagnostics: [] });
 });
 
+test('rejects a duplicate finding ID instead of counting it as corroboration', () => {
+  const result = consolidateProjectReviewFindings(
+    [finding('event-1'), { ...finding('event-2'), findingId: 'architecture:event-1' }],
+    ['event-1', 'event-2']
+  );
+
+  assert.deepEqual(result, {
+    improvements: [],
+    diagnostics: [{ code: 'INVALID_PROJECT_FINDING', findingId: 'architecture:event-1' }]
+  });
+});
+
+test('accepts event IDs supplied as a readonly set', () => {
+  const result = consolidateProjectReviewFindings(
+    [finding('event-2'), finding('event-1')],
+    new Set(['event-2', 'event-1'])
+  );
+
+  assert.equal(result.improvements.length, 1);
+  assert.deepEqual(result.diagnostics, []);
+});
+
 test('preserves root-cause identifiers that contain a colon', () => {
   const result = consolidateProjectReviewFindings(
     [
