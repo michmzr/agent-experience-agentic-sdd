@@ -46,19 +46,21 @@ Outside an interactive terminal, repository initialization requires `--hooks cod
 
 Installation creates or updates the selected agent hook configuration and the shared executable wrapper. It preserves unrelated entries in existing JSON hook files and fails before mutation if that JSON cannot be safely parsed or merged. The wrapper is generated from a packaged template, invokes the effective AEL CLI entrypoint determined at initialization, resolves the Git top level, and retains the current Node-version fallback and fail-open behavior.
 
+Repeated repository initialization merges the new selection with hook sources already recorded for that repository. It never removes an existing hook configuration or removes a source from the status requirements.
+
 After writing files, `ael init` runs static verification for every selected hook: configuration registration, wrapper presence and executability, and reachable CLI entrypoint. It reports a typed failure and does not register the repository when any selected hook cannot be verified. A successful repository initialization writes or refreshes the registry entry. Global initialization continues to initialize only the selected local data store and cannot install project hooks.
 
 Passive-hook ingestion resolves the repository root supplied by the project wrapper and records it on newly created sessions. The wrapper already resolves the Git top level before invoking the CLI. The capture path must remain fail-open and preserve its current bounded, generic diagnostics. A repository-resolution failure must not make a hook block or warn the agent.
 
 ## Status reporting
 
-`status` reports the canonical repository root and identifier, the effective AEL CLI entrypoint, the selected private database path and availability, and static status for Codex and Cursor hook configuration. Each hook result states whether its configuration file, shared wrapper, and generated CLI entrypoint exist. Status inspection must not execute a hook or write an event.
+`status` reports the canonical repository root and identifier, the effective AEL CLI entrypoint, the selected private database path and availability, and static status for every hook source selected during repository initialization. Each hook result states whether its configuration file, shared wrapper, and generated CLI entrypoint exist. A missing or invalid selected hook makes `status` return a non-zero exit code. An unselected hook is not an error. Status inspection must not execute a hook or write an event.
 
-`status-global` reports the same CLI and database facts once, then reports every registry entry with its canonical path, repository identifier, last observed time, and static Codex and Cursor hook status. It reads only registered paths. Missing, moved, or no-longer-Git directories are reported as unavailable rather than removed from the registry.
+`status-global` reports the same CLI and database facts once, then reports every registry entry with its canonical path, repository identifier, selected hook sources, last observed time, and static hook status. It reads only registered paths. Missing, moved, or no-longer-Git directories are reported as unavailable rather than removed from the registry. It always returns a report exit code, even when an individual repository has an unavailable required hook.
 
 ## Storage and compatibility
 
-The schema gains a versioned repository registry table. The registry is additive and does not rewrite existing sessions or records. Query methods return repository-scoped sessions, events, and aggregates with deterministic ordering. Existing storage migrations remain valid.
+The schema gains a versioned repository registry table with the selected hook sources. The registry is additive and does not rewrite existing sessions or records. Query methods return repository-scoped sessions, events, and aggregates with deterministic ordering. Existing storage migrations remain valid.
 
 ## Error handling
 

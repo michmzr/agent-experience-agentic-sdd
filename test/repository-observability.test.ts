@@ -50,8 +50,8 @@ test('upserts registered repositories with deterministic ordering', () => {
     store.registerRepository({ id: beta, root: beta, observedAt: '2026-08-31T11:00:00.000Z' });
 
     assert.deepEqual(store.listRepositories(), [
-      { id: alpha, root: alpha, observedAt: '2026-08-31T10:00:00.000Z' },
-      { id: beta, root: beta, observedAt: '2026-08-31T11:00:00.000Z' }
+      { id: alpha, root: alpha, observedAt: '2026-08-31T10:00:00.000Z', selectedSources: [] },
+      { id: beta, root: beta, observedAt: '2026-08-31T11:00:00.000Z', selectedSources: [] }
     ]);
   } finally {
     store.close();

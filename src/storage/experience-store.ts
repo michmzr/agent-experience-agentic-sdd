@@ -119,6 +119,7 @@ interface RepositoryRow {
   repository_id: string;
   repository_root: string;
   observed_at: string;
+  selected_sources_json: string;
 }
 
 export type KnowledgeScope = 'global' | 'repository';
@@ -127,6 +128,7 @@ export interface RepositoryRegistration {
   readonly id: string;
   readonly root: string;
   readonly observedAt: string;
+  readonly selectedSources?: readonly ('codex' | 'cursor')[];
 }
 
 export interface RepositoryRecord { readonly session: Session; readonly events: readonly CapturedEventRecord[]; }
@@ -286,6 +288,7 @@ const repositoryRegistryMigration = `
     observed_at TEXT NOT NULL
   );
 `;
+const repositorySourcesMigration = `ALTER TABLE repositories ADD COLUMN selected_sources_json TEXT NOT NULL DEFAULT '[]';`;
 
 export class ExperienceStore {
   private readonly database: DatabaseSync;
@@ -315,22 +318,26 @@ export class ExperienceStore {
       throw new TypeError('Repository registration requires an identifier and root.');
     }
     assertCanonicalTimestamp(registration.observedAt);
+    const existing = this.database.prepare('SELECT selected_sources_json FROM repositories WHERE repository_id = ?').get(registration.id) as { selected_sources_json: string } | undefined;
+    const selectedSources = [...new Set([...(existing ? JSON.parse(existing.selected_sources_json) as string[] : []), ...(registration.selectedSources ?? [])])].filter((source): source is 'codex' | 'cursor' => source === 'codex' || source === 'cursor').sort();
     this.database.prepare(`
-      INSERT INTO repositories (repository_id, repository_root, observed_at) VALUES (?, ?, ?)
+      INSERT INTO repositories (repository_id, repository_root, observed_at, selected_sources_json) VALUES (?, ?, ?, ?)
       ON CONFLICT(repository_id) DO UPDATE SET
         repository_root = excluded.repository_root,
-        observed_at = excluded.observed_at
-    `).run(registration.id, registration.root, registration.observedAt);
+        observed_at = excluded.observed_at,
+        selected_sources_json = excluded.selected_sources_json
+    `).run(registration.id, registration.root, registration.observedAt, JSON.stringify(selectedSources));
   }
 
   listRepositories(): readonly RepositoryRegistration[] {
     const rows = this.database.prepare(`
-      SELECT repository_id, repository_root, observed_at FROM repositories ORDER BY repository_root
+      SELECT repository_id, repository_root, observed_at, selected_sources_json FROM repositories ORDER BY repository_root
     `).all() as unknown as RepositoryRow[];
     return rows.map((row) => Object.freeze({
       id: row.repository_id,
       root: row.repository_root,
-      observedAt: row.observed_at
+      observedAt: row.observed_at,
+      selectedSources: JSON.parse(row.selected_sources_json) as readonly ('codex' | 'cursor')[]
     }));
   }
 
@@ -746,6 +753,7 @@ export class ExperienceStore {
         this.database.exec(repositoryRegistryMigration);
         this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(12, new Date().toISOString());
       }
+      if (!applied.has(13)) { this.database.exec(repositorySourcesMigration); this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(13, new Date().toISOString()); }
       this.database.exec('COMMIT');
     } catch (error) {
       this.database.exec('ROLLBACK');
