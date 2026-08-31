@@ -2,7 +2,7 @@
 
 source_name="$1"
 repository_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-cli="$repository_root/dist/src/cli.js"
+cli="/Users/michmzr/projects/agent-experience-agentic-sdd/dist/src/cli.js"
 
 if [ ! -f "$cli" ]; then
   printf '%s\n' 'AEL_CAPTURE_UNAVAILABLE: Passive capture skipped.' >&2
