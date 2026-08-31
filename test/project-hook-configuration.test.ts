@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import type { SessionId } from '../src/domain/types.js';
+import { ExperienceStore } from '../src/storage/experience-store.js';
+
 test('registers only passive technical and session hooks', () => {
   const cursor = JSON.parse(readFileSync('.cursor/hooks.json', 'utf8')) as { version: number; hooks: Record<string, Array<{ command: string }>> };
   const codex = JSON.parse(readFileSync('.codex/hooks.json', 'utf8')) as {
@@ -61,7 +64,30 @@ test('resolves the Codex wrapper from a repository subdirectory', () => {
     assert.equal(probe.status, 0, probe.stderr);
     assert.equal(probe.stdout, '');
     assert.equal(probe.stderr, '');
+    const store = new ExperienceStore(join(dataDirectory, 'experience.sqlite'));
+    try {
+      assert.equal(store.loadSession('configuration-probe' as SessionId)?.source, 'codex');
+    } finally { store.close(); }
   } finally {
     rmSync(dataDirectory, { recursive: true, force: true });
   }
+});
+
+test('uses a supported Node when hook PATH only contains git', () => {
+  const dataDirectory = mkdtempSync(join(tmpdir(), 'ael-project-hook-node-'));
+  try {
+    const probe = spawnSync('/bin/sh', ['.agents/hooks/ael-passive-capture.sh', 'codex'], {
+      cwd: process.cwd(),
+      env: { ...process.env, PATH: '/usr/bin', AEL_DATA_DIR: dataDirectory },
+      input: JSON.stringify({ session_id: 'node-path-probe', hook_event_name: 'SessionStart', source: 'startup' }),
+      encoding: 'utf8'
+    });
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.equal(probe.stdout, '');
+    assert.equal(probe.stderr, '');
+    const store = new ExperienceStore(join(dataDirectory, 'experience.sqlite'));
+    try {
+      assert.equal(store.loadSession('node-path-probe' as SessionId)?.source, 'codex');
+    } finally { store.close(); }
+  } finally { rmSync(dataDirectory, { recursive: true, force: true }); }
 });

@@ -10,6 +10,7 @@ import type { KnowledgeState } from './domain/types.js';
 import type { KnowledgeScope } from './storage/experience-store.js';
 import { discoverReviewSessions, runManualReview, type ManualReviewDependencies } from './review/review-service.js';
 import { createProcessTerminalHost, TerminalReviewSelectionPrompt, type TerminalHost } from './review/terminal-prompt.js';
+import { verifyHookReadiness } from './cli/hook-readiness.js';
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string; }
 export interface RunCliAsyncOptions {
@@ -24,7 +25,7 @@ interface ParsedArguments { readonly positionals: string[]; readonly options: Ma
 const scopes = new Set(['global', 'repo'] as const);
 const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired']);
 const reviewSources = new Set(['codex', 'claude-code', 'cursor'] as const);
-const knownCommands = new Set(['init', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'review', 'runtime', 'knowledge']);
+const knownCommands = new Set(['init', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'review', 'runtime', 'knowledge', 'hooks']);
 
 export function runCli(args: string[]): CliResult {
   if (args.length === 1 && args[0] === '--help') return { exitCode: 0, stdout: `${usage()}\n`, stderr: '' };
@@ -168,6 +169,10 @@ function execute(service: ExperienceService, parsed: ParsedArguments): unknown {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'input', 'json', 'repository']);
     return service.knowledgePromote(requiredString(parsed.options, 'repository'), requiredString(parsed.options, 'input'));
   }
+  if (command === 'hooks' && subcommand === 'verify' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['worktree', 'json']);
+    return verifyHookReadiness({ worktreePath: requiredString(parsed.options, 'worktree') });
+  }
   throw invalidCommand(command);
 }
 
@@ -243,7 +248,8 @@ function filterOptions(options: Map<string, string | true>) {
   return { scope: optionalScope(options), repositoryId: optionalString(options, 'repository-id'), state: optionalState(options), tag: optionalString(options, 'tag') };
 }
 function success(value: unknown, json: boolean, positionals: readonly string[]): CliResult {
-  const exitCode = positionals[0] === 'runtime' && positionals[1] === 'evaluate' && (value as { outcome?: string }).outcome === 'BLOCK' ? 1 : 0;
+  const exitCode = (positionals[0] === 'runtime' && positionals[1] === 'evaluate' && (value as { outcome?: string }).outcome === 'BLOCK')
+    || (positionals[0] === 'hooks' && positionals[1] === 'verify' && (value as { status?: string }).status !== 'ready') ? 1 : 0;
   return json ? { exitCode, stdout: `${JSON.stringify(value)}\n`, stderr: '' } : { exitCode, stdout: `${humanOutput(value, positionals)}\n`, stderr: '' };
 }
 function humanOutput(value: unknown, positionals: readonly string[]): string {
@@ -269,6 +275,10 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
   if (command === 'runtime' && subcommand === 'status') {
     const status = value as { health: string; profileId: string; fallbackSource: string; circuitState: string };
     return `Runtime ${status.health}; profile ${status.profileId}; fallback ${status.fallbackSource}; circuit ${status.circuitState}.`;
+  }
+  if (command === 'hooks' && subcommand === 'verify') {
+    const result = value as { status: string; sources: readonly { source: string }[]; code?: string };
+    return result.status === 'ready' ? `Hook readiness passed for ${result.sources.map(({ source }) => source).join(', ')}.` : `Hook readiness failed: ${result.code}.`;
   }
   if (command === 'runtime' && subcommand === 'config') return formatRuntimeConfiguration(value as RuntimeConfigurationExplanation);
   if (command === 'knowledge' && subcommand === 'promote') return `Promoted ${(value as { identity: string }).identity} as branch-local knowledge.`;
@@ -314,7 +324,7 @@ function invalidCommand(command: string | undefined): SyntaxError {
     ? `Unknown command form for ${command}.`
     : 'Unknown command.');
 }
-function usage(): string { return 'Usage: ael <init|experience add|validate|inspect|lessons list|retrieve|export|capture hook --source codex|cursor|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote> [options]'; }
+function usage(): string { return 'Usage: ael <init|experience add|validate|inspect|lessons list|retrieve|export|capture hook --source codex|cursor|hooks verify --worktree path|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote> [options]'; }
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } {
   return error instanceof DomainError || error instanceof RuntimeServiceError
     ? { code: error.code, message: error.message }
