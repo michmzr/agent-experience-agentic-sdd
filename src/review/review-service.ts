@@ -176,19 +176,19 @@ function validateReviewerResult(
   findings: readonly unknown[],
   knownEventIds: ReadonlySet<string>
 ): ValidatedReviewerResult {
-  const projectFindingIds = new Set<string>();
+  const findingIds = new Set<string>();
 
   for (const finding of findings) {
     if (isProjectOutput(finding)) {
       if (!isProjectReviewFinding(finding)
-        || finding.evidenceEventIds.some((eventId) => !knownEventIds.has(eventId))
-        || projectFindingIds.has(finding.findingId)) {
+        || finding.evidenceEventIds.some((eventId) => !knownEventIds.has(eventId))) {
         return invalidReviewerResult(reviewerId, 'PROJECT_REVIEWER_INVALID');
       }
-      projectFindingIds.add(finding.findingId);
-      continue;
+    } else if (!isLegacyFinding(finding)) {
+      return invalidReviewerResult(reviewerId, 'REVIEWER_RESULT_INVALID');
     }
-    if (!isLegacyFinding(finding)) return invalidReviewerResult(reviewerId, 'REVIEWER_RESULT_INVALID');
+    if (findingIds.has(finding.findingId)) return invalidReviewerResult(reviewerId, 'DUPLICATE_REVIEWER_FINDING_ID');
+    findingIds.add(finding.findingId);
   }
 
   const projectFindings = findings.filter(isProjectOutput).filter(isProjectReviewFinding);

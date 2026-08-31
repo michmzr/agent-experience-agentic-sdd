@@ -138,7 +138,7 @@ test('rejects every project contribution from a poisoned reviewer while retainin
   );
 
   assert.deepEqual(review.serviceDiagnostics, [
-    { code: 'PROJECT_REVIEWER_INVALID', reviewerId: 'duplicate' },
+    { code: 'DUPLICATE_REVIEWER_FINDING_ID', reviewerId: 'duplicate' },
     { code: 'PROJECT_REVIEWER_INVALID', reviewerId: 'malformed' },
     { code: 'PROJECT_REVIEWER_INVALID', reviewerId: 'unknown' }
   ]);
@@ -278,6 +278,74 @@ test('rejects the complete reviewer result when a malformed project entry accomp
   );
 
   assert.deepEqual(review.serviceDiagnostics, [{ code: 'PROJECT_REVIEWER_INVALID', reviewerId: 'mixed' }]);
+  assert.deepEqual(review.findings.map((finding) => finding.rootCauseId), ['healthy-root']);
+});
+
+test('rejects a complete reviewer result with a duplicate ID shared by project and legacy findings', async () => {
+  const root = codexRoot([
+    { kind: 'tool', occurredAt: '2026-08-24T10:00:00.000Z', text: 'architecture boundary 1', exitStatus: 1 },
+    { kind: 'tool', occurredAt: '2026-08-24T10:01:00.000Z', text: 'architecture boundary 2', exitStatus: 1 },
+    { kind: 'tool', occurredAt: '2026-08-24T10:02:00.000Z', text: 'architecture boundary 3', exitStatus: 1 }
+  ]);
+  const runtime = new ReviewRuntime({
+    profiles: [{ id: 'project', version: '1', reviewerIds: ['mixed', 'healthy'] }],
+    reviewers: [
+      {
+        id: 'mixed', expensive: false, async review(artifact) {
+          return [
+            { ...projectFinding('mixed', artifact.session.events[0]?.id ?? ''), findingId: 'shared' },
+            { code: 'legacy', findingId: 'shared', rootCauseId: 'mixed-root', recommendation: 'Discard this result' }
+          ];
+        }
+      },
+      {
+        id: 'healthy', expensive: false, async review(artifact) {
+          return [
+            ...artifact.session.events.slice(1).map((event) => projectFinding('healthy', event.id)),
+            { code: 'legacy', findingId: 'healthy:legacy', rootCauseId: 'healthy-root', recommendation: 'Keep this result' }
+          ];
+        }
+      }
+    ]
+  });
+
+  const review = await runManualReview(
+    { source: 'codex', root, session: 'session.jsonl', profile: { id: 'project', version: '1' }, allowExpensiveChecks: false },
+    { runtime }
+  );
+
+  assert.deepEqual(review.serviceDiagnostics, [{ code: 'DUPLICATE_REVIEWER_FINDING_ID', reviewerId: 'mixed' }]);
+  assert.equal(review.projectImprovements[0]?.findingIds.every((id) => id.startsWith('healthy:')), true);
+  assert.deepEqual(review.findings.map((finding) => finding.rootCauseId), ['healthy-root']);
+});
+
+test('rejects a complete reviewer result with duplicate legacy finding IDs', async () => {
+  const root = codexRoot([{ kind: 'tool', occurredAt: '2026-08-24T10:00:00.000Z', text: 'review evidence', exitStatus: 0 }]);
+  const runtime = new ReviewRuntime({
+    profiles: [{ id: 'project', version: '1', reviewerIds: ['duplicate', 'healthy'] }],
+    reviewers: [
+      {
+        id: 'duplicate', expensive: false, async review() {
+          return [
+            { code: 'legacy', findingId: 'shared', rootCauseId: 'duplicate-one', recommendation: 'Discard this result' },
+            { code: 'legacy', findingId: 'shared', rootCauseId: 'duplicate-two', recommendation: 'Discard this result' }
+          ];
+        }
+      },
+      {
+        id: 'healthy', expensive: false, async review() {
+          return [{ code: 'legacy', findingId: 'healthy:legacy', rootCauseId: 'healthy-root', recommendation: 'Keep this result' }];
+        }
+      }
+    ]
+  });
+
+  const review = await runManualReview(
+    { source: 'codex', root, session: 'session.jsonl', profile: { id: 'project', version: '1' }, allowExpensiveChecks: false },
+    { runtime }
+  );
+
+  assert.deepEqual(review.serviceDiagnostics, [{ code: 'DUPLICATE_REVIEWER_FINDING_ID', reviewerId: 'duplicate' }]);
   assert.deepEqual(review.findings.map((finding) => finding.rootCauseId), ['healthy-root']);
 });
 
