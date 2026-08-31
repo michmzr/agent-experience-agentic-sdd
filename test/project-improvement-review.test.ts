@@ -19,7 +19,7 @@ test('creates one evidence-backed architecture proposal without duplicating it i
     { kind: 'tool', occurredAt: '2026-08-24T10:01:00.000Z', text: 'architecture boundary', exitStatus: 1 }
   ]);
   const runtime = new ReviewRuntime({
-    profiles: [{ id: 'project', version: '1', reviewerIds: ['architecture', 'invalid', 'broken'] }],
+    profiles: [{ id: 'project', version: '1', reviewerIds: ['architecture', 'invalid', 'malformed', 'broken'] }],
     reviewers: [
       {
         id: 'architecture',
@@ -46,6 +46,16 @@ test('creates one evidence-backed architecture proposal without duplicating it i
           }];
         }
       },
+      {
+        id: 'malformed',
+        expensive: false,
+        async review() {
+          return [{
+            code: 'project-improvement', findingId: 'malformed', rootCauseId: 'module-boundary', recommendation: 'Separate the affected module boundary',
+            category: 'architecture', severity: 'critical', evidenceEventIds: ['unknown-event']
+          }];
+        }
+      },
       { id: 'broken', expensive: false, async review() { throw new Error('reviewer secret'); } }
     ]
   });
@@ -57,7 +67,10 @@ test('creates one evidence-backed architecture proposal without duplicating it i
 
   assert.equal(review.findings.length, 0);
   assert.equal(review.projectImprovements.length, 1);
-  assert.deepEqual(review.projectReviewDiagnostics, [{ code: 'INVALID_PROJECT_FINDING', findingId: 'invalid' }]);
+  assert.deepEqual(review.projectReviewDiagnostics, [
+    { code: 'INVALID_PROJECT_FINDING', findingId: 'invalid' },
+    { code: 'INVALID_PROJECT_FINDING', findingId: 'malformed' }
+  ]);
   assert.deepEqual(review.runtimeDiagnostics, [{ reviewerId: 'broken', code: 'REVIEWER_FAILED' }]);
   assert.deepEqual(review.proposals, [{
     id: `proposal:${review.selectedSession}:project-improvement:architecture:module-boundary`,

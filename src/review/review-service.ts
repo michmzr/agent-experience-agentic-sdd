@@ -7,7 +7,11 @@ import { discoverCursorExports, readCursorMarkdownExport } from './adapters/curs
 import type { NormalizedSession } from './contracts.js';
 import { createDefaultReviewRuntime, defaultReviewProfile } from './default-reviewers.js';
 import { groupReviewFindings, type ReviewFinding as OrchestratorFinding } from './orchestrator.js';
-import { consolidateProjectReviewFindings, isProjectReviewFinding } from './project-improvements.js';
+import {
+  consolidateProjectReviewFindings,
+  isProjectReviewFinding,
+  type ProjectReviewDiagnostic
+} from './project-improvements.js';
 import { createReviewProposals } from './proposals.js';
 import { type ReviewRuntime, type ReviewProfile } from './runtime.js';
 import { sanitizeForReview } from './sanitizer.js';
@@ -49,14 +53,18 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
   const runtime = dependencies.runtime ?? createDefaultReviewRuntime();
   const run = await runtime.run({ artifact, profile: input.profile ?? defaultReviewProfile, allowExpensiveChecks: input.allowExpensiveChecks });
   const rawFindings = run.results.flatMap((result) => result.findings.map((finding) => ({ reviewerId: result.reviewerId, finding })));
-  const typedProjectFindings = rawFindings.map(({ finding }) => finding).filter(isProjectReviewFinding);
-  const invalidProjectFindings = rawFindings
+  const projectOutputFindings = rawFindings
     .map(({ finding }) => finding)
-    .filter((finding) => finding.code === 'project-improvement' && !isProjectReviewFinding(finding));
+    .filter((finding) => finding.code === 'project-improvement');
+  const projectFindings = projectOutputFindings.filter(isProjectReviewFinding);
+  const malformedProjectDiagnostics = projectOutputFindings
+    .filter((finding) => !isProjectReviewFinding(finding))
+    .map(invalidProjectFindingDiagnostic);
   const projectReview = consolidateProjectReviewFindings(
-    [...typedProjectFindings, ...invalidProjectFindings],
+    projectFindings,
     new Set(artifact.session.events.map((event) => event.id))
   );
+  const projectReviewDiagnostics = [...projectReview.diagnostics, ...malformedProjectDiagnostics].sort(compareProjectReviewDiagnostics);
   const findings = rawFindings.filter(({ finding }) => finding.code !== 'project-improvement').map(({ reviewerId, finding }) => ({
     reviewerId,
     findingId: finding.findingId,
@@ -92,7 +100,7 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
     runtimeDiagnostics: run.diagnostics,
     findings: groups,
     projectImprovements: projectReview.improvements,
-    projectReviewDiagnostics: projectReview.diagnostics,
+    projectReviewDiagnostics,
     candidates: [...intelligence.candidates, ...projectIntelligence.candidates],
     proposals: [...intelligence.proposals, ...projectIntelligence.proposals]
   };
@@ -146,4 +154,25 @@ async function loadSession(input: ManualReviewInput): Promise<NormalizedSession>
 
 function recommendation(value: { readonly state: 'agreed'; readonly value: string } | { readonly state: 'unresolved-disagreement'; readonly values: readonly string[] }): string {
   return value.state === 'agreed' ? value.value : value.values.join(' | ');
+}
+
+function invalidProjectFindingDiagnostic(value: unknown): ProjectReviewDiagnostic {
+  const findingId = isRecord(value) && hasText(value.findingId) ? value.findingId : undefined;
+  return findingId ? { code: 'INVALID_PROJECT_FINDING', findingId } : { code: 'INVALID_PROJECT_FINDING' };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function compareProjectReviewDiagnostics(left: ProjectReviewDiagnostic, right: ProjectReviewDiagnostic): number {
+  return compareText(left.code, right.code) || compareText(left.findingId ?? '', right.findingId ?? '');
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
