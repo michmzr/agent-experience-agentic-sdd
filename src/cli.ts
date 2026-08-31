@@ -11,6 +11,7 @@ import type { KnowledgeScope } from './storage/experience-store.js';
 import { discoverReviewSessions, runManualReview, type ManualReviewDependencies } from './review/review-service.js';
 import { createProcessTerminalHost, TerminalReviewSelectionPrompt, type TerminalHost } from './review/terminal-prompt.js';
 import { verifyHookReadiness } from './cli/hook-readiness.js';
+import { resolveRepository, resolveRepositoryRoot } from './repository/local-repository.js';
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string; }
 export interface RunCliAsyncOptions {
@@ -143,13 +144,13 @@ function execute(service: ExperienceService, parsed: ParsedArguments): unknown {
     return service.export(filterOptions(parsed.options));
   }
   if (command === 'list' && subcommand === 'records' && rest.length === 0) {
-    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id']); return service.listRecords(requiredString(parsed.options, 'repository-id'));
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.listRecords(repositoryId(parsed.options));
   }
   if (command === 'stats' && subcommand === undefined && rest.length === 0) {
-    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id']); return service.stats(requiredString(parsed.options, 'repository-id'));
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.stats(repositoryId(parsed.options));
   }
   if (command === 'status-global' && subcommand === undefined && rest.length === 0) {
-    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id']); return service.statusGlobal(optionalString(parsed.options, 'repository-id'));
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.statusGlobal(optionalRepositoryId(parsed.options));
   }
   if (command === 'runtime' && subcommand === 'evaluate' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'input', 'json', 'profile', 'refresh']);
@@ -255,6 +256,21 @@ function optionalState(options: Map<string, string | true>): KnowledgeState | un
 }
 function filterOptions(options: Map<string, string | true>) {
   return { scope: optionalScope(options), repositoryId: optionalString(options, 'repository-id'), state: optionalState(options), tag: optionalString(options, 'tag') };
+}
+function optionalRepositoryId(options: Map<string, string | true>): string | undefined {
+  const explicit = optionalString(options, 'repository-id'); const path = optionalString(options, 'repository');
+  if (explicit !== undefined && path !== undefined) throw new SyntaxError('Repository id and repository path cannot be combined.');
+  if (path === undefined) return explicit;
+  const repository = resolveRepositoryRoot(path);
+  if (repository === undefined) throw new DomainError('REPOSITORY_ROOT_REQUIRED', 'Repository path must be a Git top-level directory.');
+  return repository.id;
+}
+function repositoryId(options: Map<string, string | true>): string {
+  const selected = optionalRepositoryId(options);
+  if (selected !== undefined) return selected;
+  const repository = resolveRepository(process.cwd());
+  if (repository === undefined) throw new DomainError('REPOSITORY_REQUIRED', 'A Git repository is required.');
+  return repository.id;
 }
 function success(value: unknown, json: boolean, positionals: readonly string[]): CliResult {
   const exitCode = (positionals[0] === 'runtime' && positionals[1] === 'evaluate' && (value as { outcome?: string }).outcome === 'BLOCK')

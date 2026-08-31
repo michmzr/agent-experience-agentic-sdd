@@ -20,3 +20,10 @@ test('exposes the repository observability command forms', () => {
     assert.notEqual(result.exitCode, 2, result.stderr);
   }
 });
+
+test('accepts a Git top-level repository path and rejects a nested path', () => {
+  assert.notEqual(runCli(['stats', '--repository', process.cwd(), '--json']).exitCode, 2);
+  const nested = runCli(['stats', '--repository', 'src', '--json']);
+  assert.equal(nested.exitCode, 1);
+  assert.match(nested.stdout, /REPOSITORY_ROOT_REQUIRED/);
+});
