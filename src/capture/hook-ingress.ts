@@ -2,6 +2,7 @@ import { adaptPassiveHook } from './hook-adapters/index.js';
 import { MAX_HOOK_INPUT_BYTES, type PassiveHookSource } from './hook-adapters/contracts.js';
 import { createPassiveCaptureService } from './passive-service.js';
 import { ExperienceStore } from '../storage/experience-store.js';
+import { resolveRepository } from '../repository/local-repository.js';
 
 const HOOK_DATABASE_TIMEOUT_MS = 250;
 
@@ -31,12 +32,16 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
       return degraded('INVALID_INPUT');
     }
 
-    const record = adaptPassiveHook(options.source, payload, options.now());
+    const repository = resolveRepository(process.cwd());
+    const record = adaptPassiveHook(options.source, payload, options.now(), repository?.id as never);
     if (record === undefined) return { status: 'ignored' };
 
     store = new ExperienceStore(options.databasePath, { timeoutMs: HOOK_DATABASE_TIMEOUT_MS });
     const service = createPassiveCaptureService({ store });
     const result = service.capture(record);
+    if (repository !== undefined && result.status !== 'degraded') {
+      store.registerRepository({ id: repository.id, root: repository.root, observedAt: options.now() });
+    }
     return result.status === 'degraded'
       ? degraded('PERSISTENCE_FAILED')
       : result;

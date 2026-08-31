@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import { runCliAsync } from '../src/cli.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
+import { resolveRepository } from '../src/repository/local-repository.js';
 
 const now = () => '2026-08-26T08:00:00.000Z';
 
@@ -38,6 +39,7 @@ test('captures a Codex hook with empty stdout and exit zero', async () => {
 
     assert.deepEqual(result, { exitCode: 0, stdout: '', stderr: '' });
     assert.equal(readSession(dataDir, 'session-1')?.source, 'codex');
+    assert.equal(readSession(dataDir, 'session-1')?.repositoryId, resolveRepository(process.cwd())?.id);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

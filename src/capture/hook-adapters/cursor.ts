@@ -7,14 +7,14 @@ import { technicalSignature } from './technical-signature.js';
 
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,511}$/;
 
-export function adaptCursorPassiveHook(payload: unknown, receivedAt: string): PassiveCaptureRecord | undefined {
+export function adaptCursorPassiveHook(payload: unknown, receivedAt: string, repositoryId?: import('../../domain/types.js').Session['repositoryId']): PassiveCaptureRecord | undefined {
   assertCanonicalTimestamp(receivedAt);
   const record = hookRecord(payload);
   switch (record.hook_event_name) {
     case 'sessionStart':
       return Object.freeze({
         kind: 'session-start',
-        session: Object.freeze({ id: lifecycleSessionId(record), source: 'cursor', startedAt: receivedAt })
+        session: Object.freeze({ id: lifecycleSessionId(record), source: 'cursor', startedAt: receivedAt, ...(repositoryId === undefined ? {} : { repositoryId }) })
       });
     case 'sessionEnd':
       return Object.freeze({

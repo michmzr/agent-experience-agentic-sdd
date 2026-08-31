@@ -7,7 +7,7 @@ import { technicalSignature } from './technical-signature.js';
 
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,511}$/;
 
-export function adaptCodexPassiveHook(payload: unknown, receivedAt: string): PassiveCaptureRecord | undefined {
+export function adaptCodexPassiveHook(payload: unknown, receivedAt: string, repositoryId?: import('../../domain/types.js').Session['repositoryId']): PassiveCaptureRecord | undefined {
   assertCanonicalTimestamp(receivedAt);
   const record = hookRecord(payload);
   switch (record.hook_event_name) {
@@ -15,7 +15,7 @@ export function adaptCodexPassiveHook(payload: unknown, receivedAt: string): Pas
       if (record.source !== 'startup') return undefined;
       return Object.freeze({
         kind: 'session-start',
-        session: Object.freeze({ id: sessionId(record.session_id), source: 'codex', startedAt: receivedAt })
+        session: Object.freeze({ id: sessionId(record.session_id), source: 'codex', startedAt: receivedAt, ...(repositoryId === undefined ? {} : { repositoryId }) })
       });
     case 'SessionEnd':
       return Object.freeze({
