@@ -86,7 +86,7 @@ test('keeps fixture scope, authority, lifecycle, and serialization deterministic
 test('accepts the repo scope contract for init, validate, lessons, retrieve, and export', () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-cli-'));
   try {
-    assert.equal(runCli(['init', '--scope', 'repo', '--data-dir', dataDir]).exitCode, 0);
+    assert.equal(runCli(['init', '--scope', 'global', '--data-dir', dataDir]).exitCode, 0);
     assert.equal(runCli(['experience', 'add', '--input', fixture('positive-workflow.json'), '--data-dir', dataDir]).exitCode, 0);
     assert.equal(runCli(['validate', '--scope', 'repo', '--data-dir', dataDir]).exitCode, 0);
     assert.equal(runCli(['lessons', 'list', '--scope', 'repo', '--json', '--data-dir', dataDir]).exitCode, 0);

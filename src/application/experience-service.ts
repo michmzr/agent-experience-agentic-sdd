@@ -42,6 +42,9 @@ export class ExperienceService {
     store.close();
     return { databasePath: this.databasePath };
   }
+  initRepository(input: { id: string; root: string; sources: readonly ('codex' | 'cursor')[]; observedAt: string }): { databasePath: string } {
+    const store = this.openStore(); try { store.registerRepository({ id: input.id, root: input.root, selectedSources: input.sources, observedAt: input.observedAt }); return { databasePath: this.databasePath }; } finally { store.close(); }
+  }
 
   add(inputPath: string): { imported: number } {
     const record = this.readImport(inputPath);
@@ -95,7 +98,18 @@ export class ExperienceService {
 
   listRecords(repositoryId: string) { const store = this.openStore(); try { return store.listRepositoryRecords(repositoryId); } finally { store.close(); } }
   stats(repositoryId: string) { const store = this.openStore(); try { return store.repositoryStats(repositoryId); } finally { store.close(); } }
-  statusGlobal(repositoryId?: string) { const store = this.openStore(); try { const repositories = store.listRepositories(); return { databasePath: this.databasePath, repositories: repositoryId ? repositories.filter(({ id }) => id === repositoryId) : repositories }; } finally { store.close(); } }
+  statusGlobal(repositoryId?: string) {
+    const store = this.openStore();
+    try {
+      const entrypoint = fileURLToPath(new URL('../cli.js', import.meta.url));
+      const repositories = store.listRepositories().filter(({ id }) => repositoryId === undefined || id === repositoryId).map((repository) => {
+        const selectedSources = repository.selectedSources ?? [];
+        const hooks = selectedSources.length ? verifyInstalledHooks({ repositoryRoot: repository.root, sources: selectedSources, cliEntrypoint: entrypoint }) : { status: 'not-ready' as const, sources: [] };
+        return { ...repository, status: hooks.status, sources: hooks.sources };
+      });
+      return { status: 'ready' as const, databasePath: this.databasePath, cli: { entrypoint, available: existsSync(entrypoint) }, repositories };
+    } finally { store.close(); }
+  }
   status(repositoryId: string) {
     const store = this.openStore();
     try {

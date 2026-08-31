@@ -12,6 +12,7 @@ import { discoverReviewSessions, runManualReview, type ManualReviewDependencies 
 import { createProcessTerminalHost, TerminalReviewSelectionPrompt, type TerminalHost } from './review/terminal-prompt.js';
 import { verifyHookReadiness } from './cli/hook-readiness.js';
 import { resolveRepository, resolveRepositoryRoot } from './repository/local-repository.js';
+import { installHooks, parseHookSelection, verifyInstalledHooks } from './cli/hook-installation.js';
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string; }
 export interface RunCliAsyncOptions {
@@ -117,7 +118,16 @@ async function readBoundedStdin(): Promise<{ readonly input: string; readonly ov
 function execute(service: ExperienceService, parsed: ParsedArguments): unknown {
   const [command, subcommand, ...rest] = parsed.positionals;
   if (command === 'init' && subcommand === undefined && rest.length === 0) {
-    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'scope']); optionalScope(parsed.options); return service.init();
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'scope', 'hooks']);
+    if (optionalScope(parsed.options) !== 'repository') return service.init();
+    const sources = parseHookSelection(requiredString(parsed.options, 'hooks'));
+    const repository = resolveRepositoryRoot(process.cwd());
+    if (!repository) throw new DomainError('REPOSITORY_ROOT_REQUIRED', 'Repository initialization requires a Git top-level directory.');
+    const entrypoint = fileURLToPath(import.meta.url);
+    installHooks({ repositoryRoot: repository.root, sources, cliEntrypoint: entrypoint });
+    const verified = verifyInstalledHooks({ repositoryRoot: repository.root, sources, cliEntrypoint: entrypoint });
+    if (verified.status !== 'ready') throw new DomainError('HOOKS_NOT_READY', 'Selected hooks could not be verified.');
+    return service.initRepository({ id: repository.id, root: repository.root, sources, observedAt: new Date().toISOString() });
   }
   if (command === 'experience' && subcommand === 'add' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'input']); return service.add(requiredString(parsed.options, 'input'));
@@ -288,6 +298,10 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
   if (command === 'validate') return 'Validation passed.';
   if (command === 'inspect') return formatKnowledge(value as KnowledgeRecord, true);
   if (command === 'lessons' || command === 'retrieve') return formatKnowledgeList(value as KnowledgeRecord[]);
+  if (command === 'list' && subcommand === 'records') return formatRecords(value as Array<{ session: { id: string; source: string; startedAt: string; endedAt?: string }; events: Array<{ phase: string; occurredAt: string; summary: string; outcome?: string }> }>);
+  if (command === 'stats') { const stats = value as { sessions: number; events: number; knowledge: number }; return `Sessions: ${stats.sessions}\nEvents: ${stats.events}\nKnowledge: ${stats.knowledge}`; }
+  if (command === 'status') { const status = value as { status: string; repositoryId: string; sources: Array<{ source: string; status: string }> }; return `Repository ${status.repositoryId}: ${status.status}\n${status.sources.map((source) => `${source.source}: ${source.status}`).join('\n')}`; }
+  if (command === 'status-global') { const status = value as { repositories: Array<{ id: string; status: string }> }; return status.repositories.length ? status.repositories.map((repository) => `${repository.id}: ${repository.status}`).join('\n') : 'No registered repositories.'; }
   if (command === 'export') {
     const knowledge = (value as { knowledge: KnowledgeRecord[] }).knowledge;
     return `Exported ${countLabel(knowledge.length, 'knowledge entry')}.${knowledge.length ? `\n${formatKnowledgeList(knowledge)}` : ''}`;
@@ -322,6 +336,9 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
   return JSON.stringify(value);
 }
 interface KnowledgeRecord { readonly id: string; readonly state: string; readonly statement: string; readonly evidenceIds: readonly string[]; readonly authoritative?: boolean; }
+function formatRecords(records: readonly { session: { id: string; source: string; startedAt: string; endedAt?: string }; events: readonly { phase: string; occurredAt: string; summary: string; outcome?: string }[] }[]): string {
+  return records.length ? records.map(({ session, events }) => [`${session.id} [${session.source}]`, `Started: ${session.startedAt}`, ...(session.endedAt ? [`Ended: ${session.endedAt}`] : []), ...events.map((event) => `  ${event.occurredAt} ${event.phase}: ${event.summary}${event.outcome ? ` (${event.outcome})` : ''}`)].join('\n')).join('\n\n') : 'No records found.';
+}
 function formatKnowledgeList(entries: readonly KnowledgeRecord[]): string { return entries.length ? entries.map((entry) => formatKnowledge(entry, false)).join('\n') : 'No knowledge entries found.'; }
 function formatKnowledge(entry: KnowledgeRecord, includeEvidence: boolean): string { return `${entry.id} [${entry.state}]${entry.authoritative ? ' [authoritative]' : ''}\n${entry.statement}${includeEvidence ? `\nEvidence: ${entry.evidenceIds.join(', ')}` : ''}`; }
 function countLabel(count: number, singular: string): string { return `${count} ${count === 1 ? singular : `${singular}s`}`; }
