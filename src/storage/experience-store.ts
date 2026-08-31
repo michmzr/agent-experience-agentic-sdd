@@ -129,6 +129,14 @@ export interface RepositoryRegistration {
   readonly observedAt: string;
 }
 
+export interface RepositoryRecord { readonly session: Session; readonly events: readonly CapturedEventRecord[]; }
+export interface RepositoryStatistics {
+  readonly sessions: number; readonly events: number; readonly knowledge: number;
+  readonly firstRecordedAt?: string; readonly lastRecordedAt?: string;
+  readonly sources: Readonly<Record<Session['source'], number>>;
+  readonly phases: Readonly<Record<CapturedEventRecord['phase'], number>>;
+}
+
 export interface RetrievalFilter {
   readonly scope?: KnowledgeScope;
   readonly repositoryId?: string;
@@ -324,6 +332,27 @@ export class ExperienceStore {
       root: row.repository_root,
       observedAt: row.observed_at
     }));
+  }
+
+  listRepositoryRecords(repositoryId: string): readonly RepositoryRecord[] {
+    const sessions = this.database.prepare(`SELECT id, source, started_at, ended_at, repository_id, workspace_id, user_id FROM sessions WHERE repository_id = ? ORDER BY started_at, id`).all(repositoryId) as unknown as SessionRow[];
+    return sessions.map((row) => {
+      const events = this.database.prepare(`SELECT ce.rowid AS sequence, ce.event_id, ce.source, ce.source_event_id, ce.phase, ce.signature_json, ce.summary, ce.capture_outcome, ce.related_event_id, e.session_id, e.occurred_at, e.exit_status FROM capture_events ce JOIN events e ON e.id = ce.event_id WHERE e.session_id = ? ORDER BY e.occurred_at, ce.rowid`).all(row.id) as unknown as CaptureRow[];
+      return Object.freeze({ session: sessionFromRow(row), events: events.map(captureFromRow) });
+    });
+  }
+
+  repositoryStats(repositoryId: string): RepositoryStatistics {
+    const count = (sql: string, value?: string) => Number((this.database.prepare(sql).get(...(value === undefined ? [] : [value])) as { count: number }).count);
+    const sessions = count('SELECT COUNT(*) AS count FROM sessions WHERE repository_id = ?', repositoryId);
+    const events = count('SELECT COUNT(*) AS count FROM capture_events ce JOIN events e ON e.id = ce.event_id JOIN sessions s ON s.id = e.session_id WHERE s.repository_id = ?', repositoryId);
+    const knowledge = count('SELECT COUNT(*) AS count FROM knowledge_metadata WHERE repository_id = ?', repositoryId);
+    const bounds = this.database.prepare(`SELECT MIN(value) AS first, MAX(value) AS last FROM (SELECT started_at AS value FROM sessions WHERE repository_id = ? UNION ALL SELECT e.occurred_at AS value FROM events e JOIN sessions s ON s.id = e.session_id WHERE s.repository_id = ?)`).get(repositoryId, repositoryId) as { first: string | null; last: string | null };
+    const sourceRows = this.database.prepare('SELECT source, COUNT(*) AS count FROM sessions WHERE repository_id = ? GROUP BY source').all(repositoryId) as Array<{ source: Session['source']; count: number }>;
+    const phaseRows = this.database.prepare('SELECT ce.phase, COUNT(*) AS count FROM capture_events ce JOIN events e ON e.id = ce.event_id JOIN sessions s ON s.id = e.session_id WHERE s.repository_id = ? GROUP BY ce.phase').all(repositoryId) as Array<{ phase: CapturedEventRecord['phase']; count: number }>;
+    const sources = { codex: 0, cursor: 0, 'claude-code': 0 }; for (const row of sourceRows) sources[row.source] = row.count;
+    const phases = { 'pre-intent': 0, 'pre-action': 0, 'post-result': 0 }; for (const row of phaseRows) phases[row.phase] = row.count;
+    return Object.freeze({ sessions, events, knowledge, ...(bounds.first ? { firstRecordedAt: bounds.first } : {}), ...(bounds.last ? { lastRecordedAt: bounds.last } : {}), sources: Object.freeze(sources), phases: Object.freeze(phases) });
   }
 
   loadSession(id: SessionId): Session | undefined {
