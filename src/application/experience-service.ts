@@ -90,6 +90,10 @@ export class ExperienceService {
     return { knowledge: this.list(filter) };
   }
 
+  listRecords(repositoryId: string) { const store = this.openStore(); try { return store.listRepositoryRecords(repositoryId); } finally { store.close(); } }
+  stats(repositoryId: string) { const store = this.openStore(); try { return store.repositoryStats(repositoryId); } finally { store.close(); } }
+  statusGlobal(repositoryId?: string) { const store = this.openStore(); try { const repositories = store.listRepositories(); return { databasePath: this.databasePath, repositories: repositoryId ? repositories.filter(({ id }) => id === repositoryId) : repositories }; } finally { store.close(); } }
+
   runtimeEvaluate(inputPath: string, profileId?: BuiltInRuntimeProfileId, refresh = false): PublicGateDecision {
     return this.runtime.evaluate({ inputPath, ...(profileId === undefined ? {} : { profileId }), refresh });
   }

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { resolveRepository } from '../src/repository/local-repository.js';
+import { resolveRepository, resolveRepositoryRoot } from '../src/repository/local-repository.js';
 import { normalizeMappedCapture } from '../src/capture/normalization.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 import { initializeGitRepository } from './helpers/git-repository.js';
@@ -22,6 +22,8 @@ test('resolves a canonical repository root from a nested directory', () => {
 
     assert.deepEqual(resolveRepository(nested)?.root, realpathSync(root));
     assert.match(resolveRepository(nested)?.id ?? '', /^[a-f0-9]{64}$/);
+    assert.equal(resolveRepositoryRoot(nested), undefined);
+    assert.deepEqual(resolveRepositoryRoot(root)?.root, realpathSync(root));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

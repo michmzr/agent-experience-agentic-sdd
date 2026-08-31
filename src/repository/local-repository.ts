@@ -21,3 +21,13 @@ export function resolveRepository(directory: string): LocalRepository | undefine
     return undefined;
   }
 }
+
+export function resolveRepositoryRoot(directory: string): LocalRepository | undefined {
+  const repository = resolveRepository(directory);
+  if (repository === undefined) return undefined;
+  try {
+    return realpathSync(directory) === repository.root ? repository : undefined;
+  } catch {
+    return undefined;
+  }
+}
