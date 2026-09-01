@@ -186,3 +186,33 @@ test('process host restores raw mode before leaving the alternate screen and rem
     process.removeListener('SIGINT', priorInterrupt);
   }
 });
+
+test('process host leaves the alternate screen when raw mode setup or resume fails after entry', async () => {
+  for (const failure of ['raw mode', 'resume'] as const) {
+    const events: string[] = [];
+    const input = Object.assign(new EventEmitter(), {
+      isTTY: true, isRaw: false,
+      setRawMode(value: boolean): void {
+        events.push(`raw:${value}`);
+        if (value && failure === 'raw mode') throw new Error('raw mode failed');
+        this.isRaw = value;
+      },
+      resume(): void { if (failure === 'resume') throw new Error('resume failed'); }, setEncoding(): void {}
+    });
+    const output = Object.assign(new EventEmitter(), {
+      isTTY: true, columns: 80, rows: 24,
+      write(value: string): boolean { events.push(value); return true; }
+    });
+    const stdinDescriptor = Object.getOwnPropertyDescriptor(process, 'stdin')!;
+    const stdoutDescriptor = Object.getOwnPropertyDescriptor(process, 'stdout')!;
+    Object.defineProperty(process, 'stdin', { configurable: true, value: input });
+    Object.defineProperty(process, 'stdout', { configurable: true, value: output });
+    try {
+      assert.deepEqual(await runSessionDebrief(model, createProcessDebriefTerminalHost()), { status: 'unavailable' });
+      assert.deepEqual(events, ['\u001b[?1049h\u001b[?25l', 'raw:true', 'raw:false', '\u001b[?25h\u001b[?1049l']);
+    } finally {
+      Object.defineProperty(process, 'stdin', stdinDescriptor);
+      Object.defineProperty(process, 'stdout', stdoutDescriptor);
+    }
+  }
+});

@@ -100,10 +100,10 @@ export function createProcessDebriefTerminalHost(): DebriefTerminalHost {
     size: () => ({ width: output.columns || 1, height: output.rows || 1 }),
     enter: () => {
       output.write(enterScreen);
+      entered = true;
       rawMode = input.isRaw === true;
       input.setRawMode?.(true);
       input.resume();
-      entered = true;
     },
     writeFrame: (frame) => { output.write(`${clearAndHome}${frame}`); },
     subscribe: (handlers) => {
