@@ -69,11 +69,21 @@ test('does not split graphemes when fitting a long recommendation', () => {
   assert.equal(frame.includes('\u200d'), frame.includes('👩‍💻'));
 });
 
-test('fits CJK and emoji glyphs to terminal display columns', () => {
+test('uses known Unicode terminal-column widths for CJK and emoji glyphs', () => {
   const wide = { ...model, insights: [{ ...model.insights[0]!, recommendation: '測試😀'.repeat(20) }] };
   const frame = renderSessionDebrief(wide, createDebriefState(1, 8, 16, false, 0));
   assert.equal(visibleWidth('測😀'), 4);
-  for (const line of frame.split('\n')) assert.ok(visibleWidth(line) <= 8, `${visibleWidth(line)}: ${line}`);
+  assert.equal(visibleWidth('\uA960'), 2);
+  assert.equal(visibleWidth('𛀀𛀀'), 4);
+  assert.equal(visibleWidth('🈀'), 2);
+  assert.equal(visibleWidth('🏻'), 2);
+  assert.equal(visibleWidth('©️'), 2);
+  assert.equal(visibleWidth('1️⃣'), 2);
+  assert.equal(visibleWidth('👩‍💻'), 2);
+  assert.equal(visibleWidth('©a'), 2);
+  assert.equal(visibleWidth('☀'), 1);
+  assert.equal(visibleWidth('♟'), 1);
+  assert.doesNotMatch(renderSessionDebrief({ ...wide, insights: [{ ...wide.insights[0]!, recommendation: '𛀀𛀀' }] }, createDebriefState(1, 2, 16, false, 0)), /𛀀𛀀/);
 });
 
 test('defensively removes terminal control characters before rendering untrusted presentation fields', () => {

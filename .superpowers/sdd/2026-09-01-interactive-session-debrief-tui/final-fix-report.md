@@ -38,3 +38,24 @@ fail 0
 ```
 
 `rtk git diff --check` completed without output.
+
+## Unicode width correction
+
+### RED
+
+Replaced the prior renderer width assertion with independent known-width cases. Before the implementation change, `U+A960` measured as one column instead of two. The prior range heuristic also omitted `U+1B000`, `U+1F200`, and emoji modifiers, and widened all extended pictographs.
+
+### GREEN
+
+The renderer now uses sorted local Unicode terminal-wide intervals with binary search, plus emoji-presentation, emoji variation-selector, and keycap sequence rules. Exact test expectations cover:
+
+- `測😀` = 4 columns
+- `U+A960` = 2 columns
+- `𛀀𛀀` = 4 columns
+- `U+1F200` and `U+1F3FB` = 2 columns each
+- `©a` = 2 columns, while plain `☀` and `♟` = 1 column each
+- `©️`, `1️⃣`, and `👩‍💻` = 2 columns each
+
+Focused renderer and state verification passed 14 tests with zero failures.
+
+Full verification after the correction: `rtk pnpm check` passed 508 tests with zero failures. `rtk git diff --check` completed without output.
