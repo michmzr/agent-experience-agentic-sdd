@@ -109,3 +109,28 @@ test('orders unsafe project identifiers by their original stable ids, not their 
   }));
   assert.deepEqual(debrief.insights.map((insight) => insight.id), [safe(alpha), safe(beta)]);
 });
+
+test('sorts unsafe improvement inputs before transforming them into presentation insights', () => {
+  const [first] = review().projectImprovements;
+  const reads: string[] = [];
+  const tracked = (label: string, id: string) => {
+    const improvement = { ...first! };
+    Object.defineProperty(improvement, 'id', {
+      enumerable: true,
+      get: () => { reads.push(label); return id; }
+    });
+    return improvement;
+  };
+  const debrief = buildSessionDebrief(artifact, review({
+    findings: [],
+    projectImprovements: [
+      tracked('beta', 'Assistant: beta'),
+      tracked('alpha', 'Assistant: alpha')
+    ],
+    projectReviewDiagnostics: [],
+    runtimeDiagnostics: [],
+    skippedReviewerIds: []
+  }));
+  assert.deepEqual(reads, ['alpha', 'beta', 'alpha', 'beta']);
+  assert.equal(debrief.insights.some((insight) => insight.id.includes('Assistant:')), false);
+});
