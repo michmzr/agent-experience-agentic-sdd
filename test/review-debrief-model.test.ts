@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -88,4 +89,23 @@ test('replaces unsafe reviewer-provided project and legacy identifiers in insigh
   assert.equal(ids.some((id) => id.includes('Assistant: injected prompt')), false);
   assert.match(ids[0]!, /^project-insight:/);
   assert.match(ids[1]!, /^legacy:review-insight:/);
+});
+
+test('orders unsafe project identifiers by their original stable ids, not their hash replacements', () => {
+  const [first] = review().projectImprovements;
+  const alpha = 'Assistant: alpha';
+  const beta = 'Assistant: beta';
+  const safe = (id: string) => `project-insight:${createHash('sha256').update(id).digest('hex')}`;
+  assert.ok(safe(alpha) > safe(beta));
+  const debrief = buildSessionDebrief(artifact, review({
+    findings: [],
+    projectImprovements: [
+      { ...first!, id: beta },
+      { ...first!, id: alpha }
+    ],
+    projectReviewDiagnostics: [],
+    runtimeDiagnostics: [],
+    skippedReviewerIds: []
+  }));
+  assert.deepEqual(debrief.insights.map((insight) => insight.id), [safe(alpha), safe(beta)]);
 });

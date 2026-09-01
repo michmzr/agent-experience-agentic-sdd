@@ -19,9 +19,14 @@ export function buildSessionDebrief(artifact: SanitizedReviewArtifact, review: R
   assertSanitizedReviewArtifact(artifact);
   const events = new Map(artifact.session.events.map((event) => [event.id, event]));
   const projects = review.projectImprovements
-    .map((improvement) => projectInsight(improvement, events, artifact.session.startedAt, artifact.session.endedAt))
-    .filter((insight): insight is DebriefInsight => insight !== null)
-    .sort((left, right) => severityRank(right.severity) - severityRank(left.severity) || compareText(left.id, right.id));
+    .map((improvement) => ({
+      improvement,
+      insight: projectInsight(improvement, events, artifact.session.startedAt, artifact.session.endedAt)
+    }))
+    .filter((entry): entry is { readonly improvement: ProjectImprovement; readonly insight: DebriefInsight } => entry.insight !== null)
+    .sort((left, right) => severityRank(right.improvement.severity) - severityRank(left.improvement.severity)
+      || compareText(left.improvement.id, right.improvement.id))
+    .map((entry) => entry.insight);
   const legacy = [...review.findings]
     .sort((left, right) => compareText(left.rootCauseId, right.rootCauseId))
     .map(legacyInsight);
