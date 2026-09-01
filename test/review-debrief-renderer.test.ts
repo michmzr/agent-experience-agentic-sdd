@@ -74,6 +74,7 @@ test('uses known Unicode terminal-column widths for CJK and emoji glyphs', () =>
   const frame = renderSessionDebrief(wide, createDebriefState(1, 8, 16, false, 0));
   assert.equal(visibleWidth('測😀'), 4);
   assert.equal(visibleWidth('\uA960'), 2);
+  assert.equal(visibleWidth('𗀀'), 2);
   assert.equal(visibleWidth('𛀀𛀀'), 4);
   assert.equal(visibleWidth('🈀'), 2);
   assert.equal(visibleWidth('🏻'), 2);
@@ -83,7 +84,9 @@ test('uses known Unicode terminal-column widths for CJK and emoji glyphs', () =>
   assert.equal(visibleWidth('©a'), 2);
   assert.equal(visibleWidth('☀'), 1);
   assert.equal(visibleWidth('♟'), 1);
+  assert.equal(visibleWidth('〿'), 1);
   assert.doesNotMatch(renderSessionDebrief({ ...wide, insights: [{ ...wide.insights[0]!, recommendation: '𛀀𛀀' }] }, createDebriefState(1, 2, 16, false, 0)), /𛀀𛀀/);
+  assert.doesNotMatch(renderSessionDebrief({ ...wide, insights: [{ ...wide.insights[0]!, recommendation: '𗀀𗀀' }] }, createDebriefState(1, 2, 16, false, 0)), /𗀀𗀀/);
 });
 
 test('defensively removes terminal control characters before rendering untrusted presentation fields', () => {

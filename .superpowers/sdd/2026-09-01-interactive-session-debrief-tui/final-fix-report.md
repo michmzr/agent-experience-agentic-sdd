@@ -59,3 +59,15 @@ The renderer now uses sorted local Unicode terminal-wide intervals with binary s
 Focused renderer and state verification passed 14 tests with zero failures.
 
 Full verification after the correction: `rtk pnpm check` passed 508 tests with zero failures. `rtk git diff --check` completed without output.
+
+## Tangut width correction
+
+### RED
+
+Added independent exact-width regressions. `𗀀` initially measured as one column instead of two. The test also specifies that two Tangut characters cannot fit in a two-column viewport and that U+303F remains one column.
+
+### GREEN
+
+The local interval table now covers Tangut, Tangut Components, Tangut Supplement, U+16FE0 and U+16FF0 blocks, and the related Kana and enclosed-CJK intervals. The U+2E80 through U+A4CF interval is split around U+303F, preserving its Neutral East Asian Width. Focused renderer and state verification passed 14 tests with zero failures.
+
+Full verification after the Tangut correction: `rtk pnpm check` passed 508 tests with zero failures. `rtk git diff --check` completed without output.
