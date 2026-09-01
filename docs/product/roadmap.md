@@ -48,6 +48,8 @@ Deliverables:
 
 ## Milestone 3: richer optimization
 
+Status: In progress. Evidence-backed architecture, developer-experience and project-management review is implemented. Optional semantic retrieval and additional reviewer runtimes remain deferred.
+
 Deliverables:
 
 - complete project skill set;
@@ -55,6 +57,22 @@ Deliverables:
 - optional embeddings/RAG;
 - additional reviewer runtimes;
 - expanded benchmarks and tuning.
+
+## Milestone 3.1: interactive session debrief
+
+Status: Approved for implementation planning on 2026-09-01.
+
+Goal: help an individual developer understand and act on a completed manual session review through a readable console TUI.
+
+Deliverables:
+
+- interactive debrief after repository-scoped session selection;
+- insight-first layout with a compact evidence timeline;
+- keyboard navigation and evidence expansion;
+- responsive and monochrome terminal rendering;
+- deterministic non-terminal and JSON compatibility;
+- idempotent terminal restoration on every exit and failure path; and
+- privacy and regression verification using injected terminal hosts.
 
 ## Sequencing principle
 
