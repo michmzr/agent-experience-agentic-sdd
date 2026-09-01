@@ -62,12 +62,12 @@ function projectInsight(improvement: ProjectImprovement, events: ReadonlyMap<str
     ...evidence.slice(0, 3).map((item) => Object.freeze({ kind: 'evidence' as const, occurredAt: item.occurredAt, evidence: item })),
     Object.freeze({ kind: 'session-end' as const, occurredAt: endedAt })
   ]);
-  return Object.freeze({ id: improvement.id, kind: 'project-improvement', category: improvement.category, severity: improvement.severity, title: safeTitle(improvement.rootCauseId), recommendation: safeRecommendation(improvement.recommendation), evidence, timeline });
+  return Object.freeze({ id: safeInsightId(improvement.id, 'project-insight'), kind: 'project-improvement', category: improvement.category, severity: improvement.severity, title: safeTitle(improvement.rootCauseId), recommendation: safeRecommendation(improvement.recommendation), evidence, timeline });
 }
 
 function legacyInsight(group: ReviewFindingGroup): DebriefInsight {
   const recommendation = group.recommendation.state === 'agreed' ? safeRecommendation(group.recommendation.value) : 'Reviewer recommendations disagree.';
-  return Object.freeze({ id: `legacy:${group.rootCauseId}`, kind: 'legacy-finding', category: 'workflow', severity: 'neutral', title: safeTitle(group.rootCauseId), recommendation, evidence: Object.freeze([]), timeline: Object.freeze([]) });
+  return Object.freeze({ id: safeInsightId(group.rootCauseId, 'legacy:review-insight', 'legacy:'), kind: 'legacy-finding', category: 'workflow', severity: 'neutral', title: safeTitle(group.rootCauseId), recommendation, evidence: Object.freeze([]), timeline: Object.freeze([]) });
 }
 
 function toEvidence(event: NormalizedSessionEvent): DebriefEvidence {
@@ -77,5 +77,10 @@ function toEvidence(event: NormalizedSessionEvent): DebriefEvidence {
 
 function safeTitle(value: string): string { try { assertDurableTextSafe(value); return value.replace(/[-_]/g, ' '); } catch { return 'Review insight'; } }
 function safeRecommendation(value: string): string { try { assertDurableTextSafe(value); return value; } catch { return 'Review recommendation is unavailable in this view.'; } }
+function safeInsightId(value: string, unsafePrefix: string, safePrefix = ''): string {
+  try { assertDurableTextSafe(value); return `${safePrefix}${value}`; }
+  catch { return `${unsafePrefix}:${createHash('sha256').update(value).digest('hex')}`; }
+}
 function severityRank(value: DebriefSeverity): number { return value === 'high' ? 3 : value === 'medium' ? 2 : value === 'low' ? 1 : 0; }
 function compareText(left: string, right: string): number { return left < right ? -1 : left > right ? 1 : 0; }
+import { createHash } from 'node:crypto';

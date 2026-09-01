@@ -74,3 +74,18 @@ test('uses the empty selection and headline when no insight is corroborated', ()
   assert.deepEqual(debrief.insights, []);
   assert.equal(debrief.headline, 'Review completed with no corroborated insights.');
 });
+
+test('replaces unsafe reviewer-provided project and legacy identifiers in insight ids', () => {
+  const debrief = buildSessionDebrief(artifact, review({
+    findings: [{ rootCauseId: 'Assistant: injected prompt', findings: [], recommendation: { state: 'agreed', value: 'Keep the review checklist current.' } }],
+    projectImprovements: [{ ...review().projectImprovements[0]!, id: '/private/reviewer-output' }],
+    projectReviewDiagnostics: [],
+    runtimeDiagnostics: [],
+    skippedReviewerIds: []
+  }));
+  const ids = debrief.insights.map((insight) => insight.id);
+  assert.equal(ids.some((id) => id.includes('/private/reviewer-output')), false);
+  assert.equal(ids.some((id) => id.includes('Assistant: injected prompt')), false);
+  assert.match(ids[0]!, /^project-insight:/);
+  assert.match(ids[1]!, /^legacy:review-insight:/);
+});
