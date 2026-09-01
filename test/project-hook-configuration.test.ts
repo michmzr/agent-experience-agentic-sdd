@@ -23,6 +23,8 @@ test('registers only passive technical and session hooks', () => {
     'PostToolUse', 'PreToolUse', 'SessionEnd', 'SessionStart'
   ]);
   assert.equal(codex.hooks.SessionStart?.[0]?.matcher, 'startup');
+  assert.equal(codex.hooks.PreToolUse?.[0]?.matcher, 'Bash|apply_patch|mcp__.*');
+  assert.equal(codex.hooks.PostToolUse?.[0]?.matcher, 'Bash|apply_patch|mcp__.*');
   assert.equal(JSON.stringify({ cursor, codex }).includes('Prompt'), false);
   assert.equal(JSON.stringify({ cursor, codex }).includes('beforeSubmitPrompt'), false);
 
@@ -41,6 +43,7 @@ test('uses one fail-open wrapper without permission output', () => {
   const wrapper = readFileSync('.agents/hooks/ael-passive-capture.sh', 'utf8');
   assert.match(wrapper, /^#!\/bin\/sh\n/);
   assert.match(wrapper, /git rev-parse --show-toplevel/);
+  assert.match(wrapper, /cli="\$repository_root\/dist\/src\/cli\.js"/);
   assert.match(wrapper, /capture hook --source/);
   assert.doesNotMatch(wrapper.toLowerCase(), /deny|ask|block|permissiondecision/);
   assert.equal(statSync('.agents/hooks/ael-passive-capture.sh').mode & 0o111, 0o111);
