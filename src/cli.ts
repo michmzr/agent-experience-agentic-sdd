@@ -8,7 +8,8 @@ import type { HookIngressResult } from './capture/hook-ingress.js';
 import { isBuiltInRuntimeProfileId, RuntimeServiceError, type BuiltInRuntimeProfileId } from './application/runtime-service.js';
 import type { KnowledgeState } from './domain/types.js';
 import type { KnowledgeScope } from './storage/experience-store.js';
-import { discoverReviewSessions, runManualReview, type ManualReviewDependencies } from './review/review-service.js';
+import { discoverReviewSessions, runManualReview, runManualReviewExecution, type ManualReviewDependencies } from './review/review-service.js';
+import { createProcessDebriefTerminalHost, runSessionDebrief, type DebriefTerminalHost } from './review/debrief-terminal.js';
 import { createProcessTerminalHost, TerminalReviewSelectionPrompt, type TerminalHost } from './review/terminal-prompt.js';
 import { verifyHookReadiness } from './cli/hook-readiness.js';
 import { resolveRepository, resolveRepositoryRoot } from './repository/local-repository.js';
@@ -17,6 +18,7 @@ import { installHooks, parseHookSelection, TerminalHookSelectionPrompt, type Hoo
 export interface CliResult { exitCode: number; stdout: string; stderr: string; }
 export interface RunCliAsyncOptions {
   readonly terminal?: TerminalHost;
+  readonly debriefTerminal?: DebriefTerminalHost;
   readonly hookSelectionPrompt?: HookSelectionPrompt;
   readonly workingDirectory?: string;
   readonly cliEntrypoint?: string;
@@ -63,10 +65,20 @@ export async function runCliAsync(args: string[], options: RunCliAsyncOptions = 
     const reviewDependencies = request.kind === 'review' && request.interactive
       ? { ...options.reviewDependencies, prompt: options.reviewDependencies?.prompt ?? new TerminalReviewSelectionPrompt(options.terminal ?? createProcessTerminalHost()) }
       : options.reviewDependencies;
-    const value = request.kind === 'discover'
-      ? (await discoverReviewSessions(request)).map(({ source, id, updatedAt }) => ({ source, id, updatedAt }))
-      : await runManualReview(request, reviewDependencies);
-    return success(value, json, parsed.positionals);
+    if (request.kind === 'discover') {
+      const value = (await discoverReviewSessions(request)).map(({ source, id, updatedAt }) => ({ source, id, updatedAt }));
+      return success(value, json, parsed.positionals);
+    }
+    if (!request.interactive || json) return success(await runManualReview(request, reviewDependencies), json, parsed.positionals);
+
+    const execution = await runManualReviewExecution(request, reviewDependencies);
+    const terminal = options.debriefTerminal ?? createProcessDebriefTerminalHost();
+    if (!terminal.interactive) return success(execution.result, false, parsed.positionals);
+    const debrief = await runSessionDebrief(execution.debrief, terminal);
+    if (debrief.status === 'completed') return { exitCode: 0, stdout: '', stderr: '' };
+    if (debrief.status === 'interrupted') return { exitCode: 130, stdout: '', stderr: '' };
+    const fallback = success(execution.result, false, parsed.positionals);
+    return { ...fallback, stderr: 'REVIEW_TUI_UNAVAILABLE: Interactive debrief unavailable; printed text fallback.\n' };
   } catch (error) {
     const syntax = error instanceof SyntaxError;
     const diagnostic = syntax ? toDiagnostic(error, 'INVALID_SYNTAX') : { code: 'REVIEW_ERROR', message: 'Review failed.' };
