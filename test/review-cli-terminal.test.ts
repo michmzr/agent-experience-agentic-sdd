@@ -115,8 +115,7 @@ function reviewArgs(root: string): string[] {
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempts = 0; attempts < 100 && !predicate(); attempts += 1) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
+  const deadline = Date.now() + 5_000;
+  while (!predicate() && Date.now() < deadline) await new Promise<void>((resolve) => setTimeout(resolve, 10));
   assert.equal(predicate(), true, 'debrief terminal should start');
 }

@@ -23,6 +23,11 @@ test('opens details, toggles evidence, and treats escape as back then exit', () 
   assert.equal(reduceDebriefState(overview, { type: 'back' }, 1).exit, 'completed');
 });
 
+test('does not toggle evidence outside the detail view', () => {
+  const overview = createDebriefState(1, 100, 30, false, 0);
+  assert.equal(reduceDebriefState(overview, { type: 'toggle-evidence' }, 1), overview);
+});
+
 test('resizes, quits, interrupts, and remains safe with no insights', () => {
   const empty = createDebriefState(0, 0, -2, true, null);
   assert.equal(empty.selectedInsightIndex, null);

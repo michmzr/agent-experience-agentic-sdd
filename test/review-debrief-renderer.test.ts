@@ -69,6 +69,23 @@ test('does not split graphemes when fitting a long recommendation', () => {
   assert.equal(frame.includes('\u200d'), frame.includes('👩‍💻'));
 });
 
+test('fits CJK and emoji glyphs to terminal display columns', () => {
+  const wide = { ...model, insights: [{ ...model.insights[0]!, recommendation: '測試😀'.repeat(20) }] };
+  const frame = renderSessionDebrief(wide, createDebriefState(1, 8, 16, false, 0));
+  assert.equal(visibleWidth('測😀'), 4);
+  for (const line of frame.split('\n')) assert.ok(visibleWidth(line) <= 8, `${visibleWidth(line)}: ${line}`);
+});
+
+test('defensively removes terminal control characters before rendering untrusted presentation fields', () => {
+  const unsafe = {
+    ...model,
+    headline: 'Review\u001b]8;;https://example.test\u0007 completed',
+    insights: [{ ...model.insights[0]!, title: 'Title\u001b[31m', recommendation: 'Keep\u001b]8;;https://example.test\u0007 this', evidence: [{ ...evidence[0]!, summary: 'tool git\u001b[2J: passed' }] }]
+  };
+  const detail = { ...createDebriefState(1, 100, 30, false, 0), view: 'detail' as const, evidenceExpanded: true };
+  assert.doesNotMatch(renderSessionDebrief(unsafe, detail), /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
+});
+
 test('keeps help as the final row in a short viewport', () => {
   const frame = renderSessionDebrief(model, createDebriefState(1, 48, 4, false, 0));
   const lines = frame.split('\n');

@@ -30,7 +30,7 @@ export function renderSessionDebrief(model: SessionDebrief, state: DebriefState)
 
 export function stripAnsi(value: string): string { return value.replace(ansiPattern, ''); }
 
-export function visibleWidth(value: string): number { return graphemes(stripAnsi(value)).length; }
+export function visibleWidth(value: string): number { return graphemes(stripAnsi(value)).reduce((width, grapheme) => width + graphemeWidth(grapheme), 0); }
 
 function overviewRows(insight: DebriefInsight, count: number, counts: SessionDebrief['counts'], selectedIndex: number): Row[] {
   const rows: Row[] = [
@@ -90,13 +90,43 @@ function style(value: string, role: Role | undefined, color: boolean): string {
 function severityRole(value: DebriefInsight['severity']): Role | undefined { return value === 'high' ? 'red' : value === 'medium' ? 'yellow' : undefined; }
 function outcomeRole(value: DebriefEvidence['outcome']): Role { return value === 'failed' ? 'red' : value === 'passed' ? 'green' : 'yellow'; }
 function fitText(value: string, width: number): string {
-  const clean = value.replace(/[\r\n]+/g, ' ');
+  const clean = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
   const parts = graphemes(clean);
-  if (parts.length <= width) return clean;
+  if (parts.reduce((total, part) => total + graphemeWidth(part), 0) <= width) return clean;
   if (width === 1) return '…';
-  return `${parts.slice(0, width - 1).join('')}…`;
+  const budget = width - 1;
+  let used = 0;
+  const fitted: string[] = [];
+  for (const part of parts) {
+    const partWidth = graphemeWidth(part);
+    if (used + partWidth > budget) break;
+    fitted.push(part);
+    used += partWidth;
+  }
+  return `${fitted.join('')}…`;
 }
 function graphemes(value: string): string[] {
   const Segmenter = Intl.Segmenter;
   return typeof Segmenter === 'function' ? [...new Segmenter(undefined, { granularity: 'grapheme' }).segment(value)].map(({ segment }) => segment) : Array.from(value);
+}
+
+function graphemeWidth(value: string): number {
+  if (/^[\p{Mark}\p{Variation_Selector}\u200d]*$/u.test(value)) return 0;
+  if (/\p{Extended_Pictographic}|[\u{1f1e6}-\u{1f1ff}]|\u20e3/u.test(value)) return 2;
+  return [...value].some(isWideCodePoint) ? 2 : 1;
+}
+
+function isWideCodePoint(character: string): boolean {
+  const codePoint = character.codePointAt(0)!;
+  return codePoint >= 0x1100 && (
+    codePoint <= 0x115f || codePoint === 0x2329 || codePoint === 0x232a
+    || (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f)
+    || (codePoint >= 0xac00 && codePoint <= 0xd7a3)
+    || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+    || (codePoint >= 0xfe10 && codePoint <= 0xfe19)
+    || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
+    || (codePoint >= 0xff00 && codePoint <= 0xff60)
+    || (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+    || (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  );
 }

@@ -72,16 +72,18 @@ function legacyInsight(group: ReviewFindingGroup): DebriefInsight {
 }
 
 function toEvidence(event: NormalizedSessionEvent): DebriefEvidence {
-  const subject = event.kind === 'tool' && event.tool ? `tool ${event.tool}` : `${event.kind} event`;
-  return Object.freeze({ id: event.id, occurredAt: event.occurredAt, kind: event.kind, outcome: event.outcome, ...(event.tool ? { tool: event.tool } : {}), summary: `${subject}: ${event.outcome}` });
+  const tool = event.tool ? removeTerminalControls(event.tool) : undefined;
+  const subject = event.kind === 'tool' && tool ? `tool ${tool}` : `${event.kind} event`;
+  return Object.freeze({ id: removeTerminalControls(event.id), occurredAt: event.occurredAt, kind: event.kind, outcome: event.outcome, ...(tool ? { tool } : {}), summary: `${subject}: ${event.outcome}` });
 }
 
-function safeTitle(value: string): string { try { assertDurableTextSafe(value); return value.replace(/[-_]/g, ' '); } catch { return 'Review insight'; } }
-function safeRecommendation(value: string): string { try { assertDurableTextSafe(value); return value; } catch { return 'Review recommendation is unavailable in this view.'; } }
+function safeTitle(value: string): string { try { assertDurableTextSafe(value); return removeTerminalControls(value).replace(/[-_]/g, ' '); } catch { return 'Review insight'; } }
+function safeRecommendation(value: string): string { try { assertDurableTextSafe(value); return removeTerminalControls(value); } catch { return 'Review recommendation is unavailable in this view.'; } }
 function safeInsightId(value: string, unsafePrefix: string, safePrefix = ''): string {
-  try { assertDurableTextSafe(value); return `${safePrefix}${value}`; }
+  try { assertDurableTextSafe(value); return `${safePrefix}${removeTerminalControls(value)}`; }
   catch { return `${unsafePrefix}:${createHash('sha256').update(value).digest('hex')}`; }
 }
+function removeTerminalControls(value: string): string { return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, ''); }
 function severityRank(value: DebriefSeverity): number { return value === 'high' ? 3 : value === 'medium' ? 2 : value === 'low' ? 1 : 0; }
 function compareText(left: string, right: string): number { return left < right ? -1 : left > right ? 1 : 0; }
 import { createHash } from 'node:crypto';

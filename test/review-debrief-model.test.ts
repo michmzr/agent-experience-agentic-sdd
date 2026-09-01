@@ -76,6 +76,29 @@ test('uses the empty selection and headline when no insight is corroborated', ()
   assert.equal(debrief.headline, 'Review completed with no corroborated insights.');
 });
 
+test('removes terminal control characters from reviewer recommendations and tool names in the presentation model', () => {
+  const terminalArtifact = sanitizeForReview({
+    source: 'codex',
+    sessionId: 'session-controls',
+    startedAt: '2026-09-01T10:00:00.000Z',
+    endedAt: '2026-09-01T10:05:00.000Z',
+    events: [
+      { id: 'first', kind: 'tool', occurredAt: '2026-09-01T10:01:00.000Z', tool: 'git\u001b]8;;https://example.test\u0007', outcome: 'passed' },
+      { id: 'second', kind: 'tool', occurredAt: '2026-09-01T10:02:00.000Z', tool: 'pnpm', outcome: 'failed' }
+    ]
+  });
+  const [firstEventId, secondEventId] = terminalArtifact.session.events.map((event) => event.id);
+  const debrief = buildSessionDebrief(terminalArtifact, review({
+    findings: [{ rootCauseId: 'controls', findings: [], recommendation: { state: 'agreed', value: 'Keep\u001b[31m the checklist\u001b]8;;https://example.test\u0007 current.' } }],
+    projectImprovements: [{ ...review().projectImprovements[0]!, evidenceEventIds: [firstEventId!, secondEventId!], recommendation: 'Update\u001b[31m the terminal boundary.' }],
+    projectReviewDiagnostics: [],
+    runtimeDiagnostics: [],
+    skippedReviewerIds: []
+  }));
+  assert.doesNotMatch(JSON.stringify(debrief), /\\u00(?:0[0-9a-f]|1[0-9a-f]|7f|8[0-9a-f]|9[0-9a-f])/i);
+  assert.match(debrief.insights[0]!.evidence[0]!.summary, /tool git]8;;https:\/\/example\.test: passed/);
+});
+
 test('replaces unsafe reviewer-provided project and legacy identifiers in insight ids', () => {
   const debrief = buildSessionDebrief(artifact, review({
     findings: [{ rootCauseId: 'Assistant: injected prompt', findings: [], recommendation: { state: 'agreed', value: 'Keep the review checklist current.' } }],

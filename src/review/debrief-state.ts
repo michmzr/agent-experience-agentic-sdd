@@ -48,7 +48,7 @@ export function reduceDebriefState(state: DebriefState, action: DebriefAction, i
     return { ...state, selectedInsightIndex: modulo(selected + offset, count), view: 'overview', evidenceExpanded: false };
   }
   if (action.type === 'open-detail') return state.selectedInsightIndex === null ? state : { ...state, view: 'detail' };
-  if (action.type === 'toggle-evidence') return state.selectedInsightIndex === null ? state : { ...state, evidenceExpanded: !state.evidenceExpanded };
+  if (action.type === 'toggle-evidence') return state.selectedInsightIndex === null || state.view !== 'detail' ? state : { ...state, evidenceExpanded: !state.evidenceExpanded };
   if (action.type === 'back') return state.view === 'detail'
     ? { ...state, view: 'overview', evidenceExpanded: false }
     : { ...state, exit: 'completed' };
