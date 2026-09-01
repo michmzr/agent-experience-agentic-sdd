@@ -16,7 +16,7 @@
 | --- | --- | --- | --- |
 | 1. Debrief presentation model | complete | focused model and CLI tests, then `rtk pnpm test` with 475 passed | `7254a1c`, `3ff8816`, `410f1b3`, `b3ed99a` |
 | 2. TUI state and renderer | complete | focused reducer and renderer tests, then `rtk pnpm test` with 486 passed | `c12d18a` |
-| 3. Terminal lifecycle | pending | terminal host lifecycle tests | `feat: run debrief in terminal host` |
+| 3. Terminal lifecycle | complete | focused terminal tests and `rtk pnpm test` with 496 passed | `feat: run debrief in terminal host` |
 | 4. CLI integration and fallback | pending | CLI compatibility tests | `feat: launch debrief from interactive review` |
 | 5. Privacy, docs, and release gate | pending | privacy tests and `pnpm check` | `docs: document interactive review debrief` |
 
