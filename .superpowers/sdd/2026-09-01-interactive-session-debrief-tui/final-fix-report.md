@@ -71,3 +71,9 @@ Added independent exact-width regressions. `𗀀` initially measured as one colu
 The local interval table now covers Tangut, Tangut Components, Tangut Supplement, U+16FE0 and U+16FF0 blocks, and the related Kana and enclosed-CJK intervals. The U+2E80 through U+A4CF interval is split around U+303F, preserving its Neutral East Asian Width. Focused renderer and state verification passed 14 tests with zero failures.
 
 Full verification after the Tangut correction: `rtk pnpm check` passed 508 tests with zero failures. `rtk git diff --check` completed without output.
+
+## U+16FE0 regression coverage
+
+Added the direct assertion `visibleWidth('\u{16FE0}') === 2` beside the Tangut width cases. Focused renderer verification passed 9 tests with zero failures.
+
+Full verification after adding the regression: `rtk pnpm check` passed 508 tests with zero failures. `rtk git diff --check` completed without output.

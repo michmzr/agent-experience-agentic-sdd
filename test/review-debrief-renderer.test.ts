@@ -74,6 +74,7 @@ test('uses known Unicode terminal-column widths for CJK and emoji glyphs', () =>
   const frame = renderSessionDebrief(wide, createDebriefState(1, 8, 16, false, 0));
   assert.equal(visibleWidth('測😀'), 4);
   assert.equal(visibleWidth('\uA960'), 2);
+  assert.equal(visibleWidth('\u{16FE0}'), 2);
   assert.equal(visibleWidth('𗀀'), 2);
   assert.equal(visibleWidth('𛀀𛀀'), 4);
   assert.equal(visibleWidth('🈀'), 2);
