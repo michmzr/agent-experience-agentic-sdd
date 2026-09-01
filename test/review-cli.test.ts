@@ -12,6 +12,20 @@ test('runs the complete local review pipeline for an explicit session', async ()
   const result = await runCliAsync(['review', 'session', '--source', 'codex', '--root', root, '--session', 'nested/session.jsonl', '--json']);
   assert.equal(result.exitCode, 0);
   const output = JSON.parse(result.stdout);
+  assert.deepEqual(Object.keys(output), [
+    'source',
+    'selectedSession',
+    'profile',
+    'skippedReviewerIds',
+    'runtimeDiagnostics',
+    'findings',
+    'projectImprovements',
+    'projectReviewDiagnostics',
+    'serviceDiagnostics',
+    'candidates',
+    'proposals'
+  ]);
+  assert.equal('debrief' in output, false);
   assert.equal(output.candidates[0].state, 'candidate');
   assert.equal(output.proposals[0].requiresSpecification, true);
   assert.equal(output.findings[0].recommendation.state, 'agreed');

@@ -14,7 +14,7 @@
 
 | Task | State | Verification | Commit |
 | --- | --- | --- | --- |
-| 1. Debrief presentation model | pending | focused model and service tests | `feat: build sanitized session debrief model` |
+| 1. Debrief presentation model | complete | `rtk pnpm build && node --test dist/test/review-debrief-model.test.js && node --test dist/test/review-cli.test.js` | `feat: build sanitized session debrief model` |
 | 2. TUI state and renderer | pending | reducer and renderer tests | `feat: render interactive session debrief` |
 | 3. Terminal lifecycle | pending | terminal host lifecycle tests | `feat: run debrief in terminal host` |
 | 4. CLI integration and fallback | pending | CLI compatibility tests | `feat: launch debrief from interactive review` |

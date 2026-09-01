@@ -6,15 +6,16 @@ import { discoverClaudeCodeArtifacts, normalizeClaudeCodeArtifact } from './adap
 import { discoverCursorExports, readCursorMarkdownExport } from './adapters/cursor.js';
 import type { NormalizedSession } from './contracts.js';
 import { createDefaultReviewRuntime, defaultReviewProfile } from './default-reviewers.js';
-import { groupReviewFindings, type ReviewFinding as OrchestratorFinding } from './orchestrator.js';
+import { groupReviewFindings, type ReviewFinding as OrchestratorFinding, type ReviewFindingGroup } from './orchestrator.js';
 import {
   consolidateProjectReviewFindings,
   isProjectReviewFinding,
-  type ProjectReviewFinding
+  type ProjectReviewFinding, type ProjectImprovement, type ProjectReviewDiagnostic
 } from './project-improvements.js';
-import { createReviewProposals, type ReviewFindingForProposal } from './proposals.js';
-import { type ReviewRuntime, type ReviewProfile } from './runtime.js';
-import { sanitizeForReview } from './sanitizer.js';
+import { createReviewProposals, type CandidateLesson, type ImprovementProposal, type ReviewFindingForProposal } from './proposals.js';
+import { type ReviewRuntime, type ReviewProfile, type ReviewRuntimeDiagnostic } from './runtime.js';
+import { sanitizeForReview, type SanitizedReviewArtifact } from './sanitizer.js';
+import { buildSessionDebrief, type SessionDebrief } from './debrief-model.js';
 import { isWithinRepository, resolveRepositoryIdentity, type RepositoryIdentityResolver } from './repository-identity.js';
 import { selectRepositorySession, type ReviewSelectionPrompt } from './selection.js';
 
@@ -42,6 +43,12 @@ export interface ReviewServiceDiagnostic {
   readonly reviewerId?: string;
 }
 
+export interface ManualReviewResult {
+  readonly source: AgentSource; readonly selectedSession: string; readonly profile: Pick<ReviewProfile, 'id' | 'version'>; readonly skippedReviewerIds: readonly string[]; readonly runtimeDiagnostics: readonly ReviewRuntimeDiagnostic[]; readonly findings: readonly ReviewFindingGroup[]; readonly projectImprovements: readonly ProjectImprovement[]; readonly projectReviewDiagnostics: readonly ProjectReviewDiagnostic[]; readonly serviceDiagnostics: readonly ReviewServiceDiagnostic[]; readonly candidates: readonly CandidateLesson[]; readonly proposals: readonly ImprovementProposal[];
+}
+export interface ManualReviewExecution { readonly result: ManualReviewResult; readonly debrief: SessionDebrief; }
+interface ManualReviewPipelineExecution { readonly result: ManualReviewResult; readonly artifact: SanitizedReviewArtifact; }
+
 export interface ReviewSessionDescriptor {
   readonly source: AgentSource;
   readonly id: string;
@@ -52,7 +59,16 @@ export interface ReviewSessionDescriptor {
   readonly updatedAt?: string;
 }
 
-export async function runManualReview(input: ManualReviewInput, dependencies: ManualReviewDependencies = {}) {
+export async function runManualReview(input: ManualReviewInput, dependencies: ManualReviewDependencies = {}): Promise<ManualReviewResult> {
+  return (await executeManualReviewPipeline(input, dependencies)).result;
+}
+
+export async function runManualReviewExecution(input: ManualReviewInput, dependencies: ManualReviewDependencies = {}): Promise<ManualReviewExecution> {
+  const execution = await executeManualReviewPipeline(input, dependencies);
+  return { result: execution.result, debrief: buildSessionDebrief(execution.artifact, execution.result) };
+}
+
+async function executeManualReviewPipeline(input: ManualReviewInput, dependencies: ManualReviewDependencies = {}): Promise<ManualReviewPipelineExecution> {
   const session = await resolveSelectedSession(input, dependencies);
   const normalized = await loadSession({ ...input, session });
   const artifact = sanitizeForReview(normalized);
@@ -97,7 +113,7 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
     sessionId: artifact.session.sessionId,
     findings: [...legacyProposalFindings, ...projectProposalFindings.filter((finding) => !legacyFindingIds.has(finding.id))]
   });
-  return {
+  const result: ManualReviewResult = {
     source: input.source,
     selectedSession: artifact.session.sessionId,
     profile: run.profile,
@@ -110,6 +126,7 @@ export async function runManualReview(input: ManualReviewInput, dependencies: Ma
     candidates: intelligence.candidates,
     proposals: intelligence.proposals
   };
+  return { result, artifact };
 }
 
 async function resolveSelectedSession(input: ManualReviewInput, dependencies: ManualReviewDependencies): Promise<string> {
