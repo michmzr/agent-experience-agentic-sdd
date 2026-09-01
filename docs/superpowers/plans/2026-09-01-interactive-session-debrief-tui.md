@@ -18,7 +18,7 @@
 | 2. TUI state and renderer | complete | focused reducer and renderer tests, then `rtk pnpm test` with 486 passed | `c12d18a` |
 | 3. Terminal lifecycle | complete | focused terminal tests and `rtk pnpm test` with 496 passed | `feat: run debrief in terminal host` |
 | 4. CLI integration and fallback | complete | `rtk node --test dist/test/review-cli-terminal.test.js` (7 passed); `rtk pnpm test` (503 passed); `rtk git diff --check` | `b532547` |
-| 5. Privacy, docs, and release gate | pending | privacy tests and `pnpm check` | `docs: document interactive review debrief` |
+| 5. Privacy, docs, and release gate | complete | `rtk pnpm build && rtk node --test dist/test/review-debrief-privacy.test.js` (1 passed); `rtk pnpm check`; `rtk git diff --check` | `docs: document interactive review debrief` |
 
 Update this table after every task with `in progress`, `complete`, the verification command, and the resulting commit hash.
 
@@ -1086,7 +1086,7 @@ Expected: one commit containing the CLI integration, compatibility tests, and up
 - Modify: `README.md`
 - Modify: `docs/superpowers/plans/2026-09-01-interactive-session-debrief-tui.md`
 
-- [ ] **Step 1: Write an end-to-end privacy test**
+- [x] **Step 1: Write an end-to-end privacy test**
 
 Construct a `NormalizedSession` containing a private absolute path, password, API token, raw prompt, assistant content, and tool output. Sanitize it, build a review whose project improvement references the sanitized event IDs, render normal and expanded frames, and assert absence of every raw marker.
 
@@ -1167,7 +1167,7 @@ test('debrief frames and terminal failures never expose raw session content', as
 
 The expected sanitized replacements may appear, but the test must not assert their exact hash values.
 
-- [ ] **Step 2: Run the privacy test**
+- [x] **Step 2: Run the privacy test**
 
 Run: `rtk pnpm build`
 
@@ -1177,7 +1177,7 @@ Run: `rtk node --test dist/test/review-debrief-privacy.test.js`
 
 Expected: PASS with zero failed tests.
 
-- [ ] **Step 3: Document the manual TUI workflow**
+- [x] **Step 3: Document the manual TUI workflow**
 
 Add an `Interactive session debrief` subsection near the existing review commands in `README.md` with this content:
 
@@ -1195,7 +1195,7 @@ When standard input and output are terminals, the command opens a keyboard-drive
 `--json` always returns the existing JSON result and does not start the debrief. Redirected output and terminals without interactive capabilities use the existing text result. Set `NO_COLOR=1` for monochrome rendering.
 ~~~~
 
-- [ ] **Step 4: Run the complete release gate**
+- [x] **Step 4: Run the complete release gate**
 
 Run: `rtk pnpm check`
 
@@ -1209,7 +1209,7 @@ Run: `rtk git status -sb`
 
 Expected: only the intended README, privacy test, and plan status changes are tracked. Existing untracked visual mockup directories remain uncommitted.
 
-- [ ] **Step 5: Record final execution status and commit documentation**
+- [x] **Step 5: Record final execution status and commit documentation**
 
 Update every row in `Execution status` to `complete`, record the focused verification command for each task, and record its commit hash. Then stage only the release files.
 
@@ -1219,7 +1219,7 @@ Run: `rtk git commit -m "docs: document interactive review debrief"`
 
 Expected: one commit containing documentation, the privacy test, and the completed execution ledger.
 
-- [ ] **Step 6: Verify the committed branch**
+- [x] **Step 6: Verify the committed branch**
 
 Run: `rtk pnpm check`
 

@@ -70,6 +70,18 @@ Pass `--data-dir <directory>` to every command to select a private local data di
 
 Explicit session IDs run without a prompt and may read an injected external artifact store. Interactive selection and `latest` require `--repository` to name a directory inside a Git repository. The command resolves its canonical Git top level and accepts only artifacts whose real paths resolve inside that same top level. The prompt exposes only session IDs and recency, then requires confirmation before reading the selected artifact. Non-Git stores and different or nested repositories cannot qualify for interactive selection.
 
+### Interactive session debrief
+
+Run a repository-scoped review manually:
+
+```bash
+ael review session --source codex --root <session-root> --interactive --repository <repository-path> --session latest
+```
+
+When standard input and output are terminals, the command opens a keyboard-driven debrief after session confirmation. Use Up/Down or `j`/`k` to select an insight, Enter for details, `d` for linked evidence, Escape to go back or exit, and `q` to exit. Ctrl+C restores the terminal and exits with status 130.
+
+`--json` returns the existing JSON result and does not start the debrief. Redirected output and terminals without interactive capabilities use the existing text result. Set `NO_COLOR=1` for monochrome rendering.
+
 ## Runtime evaluation
 
 Runtime input is a structured action or intent JSON object. Evaluation loads a validated immutable snapshot before constructing the gate. The gate itself is synchronous and reads only the in-memory snapshot. It does not read SQLite, Git, repository files, the network, or a language model. A missing snapshot is initialized for the input repository. An existing snapshot is refreshed only when `--refresh` is supplied. Corrupt or unavailable existing state follows the fallback policy instead of being overwritten automatically.
