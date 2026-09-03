@@ -121,6 +121,14 @@ Out of scope:
 
 - ChatGPT export discovery, normalization, import and review adapters.
 
+## Release and distribution backlog
+
+Status: Deferred. The package remains private and is currently distributed through a local `pnpm pack` tarball.
+
+- Define `0.1.0` as the first released version and apply Semantic Versioning from that release. The package version and AEL skill manifest must use one release-version source so compatibility status cannot drift.
+- Publish a tarball created from a clean checkout as an artifact of the repository release. Attach its SHA-256 checksum, supported Node.js version, and the passing `pnpm check` result.
+- Keep release artifacts as the first distribution channel. Consider npm publication only after selecting the package owner and name, removing `private: true`, and defining registry credentials and provenance requirements.
+
 ## Sequencing principle
 
 Each milestone must produce independently useful behavior. Do not postpone validation until all subsystems exist. Before planning the next milestone, reconcile this roadmap with completed plans, commits and verification records, then record the accepted scope before implementation starts.
