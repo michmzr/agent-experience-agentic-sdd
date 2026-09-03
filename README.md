@@ -26,6 +26,25 @@ pnpm add --global ./agent-experience-layer-0.0.0.tgz
 ael init
 ```
 
+## AEL agent skill
+
+The package contains one open Agent Skills artifact for agents that operate or diagnose AEL. It routes AEL setup, capture health, session review, knowledge lifecycle, runtime profiles, diagnostics, and the AEL CLI. It does not apply to generic code review, conflict resolution, or unrelated runtime work.
+
+Install it for the current workspace or an explicit workspace:
+
+```sh
+ael skill install --scope workspace
+ael skill install --scope workspace --workspace <directory>
+```
+
+Install it for the local user only after explicit confirmation:
+
+```sh
+ael skill install --scope global --yes
+```
+
+Use `ael skill status --scope workspace|global`, `ael skill validate <skill-directory>`, and `ael skill update` to inspect and refresh an installation. `ael skill uninstall` removes only a validated managed installation. Installation, update, and removal refuse directories that are modified, malformed, or not owned by AEL. `current` means the installed bundle matches the local AEL release and its documentation snapshot.
+
 ## Project hook capture
 
 The checked-in `.cursor/hooks.json` and `.codex/hooks.json` files connect session and technical tool events to the shared passive-capture wrapper. Build the CLI before a hook can capture anything:
@@ -62,6 +81,14 @@ ael runtime config explain --workspace <path> [--remote <url>] [--json]
 ael knowledge validate --repository <path> [--trusted-ref <ref>] [--json]
 ael knowledge refresh-runtime --repository <path> --repository-id <id> --trusted-ref <ref> [--json]
 ael knowledge promote --repository <path> --input document.json [--json]
+ael skill install --scope workspace [--workspace <directory>] [--json]
+ael skill install --scope global --yes [--json]
+ael skill update --scope workspace [--workspace <directory>] [--json]
+ael skill update --scope global --yes [--json]
+ael skill status --scope workspace|global [--workspace <directory>] [--json]
+ael skill validate <skill-directory> [--json]
+ael skill uninstall --scope workspace [--workspace <directory>] [--json]
+ael skill uninstall --scope global --yes [--json]
 ```
 
 Pass `--data-dir <directory>` to every command to select a private local data directory. The default is `~/Library/Application Support/AgentExperience` on macOS and `$XDG_DATA_HOME/agent-experience` or `~/.local/share/agent-experience` on Linux. Use `--json` for deterministic structured results and diagnostics. Runtime ALLOW and WARN decisions return exit code 0. Runtime BLOCK decisions, domain failures, and storage failures return 1. Invalid command syntax returns 2.

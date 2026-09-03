@@ -1,12 +1,12 @@
 # Project skill selection
 
-## session-review
+## AEL
 
-Use when a complete Codex, Claude Code or Cursor session should be manually analyzed for reusable lessons, tool/workflow inefficiency or improvement opportunities.
+Use the `ael` skill when the request concerns Agent Experience Layer setup, capture health, manual session review, knowledge lifecycle, runtime profiles, diagnostics, repository integration, or the AEL command contract.
 
-## review-lessons
+Read `skills/ael/SKILL.md` first and select the linked reference that matches the AEL task. For a published installation, use `ael skill status --scope workspace|global` to verify the managed artifact before updating it.
 
-Use when active and candidate project lessons need quality review, deduplication or lifecycle inspection.
+The project does not provide generic skills for session review, conflict resolution, knowledge promotion, or specification work. Those workflows fall outside the AEL-only skill scope unless the request explicitly concerns AEL.
 
 ## promote-lessons
 
