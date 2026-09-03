@@ -1,0 +1,4 @@
+display_name: AEL
+short_description: Operate and diagnose Agent Experience Layer.
+default_prompt: Use AEL's local command contract and inspect the current workspace before changing AEL state.
+implicit_invocation: true
