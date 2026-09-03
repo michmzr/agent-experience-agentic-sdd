@@ -48,19 +48,20 @@ Deliverables:
 
 ## Milestone 3: richer optimization
 
-Status: In progress. Evidence-backed architecture, developer-experience and project-management review is implemented. Optional semantic retrieval and additional reviewer runtimes remain deferred.
+Status: In progress. Evidence-backed architecture, developer-experience and project-management review, the interactive session debrief and the installable AEL agent skill are implemented. Optional semantic retrieval, additional reviewer runtimes and real-session reliability work remain deferred.
 
 Deliverables:
 
-- complete project skill set;
-- architecture/DX/PM improvement review;
+- architecture/DX/PM improvement review, complete;
+- interactive session debrief, complete;
+- routed and installable AEL agent skill, complete;
 - optional embeddings/RAG;
 - additional reviewer runtimes;
 - expanded benchmarks and tuning.
 
 ## Milestone 3.1: interactive session debrief
 
-Status: Approved for implementation planning on 2026-09-01.
+Status: Complete on 2026-09-01. The implementation plan records completion of the presentation model, terminal UI, terminal lifecycle, CLI fallback, privacy checks and release gate. Subsequent terminal-width fixes are present on `main`.
 
 Goal: help an individual developer understand and act on a completed manual session review through a readable console TUI.
 
@@ -74,6 +75,49 @@ Deliverables:
 - idempotent terminal restoration on every exit and failure path; and
 - privacy and regression verification using injected terminal hosts.
 
+## Milestone 3.2: installable AEL agent skill
+
+Status: Complete on 2026-09-03. Commits `262b5a4` through `84e1869` add the routed artifact, safe lifecycle operations, public CLI commands, documentation and symlink-boundary hardening. Current release gate: 512 tests passed, 0 failed and 0 skipped.
+
+Goal: give agents one product-specific skill for operating AEL without exposing generic workflow triggers or replacing deterministic CLI behavior with instructions.
+
+Deliverables:
+
+- one routed `ael` skill with focused setup, review, knowledge, runtime, diagnostics and command references;
+- workspace and confirmed global install, update, status, validation and uninstall commands;
+- deterministic manifest, compatibility state and managed-content ownership boundary;
+- atomic publication and refusal to overwrite unmanaged, modified or symlinked destinations;
+- packaged-artifact, routing, lifecycle and CLI verification.
+
+## Milestone 3.3: real-session capture and review reliability
+
+Status: Proposed from Cursor hook diagnostics and representative Codex Desktop artifact review on 2026-09-03. ChatGPT export ingestion is not currently supported.
+
+Goal: make passive capture failures diagnosable and allow bounded analysis of representative real sessions without weakening privacy or fail-open behavior.
+
+Observed evidence:
+
+- Cursor persisted `sessionStart`, but passive capture intentionally ignored `Grep` and `Read` because technical capture currently supports shell, MCP and file-edit actions;
+- Cursor Shell events with an empty working directory or shell metacharacters were rejected under the generic `AEL_CAPTURE_INVALID_INPUT` diagnostic;
+- a Cursor `sessionEnd` delivery failed in the host, leaving an open stored session with no explicit incomplete state;
+- Codex Desktop artifacts of 2.68 MiB and 7.97 MiB exceeded `MAX_SESSION_ARTIFACT_BYTES`, currently fixed at 1 MiB, and failed before normalization;
+- manual review accepts `codex`, `claude-code` and `cursor`; no ChatGPT export adapter or ingestion contract exists.
+
+Deliverables:
+
+- bounded streaming or selective normalization for large session artifacts, with limits applied to sanitized events and retained evidence;
+- privacy-safe capture diagnostics that distinguish unsupported tools, invalid working directories, unsafe command shapes and host delivery failures;
+- explicit incomplete-session state plus deterministic detection and reconciliation of stale open sessions;
+- real-session fixtures and benchmarks covering large Codex artifacts and interrupted Cursor lifecycle delivery;
+- an approved ChatGPT export-ingestion specification or an explicit decision to keep ChatGPT outside the supported source contract.
+
+Acceptance gates:
+
+- a representative 7.97 MiB Codex Desktop artifact completes manual review within documented memory, event and evidence bounds;
+- supported Cursor technical actions are persisted, intentionally unsupported actions are counted by reason, and missing `sessionEnd` is visible without rewriting historical evidence;
+- diagnostics expose categories and counts without including commands, paths, prompts, credentials or raw session values;
+- the existing fail-open hook contract and manual-review sanitization boundary remain unchanged.
+
 ## Sequencing principle
 
-Each milestone must produce independently useful behavior. Do not postpone validation until all subsystems exist.
+Each milestone must produce independently useful behavior. Do not postpone validation until all subsystems exist. Before planning the next milestone, reconcile this roadmap with completed plans, commits and verification records, then record the accepted scope before implementation starts.
