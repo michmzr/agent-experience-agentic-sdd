@@ -129,9 +129,24 @@ function requiredSourceManifest(source: string): AelSkillManifest {
 function destinationFor(input: Pick<AelSkillLocation, 'scope' | 'workspace' | 'home'>): string {
   const root = input.scope === 'workspace' ? input.workspace : input.home;
   try {
-    return join(realpathSync(root), '.agents', 'skills', 'ael');
+    const resolvedRoot = realpathSync(root);
+    const destination = join(resolvedRoot, '.agents', 'skills', 'ael');
+    assertNoSymbolicLinkPath(resolvedRoot, destination);
+    return destination;
   } catch {
     throw new AelSkillError('AEL_SKILL_LOCATION_INVALID', `Cannot resolve ${input.scope} skill root.`);
+  }
+}
+
+function assertNoSymbolicLinkPath(root: string, destination: string): void {
+  let current = root;
+  for (const segment of relative(root, destination).split('/')) {
+    current = join(current, segment);
+    try {
+      if (lstatSync(current).isSymbolicLink()) throw new Error('symbolic link');
+    } catch (error) {
+      if (error instanceof Error && error.message === 'symbolic link') throw error;
+    }
   }
 }
 

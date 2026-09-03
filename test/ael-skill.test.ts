@@ -80,6 +80,13 @@ test('validates, installs, updates, and protects managed AEL skills', () => {
     assert.throws(() => installAelSkill({ source, scope: 'workspace', workspace: unmanagedWorkspace, home }), /AEL_SKILL_DESTINATION_UNSAFE/);
     assert.equal(readFileSync(join(unmanagedWorkspace, '.agents', 'skills', 'ael', 'notes.txt'), 'utf8'), 'retain');
 
+    const symlinkWorkspace = join(root, 'symlink-workspace');
+    const externalDirectory = join(root, 'external');
+    mkdirSync(symlinkWorkspace); mkdirSync(externalDirectory);
+    symlinkSync(externalDirectory, join(symlinkWorkspace, '.agents'));
+    assert.throws(() => installAelSkill({ source, scope: 'workspace', workspace: symlinkWorkspace, home }), /AEL_SKILL_LOCATION_INVALID/);
+    assert.equal(existsSync(join(externalDirectory, 'skills', 'ael')), false);
+
     const symlinkSource = join(root, 'symlink-source');
     cpSync(skillDirectory, symlinkSource, { recursive: true });
     rmSync(join(symlinkSource, 'references', 'diagnostics.md'));
