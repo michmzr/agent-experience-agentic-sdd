@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -141,6 +141,13 @@ test('runs the declared development script and an installed package bin', () => 
     const status = spawnSync(executable, ['status', '--data-dir', dataDir, '--json'], { cwd: repository, encoding: 'utf8' });
     assert.equal(status.status, 0, `${status.stdout}\n${status.stderr}`);
     assert.match(status.stdout, /"status":"ready"/);
+    const skillInstall = spawnSync(executable, ['skill', 'install', '--scope', 'workspace', '--workspace', repository, '--json'], { encoding: 'utf8' });
+    assert.equal(skillInstall.status, 0, `${skillInstall.stdout}\n${skillInstall.stderr}`);
+    assert.match(skillInstall.stdout, /"status":"installed"/);
+    assert.equal(existsSync(join(repository, '.agents', 'skills', 'ael', 'SKILL.md')), true);
+    const skillStatus = spawnSync(executable, ['skill', 'status', '--scope', 'workspace', '--workspace', repository, '--json'], { encoding: 'utf8' });
+    assert.equal(skillStatus.status, 0, `${skillStatus.stdout}\n${skillStatus.stderr}`);
+    assert.match(skillStatus.stdout, /"status":"current"/);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
     rmSync(packageDirectory, { recursive: true, force: true });

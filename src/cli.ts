@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
-import { basename } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 import { DomainError, errorMessage, ExperienceService } from './application/experience-service.js';
 import { MAX_HOOK_INPUT_BYTES, type PassiveHookSource } from './capture/hook-adapters/contracts.js';
@@ -14,6 +14,7 @@ import { createProcessTerminalHost, TerminalReviewSelectionPrompt, type Terminal
 import { verifyHookReadiness } from './cli/hook-readiness.js';
 import { resolveRepository, resolveRepositoryRoot } from './repository/local-repository.js';
 import { installHooks, parseHookSelection, TerminalHookSelectionPrompt, type HookSelectionPrompt, verifyInstalledHooks } from './cli/hook-installation.js';
+import { AelSkillError, inspectAelSkill, installAelSkill, uninstallAelSkill, updateAelSkill, validateAelSkill, type AelSkillLocation, type AelSkillScope } from './skill/ael-skill.js';
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string; }
 export interface RunCliAsyncOptions {
@@ -22,6 +23,8 @@ export interface RunCliAsyncOptions {
   readonly hookSelectionPrompt?: HookSelectionPrompt;
   readonly workingDirectory?: string;
   readonly cliEntrypoint?: string;
+  readonly skillSourceDirectory?: string;
+  readonly homeDirectory?: string;
   readonly reviewDependencies?: ManualReviewDependencies;
   readonly hookInput?: string;
   readonly now?: () => string;
@@ -32,9 +35,9 @@ interface ParsedArguments { readonly positionals: string[]; readonly options: Ma
 const scopes = new Set(['global', 'repo'] as const);
 const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired']);
 const reviewSources = new Set(['codex', 'claude-code', 'cursor'] as const);
-const knownCommands = new Set(['init', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks']);
+const knownCommands = new Set(['init', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill']);
 
-export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint'> = {}): CliResult {
+export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory'> = {}): CliResult {
   if (args.length === 1 && args[0] === '--help') return { exitCode: 0, stdout: `${usage()}\n`, stderr: '' };
   try {
     const parsed = parseArguments(args);
@@ -136,7 +139,7 @@ async function readBoundedStdin(): Promise<{ readonly input: string; readonly ov
   return { input: Buffer.concat(chunks).toString('utf8'), oversized: false };
 }
 
-function execute(service: ExperienceService, parsed: ParsedArguments, options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint'>): unknown {
+function execute(service: ExperienceService, parsed: ParsedArguments, options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory'>): unknown {
   const [command, subcommand, ...rest] = parsed.positionals;
   if (command === 'init' && subcommand === undefined && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'scope', 'hooks']);
@@ -222,7 +225,49 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
     assertNoUnknownOptions(parsed.options, ['worktree', 'json']);
     return verifyHookReadiness({ worktreePath: requiredString(parsed.options, 'worktree') });
   }
+  if (command === 'skill') return executeSkill(parsed, options);
   throw invalidCommand(command);
+}
+
+function executeSkill(parsed: ParsedArguments, options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory'>): unknown {
+  const [, subcommand, ...rest] = parsed.positionals;
+  if (subcommand === 'validate' && rest.length === 1) {
+    assertNoUnknownOptions(parsed.options, ['json']);
+    return validateAelSkill(rest[0]);
+  }
+  if (!['install', 'update', 'status', 'uninstall'].includes(subcommand ?? '') || rest.length !== 0) throw invalidCommand('skill');
+  const scope = requiredSkillScope(parsed.options);
+  const mutation = subcommand !== 'status';
+  assertNoUnknownOptions(parsed.options, skillOptions(scope, mutation));
+  if (scope === 'global' && mutation && !parsed.options.has('yes')) throw new SyntaxError('Global skill mutations require --yes.');
+  const location = skillLocation(scope, options, parsed.options);
+  if (subcommand === 'status') return inspectAelSkill(location);
+  const confirmed = parsed.options.has('yes');
+  if (subcommand === 'install') return installAelSkill({ ...location, confirmed });
+  if (subcommand === 'update') return updateAelSkill({ ...location, confirmed });
+  return uninstallAelSkill({ scope: location.scope, workspace: location.workspace, home: location.home, confirmed });
+}
+
+function requiredSkillScope(options: Map<string, string | true>): AelSkillScope {
+  const scope = requiredString(options, 'scope');
+  if (scope !== 'workspace' && scope !== 'global') throw new SyntaxError('Skill scope must be workspace or global.');
+  return scope;
+}
+function skillOptions(scope: AelSkillScope, mutation: boolean): readonly string[] {
+  if (scope === 'workspace') return ['scope', 'workspace', 'json'];
+  return mutation ? ['scope', 'yes', 'json'] : ['scope', 'json'];
+}
+function skillLocation(scope: AelSkillScope, options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory'>, parsed: Map<string, string | true>): AelSkillLocation {
+  const workspace = optionalString(parsed, 'workspace') ?? options.workingDirectory ?? process.cwd();
+  const home = options.homeDirectory ?? process.env.HOME;
+  if (scope === 'global' && !home) throw new SyntaxError('Global skill operations require a home directory.');
+  const entrypoint = options.cliEntrypoint ?? fileURLToPath(import.meta.url);
+  return {
+    source: options.skillSourceDirectory ?? join(dirname(entrypoint), '..', '..', 'skills', 'ael'),
+    scope,
+    workspace,
+    home: home ?? workspace
+  };
 }
 
 function parseReviewRequest(parsed: ParsedArguments) {
@@ -251,7 +296,7 @@ function parseArguments(args: readonly string[]): ParsedArguments {
     if (!value.startsWith('--')) { positionals.push(value); continue; }
     const name = value.slice(2); if (!name) throw new SyntaxError('Option name is required.');
     if (options.has(name)) throw new SyntaxError(`Option may be supplied once: --${name}.`);
-    if (name === 'json' || name === 'interactive' || name === 'allow-expensive-checks' || name === 'refresh') { options.set(name, true); continue; }
+    if (name === 'json' || name === 'interactive' || name === 'allow-expensive-checks' || name === 'refresh' || name === 'yes') { options.set(name, true); continue; }
     const optionValue = args[index + 1]; if (!optionValue || optionValue.startsWith('--')) throw new SyntaxError(`Option requires a value: --${name}.`);
     options.set(name, optionValue); index += 1;
   }
@@ -355,6 +400,15 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
     const result = value as { status: string; sources: readonly { source: string }[]; code?: string };
     return result.status === 'ready' ? `Hook readiness passed for ${result.sources.map(({ source }) => source).join(', ')}.` : `Hook readiness failed: ${result.code}.`;
   }
+  if (command === 'skill' && subcommand === 'validate') return `AEL skill validation: ${(value as { status: string }).status}.`;
+  if (command === 'skill' && subcommand === 'status') {
+    const result = value as { status: string; destination: string };
+    return `AEL skill ${result.status} at ${result.destination}.`;
+  }
+  if (command === 'skill') {
+    const result = value as { status: string; destination: string };
+    return `AEL skill ${result.status} at ${result.destination}.`;
+  }
   if (command === 'runtime' && subcommand === 'config') return formatRuntimeConfiguration(value as RuntimeConfigurationExplanation);
   if (command === 'knowledge' && subcommand === 'promote') return `Promoted ${(value as { identity: string }).identity} as branch-local knowledge.`;
   if (command === 'knowledge' && subcommand === 'validate') {
@@ -423,10 +477,12 @@ function invalidCommand(command: string | undefined): SyntaxError {
     ? `Unknown command form for ${command}.`
     : 'Unknown command.');
 }
-function usage(): string { return 'Usage: ael <init --scope global|repo [--hooks codex,cursor]|list records|stats|status|status-global|experience add|validate|inspect|lessons list|retrieve|export|capture hook --source codex|cursor|hooks verify --worktree path|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote> [options]'; }
+function usage(): string { return 'Usage: ael <init --scope global|repo [--hooks codex,cursor]|list records|stats|status|status-global|experience add|validate|inspect|lessons list|retrieve|export|capture hook --source codex|cursor|hooks verify --worktree path|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote|skill install|update|status|validate|uninstall> [options]'; }
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } {
   return error instanceof DomainError || error instanceof RuntimeServiceError
     ? { code: error.code, message: error.message }
+    : error instanceof AelSkillError
+      ? { code: error.code, message: error.message.replace(`${error.code}: `, '') }
     : { code: fallbackCode, message: errorMessage(error) };
 }
 

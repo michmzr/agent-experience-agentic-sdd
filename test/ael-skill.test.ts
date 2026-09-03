@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { inspectAelSkill, installAelSkill, uninstallAelSkill, updateAelSkill, validateAelSkill } from '../src/skill/ael-skill.js';
+import { runCli } from '../src/cli.js';
 
 const skillDirectory = join(process.cwd(), 'skills', 'ael');
 const referenceFiles = [
@@ -84,6 +85,33 @@ test('validates, installs, updates, and protects managed AEL skills', () => {
     rmSync(join(symlinkSource, 'references', 'diagnostics.md'));
     symlinkSync(join(symlinkSource, 'SKILL.md'), join(symlinkSource, 'references', 'diagnostics.md'));
     assert.equal(validateAelSkill(symlinkSource).status, 'invalid');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('exposes a scoped skill CLI with explicit global confirmation', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-skill-cli-'));
+  const workspace = join(root, 'workspace');
+  const home = join(root, 'home');
+  try {
+    mkdirSync(workspace); mkdirSync(home);
+    const options = { workingDirectory: workspace, homeDirectory: home, skillSourceDirectory: skillDirectory };
+    const installed = runCli(['skill', 'install', '--scope', 'workspace', '--json'], options);
+    assert.equal(installed.exitCode, 0);
+    assert.deepEqual(JSON.parse(installed.stdout).status, 'installed');
+    assert.equal(existsSync(join(workspace, '.agents', 'skills', 'ael', 'SKILL.md')), true);
+    assert.deepEqual(JSON.parse(runCli(['skill', 'status', '--scope', 'workspace', '--json'], options).stdout).status, 'current');
+    assert.deepEqual(JSON.parse(runCli(['skill', 'update', '--scope', 'workspace', '--json'], options).stdout).status, 'unchanged');
+    assert.deepEqual(JSON.parse(runCli(['skill', 'uninstall', '--scope', 'workspace', '--json'], options).stdout).status, 'removed');
+    assert.deepEqual(JSON.parse(runCli(['skill', 'validate', skillDirectory, '--json'], options).stdout).status, 'valid');
+
+    const globalWithoutConfirmation = runCli(['skill', 'install', '--scope', 'global', '--json'], options);
+    assert.equal(globalWithoutConfirmation.exitCode, 2);
+    assert.match(globalWithoutConfirmation.stdout, /Global skill mutations require --yes/);
+    assert.equal(existsSync(join(home, '.agents', 'skills', 'ael')), false);
+    assert.equal(runCli(['skill', 'install', '--scope', 'workspace', '--yes', '--json'], options).exitCode, 2);
+    assert.equal(runCli(['skill', 'status', '--scope', 'invalid', '--json'], options).exitCode, 2);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
