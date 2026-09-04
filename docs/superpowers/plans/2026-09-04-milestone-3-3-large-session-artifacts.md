@@ -32,7 +32,7 @@
 
 - [ ] **Step 1: Write failing tests**
 
-Add accumulator tests with five records and a three-event limit. Assert retained source ordinals are 2, 3 and 4, while the returned start and end timestamps are from inputs 0 and 4. Use multi-byte text over a small injected byte budget and assert that the oldest retained complete text is removed while event metadata remains. Assert that one text value larger than the entire budget retains no text but retains the event. Assert empty finalization fails.
+Add accumulator tests with five records and a three-event limit. Assert retained source ordinals are 2, 3 and 4, while the returned start and end timestamps are the chronological earliest and latest across all accepted inputs. Use multi-byte text over a small injected byte budget and assert that the oldest retained complete text is removed while event metadata remains. Assert that one text value larger than the entire budget retains no text but retains the event. Assert empty finalization fails.
 
 Add this normalization test:
 
@@ -84,7 +84,7 @@ Create this public accumulator contract:
       limits?: { readonly maxEvents?: number; readonly maxTextBytes?: number }
     ): BoundedSessionAccumulator;
 
-Assign a monotonically increasing ordinal when missing. Track first and last accepted timestamps. Retain at most MAX_NORMALIZED_SESSION_EVENTS. Measure text with Buffer.byteLength(text, 'utf8'). Omit an individually over-budget text. When the aggregate exceeds MAX_SESSION_REVIEW_TEXT_LENGTH, remove complete text from oldest retained text-bearing records until the budget is satisfied.
+Assign a monotonically increasing ordinal when missing. Track the chronological earliest and latest accepted timestamps. Retain at most MAX_NORMALIZED_SESSION_EVENTS. Measure text with Buffer.byteLength(text, 'utf8'). Omit an individually over-budget text. When the aggregate exceeds MAX_SESSION_REVIEW_TEXT_LENGTH, remove complete text from oldest retained text-bearing records until the budget is satisfied.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -287,4 +287,3 @@ Expected: acceptance passes and the full suite has zero failures and zero skippe
 ## Plan self-review
 
 The tasks cover contracts, source-independent retention, streaming JSONL, all three adapters, privacy boundaries, measurements and release verification. The names sourceOrdinal, startedAt, endedAt, BoundedSessionWindow and readBoundedJsonl remain consistent. No task contains a deferred implementation marker.
-

@@ -53,12 +53,11 @@ test('assigns an unused implicit ordinal after an explicit ordinal', () => {
   assert.deepEqual(accumulator.finish().records.map(({ sourceOrdinal }) => sourceOrdinal), [1, 2]);
 });
 
-test('preserves source order and first and last source timestamps when records are out of chronological order', () => {
+test('preserves source order while reporting chronological bounds for out-of-order source timestamps', () => {
   const accumulator = createBoundedSessionAccumulator();
-  accumulator.add(record(7, '2026-09-04T10:00:00.000Z'));
-  accumulator.add(record(8, '2026-09-04T10:02:00.000Z'));
-  accumulator.add(record(9, '2026-09-04T10:01:00.000Z'));
-  accumulator.add(record(10, '2026-09-04T10:03:00.000Z'));
+  accumulator.add(record(7, '2026-09-04T10:03:00.000Z'));
+  accumulator.add(record(8, '2026-09-04T10:01:00.000Z'));
+  accumulator.add(record(9, '2026-09-04T10:02:00.000Z'));
 
   const window = accumulator.finish();
   const session = normalizeSession({
@@ -69,8 +68,8 @@ test('preserves source order and first and last source timestamps when records a
     endedAt: window.endedAt
   });
 
-  assert.deepEqual(session.events.map(({ id }) => id), ['source-order:7', 'source-order:8', 'source-order:9', 'source-order:10']);
-  assert.equal(window.startedAt, '2026-09-04T10:00:00.000Z');
+  assert.deepEqual(session.events.map(({ id }) => id), ['source-order:7', 'source-order:8', 'source-order:9']);
+  assert.equal(window.startedAt, '2026-09-04T10:01:00.000Z');
   assert.equal(window.endedAt, '2026-09-04T10:03:00.000Z');
 });
 

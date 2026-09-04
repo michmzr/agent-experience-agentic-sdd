@@ -139,6 +139,17 @@ test('fails closed on an unsupported early observed record without leaking its p
   );
 });
 
+test('rejects an evicted noncanonical observed timestamp', async () => {
+  const root = await fixtureRoot();
+  const records = [
+    JSON.stringify({ timestamp: '2026-08-24T10:00:00Z', type: 'session_meta', payload: {} }),
+    ...Array.from({ length: 1025 }, (_, index) => JSON.stringify({ timestamp: timestampAt(index + 1), type: 'session_meta', payload: {} }))
+  ];
+  await writeFile(join(root, 'session.jsonl'), records.join('\n'));
+
+  await assert.rejects(() => new CodexSessionAdapter(root).read('session.jsonl'), /timestamp is invalid/i);
+});
+
 function timestampAt(index: number): string {
   return new Date(Date.parse('2026-08-24T10:00:00.000Z') + index * 1_000).toISOString();
 }

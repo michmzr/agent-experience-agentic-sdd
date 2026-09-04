@@ -26,12 +26,16 @@ export function createBoundedSessionAccumulator(limits: { readonly maxEvents?: n
   let nextOrdinal = 0;
   let startedAt: string | undefined;
   let endedAt: string | undefined;
+  let startedAtMillis = Number.POSITIVE_INFINITY;
+  let endedAtMillis = Number.NEGATIVE_INFINITY;
   let textBytes = 0;
 
   return {
     add(record): void {
       const occurredAtMillis = Date.parse(record.occurredAt);
-      if (!Number.isFinite(occurredAtMillis)) throw new Error('Session record timestamp is invalid.');
+      if (!Number.isFinite(occurredAtMillis) || new Date(occurredAtMillis).toISOString() !== record.occurredAt) {
+        throw new Error('Session record timestamp is invalid.');
+      }
       if (record.sourceOrdinal !== undefined && (!Number.isSafeInteger(record.sourceOrdinal) || record.sourceOrdinal < 0)) {
         throw new Error('Session record ordinal is invalid.');
       }
@@ -49,8 +53,14 @@ export function createBoundedSessionAccumulator(limits: { readonly maxEvents?: n
       }
       if (usedOrdinals.has(sourceOrdinal)) throw new Error('Session record ordinal is duplicated.');
       nextOrdinal = Math.max(nextOrdinal, sourceOrdinal + 1);
-      if (startedAt === undefined) startedAt = record.occurredAt;
-      endedAt = record.occurredAt;
+      if (occurredAtMillis < startedAtMillis) {
+        startedAtMillis = occurredAtMillis;
+        startedAt = record.occurredAt;
+      }
+      if (occurredAtMillis > endedAtMillis) {
+        endedAtMillis = occurredAtMillis;
+        endedAt = record.occurredAt;
+      }
       if (maxEvents === 0) return;
       usedOrdinals.add(sourceOrdinal);
       const text = record.text;

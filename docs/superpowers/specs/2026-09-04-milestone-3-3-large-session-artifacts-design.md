@@ -49,8 +49,8 @@ The Cursor Markdown reader will become asynchronous because it will consume a fi
 
 The shared accumulator owns evidence selection and session boundaries. It accepts one validated `LocalSessionRecord` and its source ordinal at a time. It tracks:
 
-- the timestamp of the first supported record in the complete artifact;
-- the timestamp of the last supported record in the complete artifact;
+- the chronological earliest timestamp among supported records in the complete artifact;
+- the chronological latest timestamp among supported records in the complete artifact;
 - a ring containing the latest 1,024 supported records;
 - the retained UTF-8 byte length of complete text values; and
 - the next source ordinal.
@@ -59,7 +59,7 @@ When the event ring exceeds 1,024 records, the oldest record is removed. When re
 
 Text limits use UTF-8 byte length rather than JavaScript string length. This makes the retained limit consistent with artifact and line byte limits. The existing reviewer-visible 4 KiB truncation remains character-based for compatibility.
 
-Finalization fails if no supported records were accepted. It returns retained records in chronological source order plus the first and last complete-artifact timestamps. `normalizeSession` uses those supplied boundaries rather than deriving the session boundaries from the retained tail.
+Finalization fails if no supported records were accepted. It returns retained records in original source order plus the chronological earliest and latest complete-artifact timestamps. `normalizeSession` uses those supplied boundaries rather than deriving the session boundaries from the retained tail.
 
 ## JSONL processing
 
@@ -118,7 +118,7 @@ Adapter tests will cover:
 - the 64 MiB boundary and a file one byte over it;
 - the 4 MiB line boundary and a line one byte over it;
 - retention of the latest 1,024 supported records;
-- complete-artifact first and last timestamps;
+- complete-artifact chronological earliest and latest timestamps;
 - malformed or unsupported early records outside the retained tail;
 - LF and CRLF handling;
 - read failures and stream closure;

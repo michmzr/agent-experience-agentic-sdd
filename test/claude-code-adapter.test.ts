@@ -101,6 +101,18 @@ test('fails closed on an unsupported early Claude Code record without leaking it
   );
 });
 
+test('rejects an evicted noncanonical Claude Code timestamp', async () => {
+  const { configDir, project, projectRoot } = await fixtureProject();
+  const records = [
+    JSON.stringify({ type: 'metadata', timestamp: '2026-08-24T10:00:00Z' }),
+    ...Array.from({ length: 1025 }, (_, index) => JSON.stringify({ type: 'metadata', timestamp: timestampAt(index + 1) }))
+  ];
+  await writeFile(join(projectRoot, 'session-a.jsonl'), records.join('\n'));
+
+  const [artifact] = await discoverClaudeCodeArtifacts({ configDir, project });
+  await assert.rejects(() => normalizeClaudeCodeArtifact(artifact!), /timestamp is invalid/i);
+});
+
 function timestampAt(index: number): string {
   return new Date(Date.parse('2026-08-24T10:00:00.000Z') + index * 1_000).toISOString();
 }
