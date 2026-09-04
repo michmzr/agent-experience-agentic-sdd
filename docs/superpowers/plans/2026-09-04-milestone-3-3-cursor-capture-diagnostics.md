@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax.
 
-**Goal:** Persist privacy-safe Cursor passive-capture diagnostic counts and expose one repository-scoped report through hook diagnostics and experience inspection.
+**Goal:** Persist privacy-safe Cursor passive-capture diagnostic counts and expose one automatically selected Git-repository or non-Git-workspace report through hook diagnostics and experience inspection.
 
 **Architecture:** Cursor adaptation returns typed classification results with no rejected values. Hook ingress writes fixed aggregate categories to a separate owner-only SQLite store on a best-effort basis. Both CLI surfaces call one application-service report function.
 
@@ -35,11 +35,11 @@
 - Modify: src/capture/hook-adapters/index.ts
 - Modify: test/passive-hook-adapters.test.ts
 
-- [ ] **Step 1: Write failing classification tests**
+- [x] **Step 1: Write failing classification tests**
 
 Add Cursor cases asserting exact fixed results for unsupported Read and Grep tools, missing or empty working directories, shell metacharacters, excessive arguments and credential-like input. Assert prompt and unknown lifecycle hooks remain unclassified ignored events. Assert valid shell, MCP and file edits still return their existing PassiveCaptureRecord values. Serialize every rejected result and prove supplied command, path, credential, prompt and session markers are absent.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -47,7 +47,7 @@ Run:
 
 Expected: the adapter returns records or undefined and has no typed diagnostic result.
 
-- [ ] **Step 3: Add closed classification contracts**
+- [x] **Step 3: Add closed classification contracts**
 
 Create:
 
@@ -68,7 +68,7 @@ Create:
 
 Technical-signature internals return or throw fixed reason codes without values. Cursor requires a valid cwd for technical hooks, maps unsupported technical tools to unsupported-tool, maps cwd contract failures to invalid-working-directory, and maps unsafe or private structured inputs to unsafe-command-shape while preserving PRIVATE_INPUT for credential-like material. Keep ordinary nontechnical hooks ignored. Adapt the source index so Codex retains its existing record-or-undefined path while Cursor uses CursorHookAdaptation.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -76,7 +76,7 @@ Run:
 
 Expected: typed classification and all existing valid adapter tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
     git add src/capture/hook-diagnostics.ts src/capture/hook-adapters test/passive-hook-adapters.test.ts
     git commit -m "feat: classify Cursor capture diagnostics"
@@ -118,7 +118,7 @@ Expose:
       close(): void;
     }
 
-Use capture-diagnostics.sqlite with one closed-schema aggregate table keyed by source, a canonical repository ID or fixed global sentinel, and category. Increment through one SQLite upsert transaction. Validate safe integers before and after increment. Create the file and parent directory with owner-only permissions using the existing database helper pattern. Missing store returns zero counts when opened; malformed existing schema rejects.
+Use capture-diagnostics.sqlite with one closed-schema aggregate table keyed by source, scope kind, a resolver-created canonical repository ID, a resolver-created workspace-path SHA-256, or a fixed global sentinel, and category. Increment through one SQLite upsert transaction. Validate safe integers before and after increment. Create the file and parent directory with owner-only permissions using the existing database helper pattern. Missing store returns zero counts when opened; malformed existing schema rejects. The store never accepts a raw path or arbitrary caller-provided scope ID.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -205,7 +205,7 @@ Add one service method:
       readonly counts: CursorDiagnosticCounts;
     };
 
-Resolve and verify a Git top-level repository before opening the diagnostic store. Both commands invoke this method. hooks diagnostics accepts data-dir, repository and json. experience inspect accepts the same repository selection and embeds the exact returned object. Text output lists the four categories in lexical order. JSON uses the closed versioned object. Reporting errors use bounded generic diagnostics with no database or repository path.
+Resolve a scope before opening the diagnostic store: use a verified Git top-level repository where available; otherwise derive a workspace SHA-256 from the normalized real selected directory. Both commands invoke this method. hooks diagnostics accepts data-dir, repository and json. experience inspect accepts the same directory selection and embeds the exact returned object. Text output lists the four categories in lexical order. JSON uses the closed versioned object with scope kind and ID. Reporting errors use bounded generic diagnostics with no database or path.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -262,3 +262,7 @@ Expected: zero failures and zero skipped tests.
 
 The five tasks cover typed classification, fixed aggregate persistence, best-effort ingress writes, both reporting surfaces, privacy scans and release verification. Category names, report types and command forms are consistent. True absent host invocation and stale-session reconciliation remain outside this plan.
 
+## Execution status
+
+- 2026-09-04: Implementation started on `codex/milestone-3-3-cursor-diagnostics` at `c7f7521`. Baseline: `pnpm build` passed.
+- 2026-09-04: Task 1 completed and reviewed. RED command: `pnpm build && node --test dist/test/passive-hook-adapters.test.js` failed as expected before typed results existed. Final verification: the same command passed with 18 tests and zero failures at `693b5fd`; fix round 1 scoped re-review found the `PRIVATE_INPUT` regression addressed and no new Critical or Important issue.
