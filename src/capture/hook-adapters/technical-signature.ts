@@ -33,13 +33,33 @@ export interface TechnicalSignature {
   readonly summary: string;
 }
 
+export type TechnicalSignatureRejectionCode = 'PRIVATE_INPUT' | 'UNSAFE_COMMAND_SHAPE';
+
+export class TechnicalSignatureRejection extends TypeError {
+  readonly code: TechnicalSignatureRejectionCode;
+
+  constructor(code: TechnicalSignatureRejectionCode) {
+    super(code === 'PRIVATE_INPUT'
+      ? 'Passive hook payload contains private input.'
+      : 'Passive hook payload has an unsafe command shape.');
+    this.code = code;
+  }
+}
+
 export function technicalSignature(input: TechnicalSignatureInput): TechnicalSignature | undefined {
   assertSafeText(input.toolName, 'tool name');
-  if (input.cwd !== undefined) assertSafeText(input.cwd, 'working directory');
+  if (input.cwd !== undefined) technicalWorkingDirectory(input.cwd);
   if (input.toolName === 'Bash' || input.toolName === 'Shell') return shellSignature(input);
   if (input.toolName.startsWith('mcp__')) return mcpSignature(input);
   if (fileEditTools.has(input.toolName)) return fileEditSignature(input);
   return undefined;
+}
+
+export function technicalWorkingDirectory(value: unknown): string {
+  if (typeof value !== 'string') throw rejected();
+  assertSafeText(value, 'working directory');
+  if (!shellTokenPattern.test(value)) throw rejected();
+  return value;
 }
 
 function shellSignature(input: TechnicalSignatureInput): TechnicalSignature {
@@ -158,14 +178,14 @@ function assertSafeText(value: string, field: string): void {
   void field;
 }
 
-function rejected(): TypeError {
-  return new TypeError('Passive hook payload is unsupported.');
+function rejected(): TechnicalSignatureRejection {
+  return new TechnicalSignatureRejection('UNSAFE_COMMAND_SHAPE');
 }
 
-function rejectedLimit(): TypeError {
-  return new TypeError('Passive hook payload exceeds its resource limit.');
+function rejectedLimit(): TechnicalSignatureRejection {
+  return new TechnicalSignatureRejection('UNSAFE_COMMAND_SHAPE');
 }
 
-function rejectedPrivate(): TypeError {
-  return new TypeError('Passive hook payload contains credential-like or private material.');
+function rejectedPrivate(): TechnicalSignatureRejection {
+  return new TechnicalSignatureRejection('PRIVATE_INPUT');
 }
