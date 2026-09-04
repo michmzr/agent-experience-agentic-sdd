@@ -49,8 +49,10 @@ function technical(
   let cwd: string;
   try {
     cwd = technicalWorkingDirectory(record.cwd);
-  } catch {
-    return diagnostic('invalid-working-directory');
+  } catch (error) {
+    return error instanceof TechnicalSignatureRejection && error.code === 'PRIVATE_INPUT'
+      ? diagnostic('unsafe-command-shape', 'PRIVATE_INPUT')
+      : diagnostic('invalid-working-directory');
   }
 
   try {
@@ -117,10 +119,12 @@ function technicalSessionId(record: Readonly<Record<string, unknown>>): SessionI
 
 function stringField(value: unknown): string {
   if (typeof value !== 'string') throw rejected();
+  if (containsCredentialMaterial(value)) throw privateInput();
   return value;
 }
 
 function identifier(value: unknown): string {
+  if (typeof value === 'string' && containsCredentialMaterial(value)) throw privateInput();
   if (typeof value !== 'string'
     || value.length < 1
     || value.length > MAX_CAPTURE_IDENTIFIER_LENGTH
@@ -152,4 +156,8 @@ function assertCanonicalTimestamp(value: string): void {
 
 function rejected(): TypeError {
   return new TypeError('Passive hook payload is unsupported.');
+}
+
+function privateInput(): TechnicalSignatureRejection {
+  return new TechnicalSignatureRejection('PRIVATE_INPUT');
 }

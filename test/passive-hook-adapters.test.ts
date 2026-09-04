@@ -459,6 +459,33 @@ test('classifies Cursor hook diagnostics without retaining rejected input', () =
   }
 });
 
+test('preserves private ingress diagnostics for Cursor technical envelope fields', () => {
+  const credentialMarker = 'classified-envelope-credential';
+  const validEnvelope = {
+    conversation_id: 'session-1',
+    hook_event_name: 'preToolUse',
+    cwd: '/work/repo',
+    tool_name: 'Shell',
+    tool_use_id: 'tool-1',
+    tool_input: { command: 'git status' }
+  };
+
+  for (const payload of [
+    { ...validEnvelope, conversation_id: `Bearer=${credentialMarker}` },
+    { ...validEnvelope, cwd: `Bearer=${credentialMarker}` },
+    { ...validEnvelope, tool_name: `Bearer=${credentialMarker}` },
+    { ...validEnvelope, tool_use_id: `Bearer=${credentialMarker}` }
+  ]) {
+    const adaptation = cursorAdapt(payload);
+    assert.deepEqual(adaptation, {
+      state: 'diagnostic',
+      category: 'unsafe-command-shape',
+      ingressCode: 'PRIVATE_INPUT'
+    });
+    assert.equal(JSON.stringify(adaptation).includes(credentialMarker), false);
+  }
+});
+
 test('preserves existing Cursor records inside accepted classifications', () => {
   const shell = acceptedCursor({
     conversation_id: 'session-1',
