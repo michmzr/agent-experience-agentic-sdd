@@ -91,7 +91,7 @@ Deliverables:
 
 ## Milestone 3.3: real-session capture and review reliability
 
-Status: Proposed from Cursor hook diagnostics and representative Codex Desktop artifact review on 2026-09-03. ChatGPT export ingestion remains outside the product scope.
+Status: The large-session-artifact review increment is complete on 2026-09-04. Cursor capture diagnostics and stale-session reconciliation remain deferred. ChatGPT export ingestion remains outside the product scope.
 
 Goal: make passive capture failures diagnosable and allow bounded analysis of representative real sessions without weakening privacy or fail-open behavior.
 
@@ -100,15 +100,15 @@ Observed evidence:
 - Cursor persisted `sessionStart`, but passive capture intentionally ignored `Grep` and `Read` because technical capture currently supports shell, MCP and file-edit actions;
 - Cursor Shell events with an empty working directory or shell metacharacters were rejected under the generic `AEL_CAPTURE_INVALID_INPUT` diagnostic;
 - a Cursor `sessionEnd` delivery failed in the host, leaving an open stored session with no explicit incomplete state;
-- Codex Desktop artifacts of 2.68 MiB and 7.97 MiB exceeded `MAX_SESSION_ARTIFACT_BYTES`, currently fixed at 1 MiB, and failed before normalization;
+- Codex Desktop artifacts of 2.68 MiB and 7.97 MiB exceeded the previous artifact-size limit and failed before normalization;
 - manual review accepts `codex`, `claude-code` and `cursor` as its complete supported source set.
 
 Deliverables:
 
-- bounded streaming or selective normalization for large session artifacts, with limits applied to sanitized events and retained evidence;
-- privacy-safe capture diagnostics that distinguish unsupported tools, invalid working directories, unsafe command shapes and host delivery failures;
-- explicit incomplete-session state plus deterministic detection and reconciliation of stale open sessions;
-- real-session fixtures and benchmarks covering large Codex artifacts and interrupted Cursor lifecycle delivery.
+- bounded streaming or selective normalization for large session artifacts, with limits applied to sanitized events and retained evidence, complete;
+- privacy-safe capture diagnostics that distinguish unsupported tools, invalid working directories, unsafe command shapes and host delivery failures, deferred;
+- explicit incomplete-session state plus deterministic detection and reconciliation of stale open sessions, deferred;
+- real-session fixtures and benchmarks covering large Codex artifacts, complete; interrupted Cursor lifecycle delivery remains deferred.
 
 Acceptance gates:
 
