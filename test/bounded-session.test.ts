@@ -58,17 +58,20 @@ test('preserves source order and first and last source timestamps when records a
   accumulator.add(record(7, '2026-09-04T10:00:00.000Z'));
   accumulator.add(record(8, '2026-09-04T10:02:00.000Z'));
   accumulator.add(record(9, '2026-09-04T10:01:00.000Z'));
+  accumulator.add(record(10, '2026-09-04T10:03:00.000Z'));
 
   const window = accumulator.finish();
   const session = normalizeSession({
     source: 'codex',
     artifact: { source: 'codex', id: 'source-order', location: '/fixture/session.jsonl', format: 'observed-jsonl' },
-    records: window.records
+    records: window.records,
+    startedAt: window.startedAt,
+    endedAt: window.endedAt
   });
 
-  assert.deepEqual(session.events.map(({ id }) => id), ['source-order:7', 'source-order:8', 'source-order:9']);
+  assert.deepEqual(session.events.map(({ id }) => id), ['source-order:7', 'source-order:8', 'source-order:9', 'source-order:10']);
   assert.equal(window.startedAt, '2026-09-04T10:00:00.000Z');
-  assert.equal(window.endedAt, '2026-09-04T10:01:00.000Z');
+  assert.equal(window.endedAt, '2026-09-04T10:03:00.000Z');
 });
 
 test('releases evicted ordinal bookkeeping while rejecting a collision in the retained tail', () => {
