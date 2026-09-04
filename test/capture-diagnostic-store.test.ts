@@ -22,6 +22,9 @@ const zeroCounts = {
   'unsupported-tool': 0
 };
 
+const repositoryA = 'a'.repeat(64);
+const repositoryB = 'b'.repeat(64);
+
 function databasePath(): string {
   return join(mkdtempSync(join(tmpdir(), 'ael-capture-diagnostics-')), 'capture-diagnostics.sqlite');
 }
@@ -35,25 +38,25 @@ test('opens empty stores with four fixed zero counts and reopens persisted aggre
   const store = new CaptureDiagnosticStore(path);
 
   assert.deepEqual(store.counts(cursorScope()), zeroCounts);
-  assert.deepEqual(Object.keys(store.counts(cursorScope('repository-a'))), [...categories]);
+  assert.deepEqual(Object.keys(store.counts(cursorScope(repositoryA))), [...categories]);
   store.increment(cursorScope(), 'unsupported-tool');
-  store.increment(cursorScope('repository-a'), 'unsafe-command-shape');
+  store.increment(cursorScope(repositoryA), 'unsafe-command-shape');
   store.close();
 
   const reopened = new CaptureDiagnosticStore(path);
   assert.deepEqual(reopened.counts(cursorScope()), { ...zeroCounts, 'unsupported-tool': 1 });
-  assert.deepEqual(reopened.counts(cursorScope('repository-a')), { ...zeroCounts, 'unsafe-command-shape': 1 });
+  assert.deepEqual(reopened.counts(cursorScope(repositoryA)), { ...zeroCounts, 'unsafe-command-shape': 1 });
   reopened.close();
 });
 
 test('increments repeated categories atomically without crossing repository or global scopes', () => {
   const store = new CaptureDiagnosticStore(databasePath());
-  for (let index = 0; index < 100; index += 1) store.increment(cursorScope('repository-a'), 'persistence-failure');
-  store.increment(cursorScope('repository-b'), 'persistence-failure');
+  for (let index = 0; index < 100; index += 1) store.increment(cursorScope(repositoryA), 'persistence-failure');
+  store.increment(cursorScope(repositoryB), 'persistence-failure');
   store.increment(cursorScope(), 'persistence-failure');
 
-  assert.equal(store.counts(cursorScope('repository-a'))['persistence-failure'], 100);
-  assert.equal(store.counts(cursorScope('repository-b'))['persistence-failure'], 1);
+  assert.equal(store.counts(cursorScope(repositoryA))['persistence-failure'], 100);
+  assert.equal(store.counts(cursorScope(repositoryB))['persistence-failure'], 1);
   assert.equal(store.counts(cursorScope())['persistence-failure'], 1);
   store.close();
 });
@@ -70,18 +73,19 @@ test('creates the database and parent directory with owner-only permissions', ()
 test('rejects invalid scope and category inputs before mutating counts or persisting payload markers', () => {
   const path = databasePath();
   const store = new CaptureDiagnosticStore(path);
-  const scope = cursorScope('repository-a');
+  const scope = cursorScope(repositoryA);
   const initial = store.counts(scope);
 
   assert.throws(() => store.increment({ source: 'codex' } as never, 'unsupported-tool'));
   assert.throws(() => store.increment(cursorScope('/private/repository/credential'), 'unsupported-tool'));
+  assert.throws(() => store.increment(cursorScope('sk-test-credential'), 'unsupported-tool'));
   assert.throws(() => store.increment(scope, 'pnpm publish --token=sk-test-credential' as never));
-  assert.throws(() => store.counts({ source: 'cursor', repositoryId: 'session 42' as RepositoryId }));
+  assert.throws(() => store.counts(cursorScope('session-42')));
   assert.deepEqual(store.counts(scope), initial);
   store.close();
 
   const bytes = readFileSync(path);
-  for (const marker of ['pnpm publish --token=sk-test-credential', '/private/repository/credential', 'sk-test-credential', 'session 42']) {
+  for (const marker of ['pnpm publish --token=sk-test-credential', '/private/repository/credential', 'sk-test-credential', 'session-42']) {
     assert.equal(bytes.includes(Buffer.from(marker)), false, marker);
   }
 });
@@ -90,7 +94,7 @@ test('rejects zero, overflow, and malformed schema rows without modifying the ex
   for (const corruptCount of [0, Number.MAX_SAFE_INTEGER + 1]) {
     const path = databasePath();
     const seeded = new CaptureDiagnosticStore(path);
-    seeded.increment(cursorScope('repository-a'), 'unsupported-tool');
+    seeded.increment(cursorScope(repositoryA), 'unsupported-tool');
     seeded.close();
     const database = new DatabaseSync(path);
     database.exec('PRAGMA ignore_check_constraints = ON');

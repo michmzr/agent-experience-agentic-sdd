@@ -28,7 +28,7 @@ interface CheckedDiagnosticRow {
 
 const GLOBAL_SCOPE_SENTINEL = '__global__';
 const MAX_COUNT = Number.MAX_SAFE_INTEGER;
-const CANONICAL_REPOSITORY_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,511}$/;
+const CANONICAL_REPOSITORY_ID = /^[a-f0-9]{64}$/;
 const categorySet = new Set<string>(cursorCaptureDiagnosticCategories);
 
 const aggregateSchema = `
@@ -36,9 +36,8 @@ const aggregateSchema = `
     source TEXT NOT NULL CHECK (source = 'cursor'),
     scope_key TEXT NOT NULL CHECK (
       scope_key = '__global__' OR (
-        length(scope_key) BETWEEN 1 AND 512
-        AND substr(scope_key, 1, 1) GLOB '[A-Za-z0-9]'
-        AND scope_key NOT GLOB '*[^A-Za-z0-9._:@-]*'
+        length(scope_key) = 64
+        AND scope_key NOT GLOB '*[^a-f0-9]*'
       )
     ),
     category TEXT NOT NULL CHECK (category IN (
