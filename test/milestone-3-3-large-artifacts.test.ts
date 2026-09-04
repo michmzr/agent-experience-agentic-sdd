@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -19,32 +19,40 @@ const RETAINED_CREDENTIAL_MARKER = 'secret=retained-credential-marker';
 
 test('bounds and sanitizes deterministic 7.97 MiB artifacts from every supported source', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ael-milestone-3-3-large-artifacts-'));
-  const fixtures = createFixtures(root);
+  try {
+    const fixtures = createFixtures(root);
 
-  for (const fixture of fixtures) {
-    assert.equal(Buffer.byteLength(fixture.contents, 'utf8'), TARGET_ARTIFACT_BYTES);
-    assert.equal(fixture.supportedEventCount > MAX_NORMALIZED_SESSION_EVENTS, true);
-    const rssBefore = process.resourceUsage().maxRSS;
-    const started = performance.now();
-    const normalized = await fixture.read();
-    const sanitized = sanitizeForReview(normalized);
-    const durationMs = performance.now() - started;
-    const rssDelta = process.resourceUsage().maxRSS - rssBefore;
-    const retainedTextBytes = sessionTextBytes(normalized);
+    for (const fixture of fixtures) {
+      assert.equal(Buffer.byteLength(fixture.contents, 'utf8'), TARGET_ARTIFACT_BYTES);
+      assert.equal(fixture.supportedEventCount > MAX_NORMALIZED_SESSION_EVENTS, true);
+      const rssBefore = process.resourceUsage().maxRSS;
+      const started = performance.now();
+      const normalized = await fixture.read();
+      const sanitized = sanitizeForReview(normalized);
+      const durationMs = performance.now() - started;
+      const rssDelta = process.resourceUsage().maxRSS - rssBefore;
+      const retainedTextBytes = sessionTextBytes(normalized);
+      const normalizedSerialized = JSON.stringify(normalized);
+      const sanitizedSerialized = JSON.stringify(sanitized);
 
-    assert.equal(normalized.events.length, MAX_NORMALIZED_SESSION_EVENTS);
-    assert.equal(sanitized.session.events.length, MAX_NORMALIZED_SESSION_EVENTS);
-    assert.equal(retainedTextBytes <= MAX_SESSION_REVIEW_TEXT_LENGTH, true);
-    assert.equal(JSON.stringify(normalized).includes(EVICTED_CREDENTIAL_MARKER), false);
-    assert.equal(JSON.stringify(sanitized).includes(RETAINED_CREDENTIAL_MARKER), false);
-    console.info(JSON.stringify({
-      source: fixture.source,
-      artifactBytes: TARGET_ARTIFACT_BYTES,
-      retainedEventCount: normalized.events.length,
-      retainedTextBytes,
-      durationMs,
-      rssDelta
-    }));
+      assert.equal(normalized.events.length, MAX_NORMALIZED_SESSION_EVENTS);
+      assert.equal(sanitized.session.events.length, MAX_NORMALIZED_SESSION_EVENTS);
+      assert.equal(retainedTextBytes <= MAX_SESSION_REVIEW_TEXT_LENGTH, true);
+      assert.equal(normalizedSerialized.includes(EVICTED_CREDENTIAL_MARKER), false);
+      assert.equal(normalizedSerialized.includes(RETAINED_CREDENTIAL_MARKER), true);
+      assert.equal(sanitizedSerialized.includes(RETAINED_CREDENTIAL_MARKER), false);
+      assert.equal(sanitized.redactions.secret > 0, true);
+      console.info(JSON.stringify({
+        source: fixture.source,
+        artifactBytes: TARGET_ARTIFACT_BYTES,
+        retainedEventCount: normalized.events.length,
+        retainedTextBytes,
+        durationMs,
+        rssDelta
+      }));
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

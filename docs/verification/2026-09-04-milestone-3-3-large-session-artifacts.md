@@ -28,7 +28,7 @@ The test reads every fixture through its production adapter, passes the normaliz
 The test emits one JSON record per source. `rssDelta` is the difference in `process.resourceUsage().maxRSS` recorded around the adapter and sanitization run.
 
 ```json
-{"source":"codex","artifactBytes":8357151,"retainedEventCount":1024,"retainedTextBytes":11202,"durationMs":67.71712499999998,"rssDelta":197936}
-{"source":"claude-code","artifactBytes":8357151,"retainedEventCount":1024,"retainedTextBytes":11202,"durationMs":106.10975000000002,"rssDelta":26352}
-{"source":"cursor","artifactBytes":8357151,"retainedEventCount":1024,"retainedTextBytes":11202,"durationMs":50.14191699999998,"rssDelta":6000}
+{"source":"codex","artifactBytes":8357151,"retainedEventCount":1024,"retainedTextBytes":11202,"durationMs":136.59979199999998,"rssDelta":186224}
+{"source":"claude-code","artifactBytes":8357151,"retainedEventCount":1024,"retainedTextBytes":11202,"durationMs":69.66845799999999,"rssDelta":23680}
+{"source":"cursor","artifactBytes":8357151,"retainedEventCount":1024,"retainedTextBytes":11202,"durationMs":57.448792000000026,"rssDelta":20672}
 ```
