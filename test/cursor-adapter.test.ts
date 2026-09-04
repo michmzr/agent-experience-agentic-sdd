@@ -146,3 +146,15 @@ test('drops a message larger than 256 KiB while preserving its metadata', async 
     { id: 'review:1', kind: 'message', text: 'retained' }
   ]);
 });
+
+test('retains a multi-line message whose complete UTF-8 text is below 256 KiB', async () => {
+  const root = exportRoot(); const artifact = join(root, 'review.md');
+  const line = 'é'.repeat(40 * 1024);
+  const text = [line, line, line].join('\n');
+  writeFileSync(artifact, `## User\n${text}`);
+
+  const session = await readCursorMarkdownExport({ source: 'cursor', id: 'review', location: artifact, format: 'markdown-export' }, root, '2026-08-24T12:00:00.000Z');
+
+  assert.equal(Buffer.byteLength(text, 'utf8') < MAX_SESSION_REVIEW_TEXT_LENGTH, true);
+  assert.equal(session.events[0]?.text, text);
+});

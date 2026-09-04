@@ -96,14 +96,14 @@ export async function readCursorMarkdownExport(artifact: SessionArtifact, root: 
   };
   const appendLine = (line: string): void => {
     if (text === undefined) return;
-    const next = text ? `\n${line}` : line;
-    const nextBytes = Buffer.byteLength(next, 'utf8');
-    if (textBytes + nextBytes > MAX_SESSION_REVIEW_TEXT_LENGTH) {
+    const fragment = `${text.length === 0 ? '' : '\n'}${line}`;
+    const fragmentBytes = Buffer.byteLength(fragment, 'utf8');
+    if (textBytes + fragmentBytes > MAX_SESSION_REVIEW_TEXT_LENGTH) {
       text = undefined;
       return;
     }
-    text += next;
-    textBytes += nextBytes;
+    text += fragment;
+    textBytes += fragmentBytes;
   };
 
   await readBoundedLines({
