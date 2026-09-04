@@ -32,9 +32,9 @@ type ClaudeCodeJsonRecord = {
 };
 
 export async function discoverClaudeCodeArtifacts(options: ClaudeCodeAdapterOptions): Promise<readonly ClaudeCodeArtifact[]> {
-  const projectsRoot = await realpath(resolve(options.configDir, 'projects'));
+  const projectsRoot = await resolveClaudeCodeDirectory(resolve(options.configDir, 'projects'), 'projects root');
   const project = requiredProject(options.project);
-  const projectRoot = await realpath(join(projectsRoot, project));
+  const projectRoot = await resolveClaudeCodeDirectory(join(projectsRoot, project), 'project directory');
   assertWithin(projectsRoot, projectRoot, 'Claude Code project directory');
   const repository = resolveRepositoryIdentity(projectRoot);
 
@@ -64,7 +64,7 @@ export async function discoverClaudeCodeArtifacts(options: ClaudeCodeAdapterOpti
 }
 
 export async function normalizeClaudeCodeArtifact(artifact: ClaudeCodeArtifact): Promise<NormalizedSession> {
-  const projectsRoot = await realpath(artifact.root);
+  const projectsRoot = await resolveClaudeCodeDirectory(artifact.root, 'projects root');
   const artifactStatus = await lstat(artifact.location);
   if (artifactStatus.isSymbolicLink() || !artifactStatus.isFile()) throw new Error('Claude Code session artifact must be a regular file.');
   assertSessionArtifactSize(artifactStatus.size);
@@ -92,6 +92,12 @@ export async function normalizeClaudeCodeArtifact(artifact: ClaudeCodeArtifact):
   return normalizeSession({
     source: 'claude-code', artifact, records: window.records, startedAt: window.startedAt, endedAt: window.endedAt
   });
+}
+
+async function resolveClaudeCodeDirectory(path: string, label: string): Promise<string> {
+  const status = await lstat(path).catch(() => undefined);
+  if (!status?.isDirectory() || status.isSymbolicLink()) throw new Error(`Claude Code ${label} is unavailable.`);
+  return realpath(path);
 }
 
 function requiredProject(project: string | undefined): string {

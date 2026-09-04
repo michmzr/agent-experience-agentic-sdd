@@ -31,6 +31,58 @@ test('discovers only direct Claude Code transcript JSONL files and rejects symli
   assert.equal(artifacts[0]?.location.includes(configDir), true);
 });
 
+test('rejects a symlinked configured Claude Code projects root without leaking its target', async () => {
+  const configDir = await mkdtemp(join(tmpdir(), 'ael-claude-code-containing-'));
+  const externalRoot = await mkdtemp(join(tmpdir(), 'ael-claude-code-external-'));
+  const marker = 'claude-external-project-root-marker';
+  await mkdir(join(externalRoot, 'example-project'));
+  await writeFile(join(externalRoot, 'example-project', `${marker}.jsonl`), '{"type":"metadata","timestamp":"2026-08-24T10:00:00.000Z"}\n');
+  await symlink(externalRoot, join(configDir, 'projects'));
+
+  const message = await discoveryError({ configDir, project: 'example-project' });
+
+  assert.match(message, /projects root.*unavailable/i);
+  assert.equal(message.includes(externalRoot), false);
+  assert.equal(message.includes(marker), false);
+});
+
+test('rejects a symlinked Claude Code project directory without leaking its target', async () => {
+  const configDir = await mkdtemp(join(tmpdir(), 'ael-claude-code-containing-'));
+  const project = 'example-project';
+  await mkdir(join(configDir, 'projects'));
+  const externalRoot = await mkdtemp(join(tmpdir(), 'ael-claude-code-external-'));
+  const marker = 'claude-external-project-directory-marker';
+  await writeFile(join(externalRoot, `${marker}.jsonl`), '{"type":"metadata","timestamp":"2026-08-24T10:00:00.000Z"}\n');
+  await symlink(externalRoot, join(configDir, 'projects', project));
+
+  const message = await discoveryError({ configDir, project });
+
+  assert.match(message, /project directory.*unavailable/i);
+  assert.equal(message.includes(externalRoot), false);
+  assert.equal(message.includes(marker), false);
+});
+
+test('rejects a symlinked Claude Code artifact root before accessing the artifact', async () => {
+  const containingRoot = await mkdtemp(join(tmpdir(), 'ael-claude-code-containing-'));
+  const externalRoot = await mkdtemp(join(tmpdir(), 'ael-claude-code-external-'));
+  const marker = 'claude-external-artifact-root-marker';
+  const artifactPath = join(externalRoot, `${marker}.jsonl`);
+  await writeFile(artifactPath, '{"type":"metadata","timestamp":"2026-08-24T10:00:00.000Z"}\n');
+  const linkedRoot = join(containingRoot, 'projects');
+  await symlink(externalRoot, linkedRoot);
+
+  let message = '';
+  try {
+    await normalizeClaudeCodeArtifact({ source: 'claude-code', id: 'artifact', location: artifactPath, format: 'jsonl', root: linkedRoot });
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error);
+  }
+
+  assert.match(message, /projects root.*unavailable/i);
+  assert.equal(message.includes(externalRoot), false);
+  assert.equal(message.includes(marker), false);
+});
+
 test('normalizes allowlisted Claude Code evidence text without retaining unrelated metadata', async () => {
   const { configDir, project, projectRoot } = await fixtureProject();
   const artifactPath = join(projectRoot, 'session-a.jsonl');
@@ -115,4 +167,13 @@ test('rejects an evicted noncanonical Claude Code timestamp', async () => {
 
 function timestampAt(index: number): string {
   return new Date(Date.parse('2026-08-24T10:00:00.000Z') + index * 1_000).toISOString();
+}
+
+async function discoveryError(options: { readonly configDir: string; readonly project: string }): Promise<string> {
+  try {
+    await discoverClaudeCodeArtifacts(options);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  return '';
 }
