@@ -172,7 +172,7 @@ async function loadSession(input: ManualReviewInput): Promise<NormalizedSession>
     return normalizeClaudeCodeArtifact(artifact);
   }
   const location = join(input.root, input.session);
-  return readCursorMarkdownExport({ source: 'cursor', id: basename(input.session, '.md'), location, format: 'markdown-export' }, input.root, new Date(0).toISOString());
+  return await readCursorMarkdownExport({ source: 'cursor', id: basename(input.session, '.md'), location, format: 'markdown-export' }, input.root, new Date(0).toISOString());
 }
 
 function recommendation(value: { readonly state: 'agreed'; readonly value: string } | { readonly state: 'unresolved-disagreement'; readonly values: readonly string[] }): string {

@@ -36,7 +36,7 @@ test('all source adapters preserve only representative allowlisted session text'
   const codex = await new CodexSessionAdapter(codexRoot).read('session.jsonl');
   const [claudeArtifact] = await discoverClaudeCodeArtifacts({ configDir: claudeConfig, project });
   const claude = await normalizeClaudeCodeArtifact(claudeArtifact!);
-  const cursor = readCursorMarkdownExport({ source: 'cursor', id: 'session', location: cursorExport, format: 'markdown-export' }, cursorRoot, timestamp);
+  const cursor = await readCursorMarkdownExport({ source: 'cursor', id: 'session', location: cursorExport, format: 'markdown-export' }, cursorRoot, timestamp);
 
   assert.deepEqual(codex.events.map(({ text }) => text), ['Codex prompt', 'Codex response', 'Codex arguments', 'Codex output']);
   assert.deepEqual(claude.events.map(({ text }) => text), ['Claude prompt', 'Claude response', 'Claude arguments\nClaude output']);

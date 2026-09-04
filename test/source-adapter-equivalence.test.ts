@@ -22,7 +22,7 @@ test('normalizes equivalent local source fixtures to the same review-relevant ev
   const [codexSession] = await Promise.all([(async () => codex.read('session.jsonl'))()]);
   const [claudeArtifact] = await discoverClaudeCodeArtifacts({ configDir: claudeConfig, project });
   const claudeSession = await normalizeClaudeCodeArtifact(claudeArtifact);
-  const cursorSession = readCursorMarkdownExport({ source: 'cursor', id: 'session', location: cursorExport, format: 'markdown-export' }, cursorRoot, timestamp);
+  const cursorSession = await readCursorMarkdownExport({ source: 'cursor', id: 'session', location: cursorExport, format: 'markdown-export' }, cursorRoot, timestamp);
 
   const projection = (session: { events: readonly { kind: string; occurredAt: string; text?: string; outcome: string }[] }) => session.events.map(({ kind, occurredAt, text, outcome }) => ({ kind, occurredAt, text, outcome }));
   const expected = [{ kind: 'message', occurredAt: timestamp, text: 'Review prompt', outcome: 'unknown' }];
