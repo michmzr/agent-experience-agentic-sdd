@@ -71,6 +71,8 @@ Diagnostic persistence is best effort. If the diagnostic database itself cannot 
 
 For a Cursor delivery, ingress resolves the scope before adaptation. It uses a verified Git top level when present, otherwise the normalized real current working directory as a workspace scope. The resolver creates `.ael/` with mode 0700 and `workspace-id` with mode 0600 on first non-Git use, generates its UUID with `randomUUID`, and rejects malformed existing markers without writing a replacement. The adapter classifies the hook and returns its typed result.
 
+The resolver does not add `.ael/` or `workspace-id` to `.gitignore`. The marker remains available for Git tracking when a workspace later becomes a repository; its UUID is still excluded from SQLite and diagnostics output.
+
 An accepted record follows the existing passive-capture path. If primary persistence fails, ingress attempts one `persistence-failure` increment in the separate diagnostic store and returns the existing generic fail-open result.
 
 An unsupported or rejected technical result attempts one increment for its fixed category, then maps to the existing ignored or degraded hook behavior. Unsupported tools remain ignored. Invalid working directories and unsafe command shapes remain degraded with exit zero.
