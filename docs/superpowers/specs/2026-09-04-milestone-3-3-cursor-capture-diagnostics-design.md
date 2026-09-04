@@ -77,7 +77,7 @@ The resolver does not add `.ael/` or `workspace.json` to `.gitignore`. The confi
 
 Changing an existing workspace ID is outside this increment.
 
-The workspace configuration has a closed version-1 object with exactly `version` and `workspaceId`; unknown fields are rejected in this increment. `workspaceId` is a slug containing only lowercase ASCII letters, digits and single hyphens, without leading or trailing hyphens.
+The workspace configuration has a closed version-1 object with exactly `version` and `workspaceId`; unknown fields are rejected in this increment. `workspaceId` is a slug of at most 64 characters containing only lowercase ASCII letters, digits and single hyphens, without leading or trailing hyphens.
 
 An accepted record follows the existing passive-capture path. If primary persistence fails, ingress attempts one `persistence-failure` increment in the separate diagnostic store and returns the existing generic fail-open result.
 
