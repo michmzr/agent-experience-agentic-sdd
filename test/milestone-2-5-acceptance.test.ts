@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
-import { runCliAsync, type CliResult } from '../src/cli.js';
+import { runCli, runCliAsync, type CliResult } from '../src/cli.js';
 import type { SessionId } from '../src/domain/types.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 
@@ -204,6 +204,100 @@ test('excludes raw hook fields and credential markers from SQLite and diagnostic
       assert.equal(bytes.includes(Buffer.from(marker)), false, marker);
     }
   } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('keeps non-Git workspace capture diagnostics scope-scoped and private', async () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'ael-workspace-acceptance-'));
+  const dataDir = dataDirectory();
+  const rawCommand = 'git status --short';
+  const promptMarker = 'workspace-prompt-marker-acceptance';
+  const credentialMarker = 'classified-credential-marker-acceptance';
+  const sessionMarker = 'workspace-session-marker-acceptance';
+  try {
+    const started = await runCliAsync(
+      ['capture', 'hook', '--source', 'cursor', '--data-dir', dataDir],
+      {
+        workingDirectory: workspace,
+        now: () => startTime,
+        hookInput: JSON.stringify({
+          conversation_id: 'workspace-acceptance-session',
+          cwd: workspace,
+          hook_event_name: 'sessionStart'
+        })
+      }
+    );
+    assert.deepEqual(started, { exitCode: 0, stdout: '', stderr: '' });
+
+    const supported = await runCliAsync(
+      ['capture', 'hook', '--source', 'cursor', '--data-dir', dataDir],
+      {
+        workingDirectory: workspace,
+        now: () => eventTime,
+        hookInput: JSON.stringify({
+          conversation_id: 'workspace-acceptance-session',
+          cwd: workspace,
+          hook_event_name: 'preToolUse',
+          tool_name: 'Shell',
+          tool_use_id: 'workspace-supported-tool',
+          tool_input: { command: rawCommand },
+          prompt: promptMarker
+        })
+      }
+    );
+    assert.deepEqual(supported, { exitCode: 0, stdout: '', stderr: '' });
+
+    const rejected = await runCliAsync(
+      ['capture', 'hook', '--source', 'cursor', '--data-dir', dataDir],
+      {
+        workingDirectory: workspace,
+        now: () => postTime,
+        hookInput: JSON.stringify({
+          conversation_id: `${sessionMarker}-rejected`,
+          cwd: workspace,
+          hook_event_name: 'preToolUse',
+          tool_name: 'Shell',
+          tool_use_id: 'workspace-rejected-tool',
+          tool_input: { command: `curl --token=${credentialMarker}` },
+          prompt: promptMarker
+        })
+      }
+    );
+    assert.deepEqual(rejected, {
+      exitCode: 0,
+      stdout: '',
+      stderr: 'AEL_CAPTURE_PRIVATE_INPUT: Passive capture skipped.\n'
+    });
+
+    const hooks = runCli(['hooks', 'diagnostics', '--data-dir', dataDir, '--json'], { workingDirectory: workspace });
+    const inspection = runCli(['experience', 'inspect', '--data-dir', dataDir, '--json'], { workingDirectory: workspace });
+    assert.equal(hooks.exitCode, 0, hooks.stderr);
+    assert.equal(inspection.exitCode, 0, inspection.stderr);
+    assert.deepEqual(JSON.parse(hooks.stdout), JSON.parse(inspection.stdout));
+
+    const report = JSON.parse(hooks.stdout) as {
+      readonly scope: { readonly kind: string; readonly id: string };
+      readonly counts: Record<string, number>;
+    };
+    const workspaceId = JSON.parse(readFileSync(join(workspace, '.ael', 'workspace.json'), 'utf8')).workspaceId;
+    assert.deepEqual(report.scope, { kind: 'workspace', id: workspaceId });
+    assert.deepEqual(report.counts, {
+      'invalid-working-directory': 0,
+      'persistence-failure': 0,
+      'unsafe-command-shape': 1,
+      'unsupported-tool': 0
+    });
+
+    const markers = [workspace, rawCommand, promptMarker, credentialMarker, sessionMarker];
+    const outputs = [started.stdout, started.stderr, supported.stdout, supported.stderr, rejected.stdout, rejected.stderr, hooks.stdout, hooks.stderr, inspection.stdout, inspection.stderr];
+    for (const marker of markers) {
+      assert.equal(readFileSync(databasePath(dataDir)).includes(Buffer.from(marker)), false, `experience SQLite contains ${marker}`);
+      assert.equal(readFileSync(join(dataDir, 'capture-diagnostics.sqlite')).includes(Buffer.from(marker)), false, `diagnostic SQLite contains ${marker}`);
+      for (const output of outputs) assert.equal(output.includes(marker), false, `CLI output contains ${marker}`);
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
