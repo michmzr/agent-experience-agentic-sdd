@@ -1,14 +1,15 @@
-import { lstat, readdir, readFile, realpath } from 'node:fs/promises';
+import { lstat, readdir, realpath } from 'node:fs/promises';
 import { basename, extname, join, relative, resolve } from 'node:path';
 
 import {
   assertSessionArtifactSize,
-  MAX_NORMALIZED_SESSION_EVENTS,
   normalizeSession,
   type LocalSessionRecord,
   type NormalizedSession,
   type SessionArtifact
 } from '../contracts.js';
+import { readBoundedJsonl } from './bounded-jsonl.js';
+import { createBoundedSessionAccumulator } from '../bounded-session.js';
 import { isWithinRepository, resolveRepositoryIdentity } from '../repository-identity.js';
 
 export interface ClaudeCodeAdapterOptions {
@@ -73,10 +74,24 @@ export async function normalizeClaudeCodeArtifact(artifact: ClaudeCodeArtifact):
     throw new Error('Claude Code session artifact is unsupported.');
   }
 
-  const contents = await readFile(artifactPath, 'utf8');
-  assertSessionArtifactSize(Buffer.byteLength(contents, 'utf8'));
-  const records = parseRecords(contents);
-  return normalizeSession({ source: 'claude-code', artifact, records });
+  const accumulator = createBoundedSessionAccumulator();
+  let parseError: unknown;
+  await readBoundedJsonl({
+    path: artifactPath,
+    onLine: (line) => {
+      if (parseError !== undefined) return;
+      try {
+        accumulator.add(normalizeRecord(parseJsonRecord(line)));
+      } catch (error) {
+        parseError = error;
+      }
+    }
+  });
+  if (parseError !== undefined) throw parseError;
+  const window = accumulator.finish();
+  return normalizeSession({
+    source: 'claude-code', artifact, records: window.records, startedAt: window.startedAt, endedAt: window.endedAt
+  });
 }
 
 function requiredProject(project: string | undefined): string {
@@ -98,20 +113,12 @@ function assertWithin(root: string, target: string, label: string): void {
   }
 }
 
-function parseRecords(contents: string): readonly LocalSessionRecord[] {
-  const records: LocalSessionRecord[] = [];
-  const lines = contents.split(/\r?\n/).filter((line) => line.trim());
-  if (lines.length > MAX_NORMALIZED_SESSION_EVENTS) throw new Error('Session resource limit exceeded.');
-  for (const line of lines) {
-    let parsed: ClaudeCodeJsonRecord;
-    try {
-      parsed = JSON.parse(line) as ClaudeCodeJsonRecord;
-    } catch {
-      throw new Error('Claude Code session artifact contains invalid JSONL.');
-    }
-    records.push(normalizeRecord(parsed));
+function parseJsonRecord(line: string): ClaudeCodeJsonRecord {
+  try {
+    return JSON.parse(line) as ClaudeCodeJsonRecord;
+  } catch {
+    throw new Error('Claude Code session artifact contains invalid JSONL.');
   }
-  return records;
 }
 
 function normalizeRecord(record: ClaudeCodeJsonRecord): LocalSessionRecord {

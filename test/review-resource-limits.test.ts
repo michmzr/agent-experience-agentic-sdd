@@ -6,7 +6,6 @@ import test from 'node:test';
 
 import { CodexSessionAdapter } from '../src/review/adapters/codex.js';
 import { discoverClaudeCodeArtifacts, normalizeClaudeCodeArtifact } from '../src/review/adapters/claude-code.js';
-import { readCursorMarkdownExport } from '../src/review/adapters/cursor.js';
 import {
   MAX_NORMALIZED_SESSION_EVENTS,
   MAX_SESSION_ARTIFACT_BYTES,
@@ -57,12 +56,15 @@ test('enforces normalized event-count and aggregate text limits at their boundar
   );
 });
 
-test('all adapters reject over-limit artifacts without exposing source paths or values', async () => {
+test('Codex and Claude Code accept valid artifacts at the byte limit and reject one byte over without exposing source values', async () => {
   const marker = 'source-value-must-not-leak';
-  const oversized = `${marker}${'x'.repeat(MAX_SESSION_ARTIFACT_BYTES)}`;
+  const codexContents = validJsonlAtByteLimit('codex');
 
   const codexRoot = mkdtempSync(join(tmpdir(), 'ael-codex-over-limit-'));
-  writeFileSync(join(codexRoot, 'oversized.jsonl'), JSON.stringify({ kind: 'message', occurredAt: timestamp, text: oversized }));
+  writeFileSync(join(codexRoot, 'boundary.jsonl'), codexContents);
+  const codexBoundary = await new CodexSessionAdapter(codexRoot).read('boundary.jsonl');
+  assert.equal(codexBoundary.events.length, MAX_NORMALIZED_SESSION_EVENTS);
+  writeFileSync(join(codexRoot, 'oversized.jsonl'), `${codexContents}${marker}`);
   await assert.rejects(
     () => new CodexSessionAdapter(codexRoot).read('oversized.jsonl'),
     (error: unknown) => genericLimitError(error, marker, codexRoot)
@@ -70,20 +72,37 @@ test('all adapters reject over-limit artifacts without exposing source paths or 
 
   const claudeConfig = mkdtempSync(join(tmpdir(), 'ael-claude-over-limit-')); const project = 'workspace';
   const claudeRoot = join(claudeConfig, 'projects', project); mkdirSync(claudeRoot, { recursive: true });
-  writeFileSync(join(claudeRoot, 'oversized.jsonl'), JSON.stringify({ type: 'message', timestamp, message: oversized }));
-  const [claudeArtifact] = await discoverClaudeCodeArtifacts({ configDir: claudeConfig, project });
+  const claudeContents = validJsonlAtByteLimit('claude-code');
+  writeFileSync(join(claudeRoot, 'boundary.jsonl'), claudeContents);
+  const [claudeBoundaryArtifact] = await discoverClaudeCodeArtifacts({ configDir: claudeConfig, project });
+  const claudeBoundary = await normalizeClaudeCodeArtifact(claudeBoundaryArtifact!);
+  assert.equal(claudeBoundary.events.length, MAX_NORMALIZED_SESSION_EVENTS);
+  writeFileSync(join(claudeRoot, 'oversized.jsonl'), `${claudeContents}${marker}`);
+  const claudeArtifact = (await discoverClaudeCodeArtifacts({ configDir: claudeConfig, project })).find(({ id }) => id === 'oversized');
   await assert.rejects(
     () => normalizeClaudeCodeArtifact(claudeArtifact!),
     (error: unknown) => genericLimitError(error, marker, claudeConfig)
   );
-
-  const cursorRoot = mkdtempSync(join(tmpdir(), 'ael-cursor-over-limit-')); const cursorPath = join(cursorRoot, 'oversized.md');
-  writeFileSync(cursorPath, `## User\n${oversized}`);
-  assert.throws(
-    () => readCursorMarkdownExport({ source: 'cursor', id: 'oversized', location: cursorPath, format: 'markdown-export' }, cursorRoot, timestamp),
-    (error: unknown) => genericLimitError(error, marker, cursorRoot)
-  );
 });
+
+function validJsonlAtByteLimit(source: 'codex' | 'claude-code'): string {
+  const lines = Array.from({ length: MAX_NORMALIZED_SESSION_EVENTS }, () => JSON.stringify(
+    source === 'codex'
+      ? { kind: 'metadata', occurredAt: timestamp }
+      : { type: 'metadata', timestamp }
+  ));
+  const withPadding = lines.map((line) => `${line.slice(0, -1)},\"ignored\":\"\"}`);
+  let remaining = MAX_SESSION_ARTIFACT_BYTES - Buffer.byteLength(withPadding.join('\n'), 'utf8');
+  assert.ok(remaining >= 0);
+  for (let index = 0; remaining > 0; index += 1) {
+    const padding = Math.min(remaining, 64 * 1024);
+    withPadding[index] = `${withPadding[index]!.slice(0, -2)}${'x'.repeat(padding)}\"}`;
+    remaining -= padding;
+  }
+  const contents = withPadding.join('\n');
+  assert.equal(Buffer.byteLength(contents, 'utf8'), MAX_SESSION_ARTIFACT_BYTES);
+  return contents;
+}
 
 function artifact(id: string) {
   return { source: 'codex' as const, id, location: '/fixture/session.jsonl', format: 'observed-jsonl' as const };

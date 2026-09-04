@@ -79,3 +79,33 @@ test('sanitizer redacts and residual-scans bounded session text before runtime',
   const truncated = sanitizeForReview({ ...normalized, events: [{ ...normalized.events[0]!, text: 'x'.repeat(MAX_SESSION_EVENT_TEXT_LENGTH + 1) }] });
   assert.equal(truncated.session.events[0]?.text?.length, MAX_SESSION_EVENT_TEXT_LENGTH);
 });
+
+test('streaming adapters evict old credential text and sanitize retained newest credential text', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-session-streaming-text-'));
+  const evictedMarker = 'evicted-credential-marker';
+  const retainedMarker = 'retained-credential-marker';
+  const codexRoot = join(root, 'codex'); mkdirSync(codexRoot);
+  const claudeConfig = join(root, 'claude'); const project = 'workspace'; const claudeRoot = join(claudeConfig, 'projects', project);
+  mkdirSync(claudeRoot, { recursive: true });
+
+  const codexRecords = Array.from({ length: 1025 }, (_, index) => JSON.stringify({
+    timestamp, type: 'event_msg', payload: { type: 'user_message', message: index === 0 ? `token=${evictedMarker}` : index === 1024 ? `token=${retainedMarker}` : `message-${index}` }
+  }));
+  const claudeRecords = Array.from({ length: 1025 }, (_, index) => JSON.stringify({
+    type: 'message', timestamp, message: index === 0 ? `token=${evictedMarker}` : index === 1024 ? `token=${retainedMarker}` : `message-${index}`
+  }));
+  writeFileSync(join(codexRoot, 'session.jsonl'), codexRecords.join('\n'));
+  writeFileSync(join(claudeRoot, 'session.jsonl'), claudeRecords.join('\n'));
+
+  const codex = await new CodexSessionAdapter(codexRoot).read('session.jsonl');
+  const [claudeArtifact] = await discoverClaudeCodeArtifacts({ configDir: claudeConfig, project });
+  const claude = await normalizeClaudeCodeArtifact(claudeArtifact!);
+
+  for (const session of [codex, claude]) {
+    const normalized = JSON.stringify(session);
+    const reviewArtifact = JSON.stringify(sanitizeForReview(session));
+    assert.equal(normalized.includes(evictedMarker), false);
+    assert.equal(normalized.includes(retainedMarker), true);
+    assert.equal(reviewArtifact.includes(retainedMarker), false);
+  }
+});

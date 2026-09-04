@@ -1,14 +1,15 @@
-import { lstat, readdir, readFile, realpath } from 'node:fs/promises';
+import { lstat, readdir, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
 
 import {
   assertSessionArtifactSize,
-  MAX_NORMALIZED_SESSION_EVENTS,
   normalizeSession,
   type LocalSessionRecord,
   type NormalizedSession,
   type SessionArtifact
 } from '../contracts.js';
+import { readBoundedJsonl } from './bounded-jsonl.js';
+import { createBoundedSessionAccumulator } from '../bounded-session.js';
 import { isWithinRepository, resolveRepositoryIdentity } from '../repository-identity.js';
 
 /**
@@ -45,13 +46,27 @@ export class CodexSessionAdapter {
     const root = await this.resolveRoot();
     const artifactPath = await this.resolveArtifact(root, artifactId);
     assertSessionArtifactSize((await lstat(artifactPath)).size);
-    const contents = await readFile(artifactPath, 'utf8');
-    assertSessionArtifactSize(Buffer.byteLength(contents, 'utf8'));
-    const records = this.parseRecords(contents);
+    const accumulator = createBoundedSessionAccumulator();
+    let parseError: unknown;
+    await readBoundedJsonl({
+      path: artifactPath,
+      onLine: (line) => {
+        if (parseError !== undefined) return;
+        try {
+          accumulator.add(this.parseRecord(line));
+        } catch (error) {
+          parseError = error;
+        }
+      }
+    });
+    if (parseError !== undefined) throw parseError;
+    const window = accumulator.finish();
     return normalizeSession({
       source: 'codex',
       artifact: { source: 'codex', id: artifactId, location: artifactPath, format: 'observed-jsonl' },
-      records
+      records: window.records,
+      startedAt: window.startedAt,
+      endedAt: window.endedAt
     });
   }
 
@@ -97,13 +112,6 @@ export class CodexSessionAdapter {
   private isWithin(root: string, candidate: string): boolean {
     const pathFromRoot = relative(root, candidate);
     return pathFromRoot === '' || (!pathFromRoot.startsWith(`..${sep}`) && pathFromRoot !== '..' && !isAbsolute(pathFromRoot));
-  }
-
-  private parseRecords(contents: string): LocalSessionRecord[] {
-    const lines = contents.split(/\r?\n/).filter((line) => line.trim().length > 0);
-    if (lines.length === 0) throw new Error('Codex session artifact contains no records.');
-    if (lines.length > MAX_NORMALIZED_SESSION_EVENTS) throw new Error('Session resource limit exceeded.');
-    return lines.map((line) => this.parseRecord(line));
   }
 
   private parseRecord(line: string): LocalSessionRecord {

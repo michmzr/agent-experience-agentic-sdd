@@ -107,3 +107,38 @@ test('rejects an unknown observed Codex envelope type without including its payl
       && !error.message.includes('do-not-leak-observed')
   );
 });
+
+test('retains the latest observed records with source ordinals while preserving full session bounds', async () => {
+  const root = await fixtureRoot();
+  const records = Array.from({ length: 1026 }, (_, index) => JSON.stringify({
+    timestamp: timestampAt(index), type: 'session_meta', payload: {}
+  }));
+  await writeFile(join(root, 'session.jsonl'), records.join('\n'));
+
+  const session = await new CodexSessionAdapter(root).read('session.jsonl');
+
+  assert.equal(session.events.length, 1024);
+  assert.equal(session.events[0]?.id, 'session.jsonl:2');
+  assert.equal(session.events.at(-1)?.id, 'session.jsonl:1025');
+  assert.equal(session.startedAt, timestampAt(0));
+  assert.equal(session.endedAt, timestampAt(1025));
+});
+
+test('fails closed on an unsupported early observed record without leaking its payload', async () => {
+  const root = await fixtureRoot();
+  const marker = 'codex-unsupported-early-secret';
+  const records = [
+    JSON.stringify({ timestamp: timestampAt(0), type: 'unsupported', payload: { marker } }),
+    ...Array.from({ length: 1025 }, (_, index) => JSON.stringify({ timestamp: timestampAt(index + 1), type: 'session_meta', payload: {} }))
+  ];
+  await writeFile(join(root, 'session.jsonl'), records.join('\n'));
+
+  await assert.rejects(
+    () => new CodexSessionAdapter(root).read('session.jsonl'),
+    (error: unknown) => error instanceof Error && /unsupported session record/i.test(error.message) && !error.message.includes(marker)
+  );
+});
+
+function timestampAt(index: number): string {
+  return new Date(Date.parse('2026-08-24T10:00:00.000Z') + index * 1_000).toISOString();
+}

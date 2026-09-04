@@ -69,3 +69,38 @@ test('fails closed for unknown records and artifacts outside the configured proj
     /must remain within the configured projects root/
   );
 });
+
+test('retains the latest Claude Code records with source ordinals while preserving full session bounds', async () => {
+  const { configDir, project, projectRoot } = await fixtureProject();
+  const records = Array.from({ length: 1026 }, (_, index) => JSON.stringify({ type: 'metadata', timestamp: timestampAt(index) }));
+  await writeFile(join(projectRoot, 'session-a.jsonl'), records.join('\n'));
+
+  const [artifact] = await discoverClaudeCodeArtifacts({ configDir, project });
+  const session = await normalizeClaudeCodeArtifact(artifact!);
+
+  assert.equal(session.events.length, 1024);
+  assert.equal(session.events[0]?.id, 'session-a:2');
+  assert.equal(session.events.at(-1)?.id, 'session-a:1025');
+  assert.equal(session.startedAt, timestampAt(0));
+  assert.equal(session.endedAt, timestampAt(1025));
+});
+
+test('fails closed on an unsupported early Claude Code record without leaking its payload', async () => {
+  const { configDir, project, projectRoot } = await fixtureProject();
+  const marker = 'claude-unsupported-early-secret';
+  const records = [
+    JSON.stringify({ type: 'unsupported', timestamp: timestampAt(0), payload: { marker } }),
+    ...Array.from({ length: 1025 }, (_, index) => JSON.stringify({ type: 'metadata', timestamp: timestampAt(index + 1) }))
+  ];
+  await writeFile(join(projectRoot, 'session-a.jsonl'), records.join('\n'));
+
+  const [artifact] = await discoverClaudeCodeArtifacts({ configDir, project });
+  await assert.rejects(
+    () => normalizeClaudeCodeArtifact(artifact!),
+    (error: unknown) => error instanceof Error && /unsupported claude code session record/i.test(error.message) && !error.message.includes(marker)
+  );
+});
+
+function timestampAt(index: number): string {
+  return new Date(Date.parse('2026-08-24T10:00:00.000Z') + index * 1_000).toISOString();
+}
