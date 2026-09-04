@@ -73,7 +73,7 @@ For a Cursor delivery, ingress resolves the scope before adaptation. It uses a v
 
 The resolver does not add `.ael/` or `workspace.json` to `.gitignore`. The configuration remains available for Git tracking when a workspace later becomes a repository. Its readable workspace slug is intentionally emitted by diagnostics.
 
-`ael init` is idempotent. When valid workspace configuration already exists, it displays the configured workspace ID and exits successfully without changing it.
+`ael init` is idempotent. When valid workspace configuration already exists, it displays the configured workspace ID and exits successfully without changing it, including when `--workspace-id` is supplied.
 
 An accepted record follows the existing passive-capture path. If primary persistence fails, ingress attempts one `persistence-failure` increment in the separate diagnostic store and returns the existing generic fail-open result.
 
