@@ -114,7 +114,7 @@ Acceptance gates:
 
 - a representative 7.97 MiB Codex Desktop artifact completes manual review within documented memory, event and evidence bounds;
 - supported Cursor technical actions are persisted, intentionally unsupported actions are counted by reason, and diagnostics do not claim to detect a hook or `sessionEnd` delivery that Cursor did not invoke;
-- diagnostics expose categories and counts without including commands, paths, prompts, credentials or raw session values;
+- accepted technical events retain normalized paths in local capture storage; diagnostics reports expose categories and counts without including commands, paths, prompts, credentials or raw session values;
 - the existing fail-open hook contract and manual-review sanitization boundary remain unchanged.
 
 Out of scope:
