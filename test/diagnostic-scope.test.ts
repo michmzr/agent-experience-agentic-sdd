@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { resolveDiagnosticScope } from '../src/capture/diagnostic-scope.js';
+import { initializeDiagnosticWorkspace, resolveDiagnosticScope } from '../src/capture/diagnostic-scope.js';
 import { resolveRepository } from '../src/repository/local-repository.js';
 import { initializeGitRepository } from './helpers/git-repository.js';
 
@@ -23,18 +23,33 @@ test('returns the canonical repository identifier for a Git directory', () => {
   assert.deepEqual(scope, { kind: 'repository', id: resolveRepository(nested)?.id });
 });
 
-test('creates a private stable workspace marker and hashes only its UUID', () => {
-  const workspace = temporaryDirectory('ael-diagnostic-workspace-');
+test('initializes a Git-trackable workspace configuration from the folder name', () => {
+  const parent = temporaryDirectory('ael-diagnostic-workspace-parent-');
+  const workspace = join(parent, 'Readable workspace');
+  mkdirSync(workspace);
 
   const scope = resolveDiagnosticScope(workspace);
-  const markerPath = join(workspace, '.ael', 'workspace-id');
-  const marker = readFileSync(markerPath, 'utf8');
+  const configPath = join(workspace, '.ael', 'workspace.json');
+  const configuration = JSON.parse(readFileSync(configPath, 'utf8')) as unknown;
 
-  assert.equal(scope.kind, 'workspace');
-  assert.match(scope.id, /^[a-f0-9]{64}$/);
-  assert.match(marker, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
-  assert.equal(lstatSync(join(workspace, '.ael')).mode & 0o777, 0o700);
-  assert.equal(lstatSync(markerPath).mode & 0o777, 0o600);
+  assert.deepEqual(scope, { kind: 'workspace', id: 'readable-workspace' });
+  assert.deepEqual(configuration, { version: 1, workspaceId: 'readable-workspace' });
+  assert.equal(lstatSync(join(workspace, '.ael')).mode & 0o777, 0o755);
+  assert.equal(lstatSync(configPath).mode & 0o777, 0o644);
+});
+
+test('initializes an explicit workspace ID without replacing valid configuration', () => {
+  const workspace = temporaryDirectory('ael-diagnostic-explicit-workspace-');
+
+  const initialized = initializeDiagnosticWorkspace(workspace, 'explicit-workspace');
+  const repeated = initializeDiagnosticWorkspace(workspace, 'different-workspace');
+
+  assert.deepEqual(initialized, { kind: 'workspace', id: 'explicit-workspace' });
+  assert.deepEqual(repeated, initialized);
+  assert.deepEqual(JSON.parse(readFileSync(join(workspace, '.ael', 'workspace.json'), 'utf8')), {
+    version: 1,
+    workspaceId: 'explicit-workspace'
+  });
 });
 
 test('resolves a symlink and a moved workspace to the same stable scope', () => {
@@ -51,14 +66,22 @@ test('resolves a symlink and a moved workspace to the same stable scope', () => 
   assert.deepEqual(resolveDiagnosticScope(moved), scope);
 });
 
-test('rejects a malformed existing workspace marker without replacing it', () => {
-  const workspace = temporaryDirectory('ael-diagnostic-invalid-marker-');
-  const markerDirectory = join(workspace, '.ael');
-  const markerPath = join(markerDirectory, 'workspace-id');
-  mkdirSync(markerDirectory, { mode: 0o700 });
-  const marker = 'not-a-workspace-uuid';
-  writeFileSync(markerPath, marker, { mode: 0o600 });
+test('retains a valid workspace configuration after Git initialization', () => {
+  const workspace = temporaryDirectory('ael-diagnostic-git-workspace-');
+  const scope = initializeDiagnosticWorkspace(workspace, 'stable-workspace');
+  initializeGitRepository(workspace);
 
-  assert.throws(() => resolveDiagnosticScope(workspace), /workspace marker/i);
-  assert.equal(readFileSync(markerPath, 'utf8'), marker);
+  assert.deepEqual(resolveDiagnosticScope(workspace), scope);
+});
+
+test('rejects a malformed existing workspace configuration without replacing it', () => {
+  const workspace = temporaryDirectory('ael-diagnostic-invalid-configuration-');
+  const configDirectory = join(workspace, '.ael');
+  const configPath = join(configDirectory, 'workspace.json');
+  mkdirSync(configDirectory, { mode: 0o755 });
+  const configuration = '{"version":1,"workspaceId":"not a slug"}';
+  writeFileSync(configPath, configuration, { mode: 0o644 });
+
+  assert.throws(() => resolveDiagnosticScope(workspace), /workspace configuration/i);
+  assert.equal(readFileSync(configPath, 'utf8'), configuration);
 });

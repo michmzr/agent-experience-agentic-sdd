@@ -35,6 +35,7 @@ interface CheckedDiagnosticRow {
 
 const MAX_COUNT = Number.MAX_SAFE_INTEGER;
 const CANONICAL_REPOSITORY_ID = /^[a-f0-9]{64}$/;
+const WORKSPACE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const categorySet = new Set<string>(cursorCaptureDiagnosticCategories);
 
 const aggregateSchema = `
@@ -43,7 +44,10 @@ const aggregateSchema = `
     scope_kind TEXT NOT NULL CHECK (scope_kind IN ('repository', 'workspace', 'global')),
     scope_id TEXT NOT NULL CHECK (
       (scope_kind = 'global' AND scope_id = 'global') OR
-      (scope_kind IN ('repository', 'workspace') AND length(scope_id) = 64 AND scope_id NOT GLOB '*[^a-f0-9]*')
+      (scope_kind = 'repository' AND length(scope_id) = 64 AND scope_id NOT GLOB '*[^a-f0-9]*') OR
+      (scope_kind = 'workspace' AND length(scope_id) BETWEEN 1 AND 64
+        AND scope_id NOT GLOB '*[^a-z0-9-]*' AND scope_id NOT GLOB '-*'
+        AND scope_id NOT GLOB '*-' AND scope_id NOT GLOB '*--*')
     ),
     category TEXT NOT NULL CHECK (category IN (
       'invalid-working-directory',
@@ -165,8 +169,8 @@ function checkedScope(scope: CursorDiagnosticScope): CheckedScope {
     throw new TypeError('Capture diagnostic scope is invalid.');
   }
   if (scope.scope.kind === 'global' && scope.scope.id === 'global') return scope.scope;
-  if ((scope.scope.kind === 'repository' || scope.scope.kind === 'workspace')
-    && typeof scope.scope.id === 'string' && CANONICAL_REPOSITORY_ID.test(scope.scope.id)) return scope.scope;
+  if (scope.scope.kind === 'repository' && typeof scope.scope.id === 'string' && CANONICAL_REPOSITORY_ID.test(scope.scope.id)) return scope.scope;
+  if (scope.scope.kind === 'workspace' && typeof scope.scope.id === 'string' && isWorkspaceId(scope.scope.id)) return scope.scope;
   throw new TypeError('Capture diagnostic scope is invalid.');
 }
 
@@ -177,7 +181,8 @@ function checkedCategory(category: unknown): asserts category is CursorCaptureDi
 function checkedRow(row: DiagnosticRow, expectedScope?: CheckedScope, expectedCategory?: CursorCaptureDiagnosticCategory): CheckedDiagnosticRow {
   if (row.source !== 'cursor' || typeof row.scope_kind !== 'string' || typeof row.scope_id !== 'string'
     || (row.scope_kind === 'global' && row.scope_id !== 'global')
-    || ((row.scope_kind === 'repository' || row.scope_kind === 'workspace') && !CANONICAL_REPOSITORY_ID.test(row.scope_id))
+    || (row.scope_kind === 'repository' && !CANONICAL_REPOSITORY_ID.test(row.scope_id))
+    || (row.scope_kind === 'workspace' && !isWorkspaceId(row.scope_id))
     || (row.scope_kind !== 'repository' && row.scope_kind !== 'workspace' && row.scope_kind !== 'global')) {
     throw new TypeError('Capture diagnostic row is invalid.');
   }
@@ -194,4 +199,8 @@ function checkedRow(row: DiagnosticRow, expectedScope?: CheckedScope, expectedCa
 
 function normalizeSql(value: string): string {
   return value.replace(/\s+/g, ' ').trim().replace(/;$/, '').toLowerCase();
+}
+
+function isWorkspaceId(value: string): boolean {
+  return value.length <= 64 && WORKSPACE_ID.test(value);
 }

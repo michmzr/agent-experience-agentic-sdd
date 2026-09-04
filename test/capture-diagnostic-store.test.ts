@@ -91,7 +91,7 @@ test('rejects invalid scope and category inputs before mutating counts or persis
   const scope = cursorScope(repositoryScope());
   const workspace = workspaceDirectory('ael-diagnostic-private-workspace-');
   const workspaceScope = cursorScope(resolveDiagnosticScope(workspace));
-  const workspaceMarker = readFileSync(join(workspace, '.ael', 'workspace-id'), 'utf8');
+  const workspaceConfiguration = JSON.parse(readFileSync(join(workspace, '.ael', 'workspace.json'), 'utf8')) as { workspaceId: string };
   const initial = store.counts(scope);
 
   store.increment(workspaceScope, 'unsupported-tool');
@@ -105,9 +105,10 @@ test('rejects invalid scope and category inputs before mutating counts or persis
   store.close();
 
   const bytes = readFileSync(path);
-  for (const marker of ['pnpm publish --token=sk-test-credential', '/private/repository/credential', 'sk-test-credential', 'session-42', workspace, workspaceMarker]) {
+  for (const marker of ['pnpm publish --token=sk-test-credential', '/private/repository/credential', 'sk-test-credential', 'session-42', workspace]) {
     assert.equal(bytes.includes(Buffer.from(marker)), false, marker);
   }
+  assert.equal(bytes.includes(Buffer.from(workspaceConfiguration.workspaceId)), true);
 });
 
 test('rejects zero, overflow, and malformed schema rows without modifying the existing database', () => {
