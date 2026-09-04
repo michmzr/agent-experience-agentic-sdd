@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, openSync, renameSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -83,6 +83,21 @@ test('rejects a symlinked export root without exposing the external path', async
   assert.match(message, /symlink/i);
   assert.equal(message.includes(externalRoot), false);
   assert.equal(message.includes('private-session.md'), false);
+});
+
+test('does not read an external replacement made after Cursor export validation', async () => {
+  const root = exportRoot(); const artifact = join(root, 'review.md'); const external = join(exportRoot(), 'external.md'); const marker = 'external-replacement-marker';
+  writeFileSync(artifact, '## User\ntrusted'); writeFileSync(external, `## User\n${marker}`);
+
+  await assert.rejects(
+    () => readCursorMarkdownExport(
+      { source: 'cursor', id: 'review', location: artifact, format: 'markdown-export' },
+      root,
+      '2026-08-24T12:00:00.000Z',
+      { openFile(path, flags) { renameSync(external, path); return openSync(path, flags); } }
+    ),
+    (error: unknown) => error instanceof Error && error.message === 'Cursor export could not be read.' && !error.message.includes(marker)
+  );
 });
 
 test('retains the newest 1024 Cursor messages with stable source ordinals', async () => {

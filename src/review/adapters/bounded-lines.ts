@@ -1,4 +1,4 @@
-import { createReadStream, type ReadStream } from 'node:fs';
+import { closeSync, createReadStream, type ReadStream } from 'node:fs';
 
 import { MAX_SESSION_ARTIFACT_BYTES, MAX_SESSION_ARTIFACT_LINE_BYTES } from '../contracts.js';
 
@@ -7,13 +7,16 @@ export interface BoundedLineReaderOptions {
   readonly errorMessage: string;
   readonly onLine: (line: string) => void | Promise<void>;
   readonly skipEmptyLines?: boolean;
+  readonly fileDescriptor?: number;
   readonly streamFactory?: (path: string) => ReadStream;
 }
 
 export async function readBoundedLines(options: BoundedLineReaderOptions): Promise<void> {
   let stream: ReadStream | undefined;
   try {
-    stream = options.streamFactory?.(options.path) ?? createReadStream(options.path);
+    stream = options.fileDescriptor === undefined
+      ? options.streamFactory?.(options.path) ?? createReadStream(options.path)
+      : createReadStream(options.path, { fd: options.fileDescriptor });
     let totalBytes = 0;
     let unfinished = Buffer.alloc(0);
 
@@ -51,6 +54,7 @@ export async function readBoundedLines(options: BoundedLineReaderOptions): Promi
   } catch {
     throw new Error(options.errorMessage);
   } finally {
-    stream?.destroy();
+    if (stream) stream.destroy();
+    else if (options.fileDescriptor !== undefined) closeSync(options.fileDescriptor);
   }
 }

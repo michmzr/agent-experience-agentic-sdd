@@ -1,4 +1,4 @@
-import { lstatSync, readdirSync, realpathSync, type Dirent } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, realpathSync, type Dirent, type Stats } from 'node:fs';
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import {
@@ -13,6 +13,10 @@ import { createBoundedSessionAccumulator } from '../bounded-session.js';
 import { readBoundedLines } from './bounded-lines.js';
 
 class CursorPathBoundaryError extends Error {}
+
+export interface CursorMarkdownReadDependencies {
+  readonly openFile?: (path: string, flags: number) => number;
+}
 
 function resolveCursorDiscoveryRoot(root: string): string {
   try {
@@ -79,11 +83,13 @@ function resolveCursorExport(root: string, location: string): string {
   }
 }
 
-export async function readCursorMarkdownExport(artifact: SessionArtifact, root: string, occurredAt: string): Promise<NormalizedSession> {
+export async function readCursorMarkdownExport(artifact: SessionArtifact, root: string, occurredAt: string, dependencies: CursorMarkdownReadDependencies = {}): Promise<NormalizedSession> {
   if (artifact.source !== 'cursor') throw new Error('Cursor adapter requires a Cursor artifact.');
   if (artifact.format !== 'markdown-export') throw new Error('Cursor adapter requires a Markdown export.');
   const location = resolveCursorExport(root, artifact.location);
-  assertSessionArtifactSize(lstatSync(location).size);
+  const observed = observedCursorExport(location);
+  assertSessionArtifactSize(observed.size);
+  const fileDescriptor = openValidatedCursorExport(location, observed, dependencies);
   const accumulator = createBoundedSessionAccumulator();
   const heading = /^##\s+(?:User|Assistant)\s*$/i;
   let foundHeading = false;
@@ -108,6 +114,7 @@ export async function readCursorMarkdownExport(artifact: SessionArtifact, root: 
 
   await readBoundedLines({
     path: location,
+    fileDescriptor,
     errorMessage: 'Cursor export could not be read.',
     onLine: (line) => {
       if (heading.test(line)) {
@@ -124,4 +131,27 @@ export async function readCursorMarkdownExport(artifact: SessionArtifact, root: 
   submitMessage();
   const window = accumulator.finish();
   return normalizeSession({ source: 'cursor', artifact, records: window.records, startedAt: window.startedAt, endedAt: window.endedAt });
+}
+
+function observedCursorExport(location: string): Stats {
+  try {
+    const observed = lstatSync(location);
+    if (!observed.isFile()) throw new Error();
+    return observed;
+  } catch {
+    throw new Error('Cursor export could not be read.');
+  }
+}
+
+function openValidatedCursorExport(location: string, observed: Stats, dependencies: CursorMarkdownReadDependencies): number {
+  let descriptor: number | undefined;
+  try {
+    descriptor = (dependencies.openFile ?? openSync)(location, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile() || opened.dev !== observed.dev || opened.ino !== observed.ino) throw new Error();
+    return descriptor;
+  } catch {
+    if (descriptor !== undefined) closeSync(descriptor);
+    throw new Error('Cursor export could not be read.');
+  }
 }
