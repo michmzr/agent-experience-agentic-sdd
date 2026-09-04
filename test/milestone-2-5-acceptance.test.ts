@@ -87,19 +87,23 @@ test('captures both sources end to end with correlation, migration and no learni
 
     const store = new ExperienceStore(databasePath(dataDir));
     try {
-      assert.deepEqual(store.listCapturedEventsPage().entries.map((event) => ({
+      const captured = store.listCapturedEventsPage().entries;
+      assert.deepEqual(captured.map((event) => ({
         source: event.source,
         phase: event.phase,
-        sessionId: event.sessionId,
         outcome: event.outcome
       })), [
-        { source: 'codex', phase: 'pre-action', sessionId: 'codex-session', outcome: undefined },
-        { source: 'codex', phase: 'post-result', sessionId: 'codex-session', outcome: 'unknown' },
-        { source: 'cursor', phase: 'pre-action', sessionId: 'cursor-session', outcome: undefined },
-        { source: 'cursor', phase: 'post-result', sessionId: 'cursor-session', outcome: 'unknown' }
+        { source: 'codex', phase: 'pre-action', outcome: undefined },
+        { source: 'codex', phase: 'post-result', outcome: 'unknown' },
+        { source: 'cursor', phase: 'pre-action', outcome: undefined },
+        { source: 'cursor', phase: 'post-result', outcome: 'unknown' }
       ]);
+      const cursorSessionIds = captured.filter(({ source }) => source === 'cursor').map(({ sessionId }) => sessionId);
+      assert.equal(new Set(cursorSessionIds).size, 1);
+      assert.match(cursorSessionIds[0]!, /^[a-f0-9]{64}$/);
+      assert.notEqual(cursorSessionIds[0], 'cursor-session');
       assert.equal(store.loadSession('codex-session' as SessionId)?.endedAt, endTime);
-      assert.equal(store.loadSession('cursor-session' as SessionId)?.endedAt, endTime);
+      assert.equal(store.loadSession(cursorSessionIds[0]!)?.endedAt, endTime);
       assert.deepEqual(store.listCandidatesPage().entries, []);
       assert.deepEqual(store.listEvidencePage().entries, []);
       assert.deepEqual(store.listKnowledge(), []);
@@ -214,7 +218,8 @@ test('keeps non-Git workspace capture diagnostics scope-scoped and private', asy
   const rawCommand = 'git status --short';
   const promptMarker = 'workspace-prompt-marker-acceptance';
   const credentialMarker = 'classified-credential-marker-acceptance';
-  const sessionMarker = 'workspace-session-marker-acceptance';
+  const acceptedSessionMarker = 'workspace-accepted-session-marker-acceptance';
+  const rejectedSessionMarker = 'workspace-rejected-session-marker-acceptance';
   try {
     const started = await runCliAsync(
       ['capture', 'hook', '--source', 'cursor', '--data-dir', dataDir],
@@ -222,7 +227,7 @@ test('keeps non-Git workspace capture diagnostics scope-scoped and private', asy
         workingDirectory: workspace,
         now: () => startTime,
         hookInput: JSON.stringify({
-          conversation_id: 'workspace-acceptance-session',
+          conversation_id: acceptedSessionMarker,
           cwd: workspace,
           hook_event_name: 'sessionStart'
         })
@@ -236,7 +241,7 @@ test('keeps non-Git workspace capture diagnostics scope-scoped and private', asy
         workingDirectory: workspace,
         now: () => eventTime,
         hookInput: JSON.stringify({
-          conversation_id: 'workspace-acceptance-session',
+          conversation_id: acceptedSessionMarker,
           cwd: workspace,
           hook_event_name: 'preToolUse',
           tool_name: 'Shell',
@@ -254,7 +259,7 @@ test('keeps non-Git workspace capture diagnostics scope-scoped and private', asy
         workingDirectory: workspace,
         now: () => postTime,
         hookInput: JSON.stringify({
-          conversation_id: `${sessionMarker}-rejected`,
+          conversation_id: rejectedSessionMarker,
           cwd: workspace,
           hook_event_name: 'preToolUse',
           tool_name: 'Shell',
@@ -289,13 +294,23 @@ test('keeps non-Git workspace capture diagnostics scope-scoped and private', asy
       'unsupported-tool': 0
     });
 
-    const markers = [rawCommand, promptMarker, credentialMarker, sessionMarker];
+    const store = new ExperienceStore(databasePath(dataDir));
+    try {
+      const captured = store.listCapturedEventsPage().entries;
+      assert.equal(captured.length, 1);
+      assert.equal(captured[0]?.signature.path, workspace);
+    } finally {
+      store.close();
+    }
+
+    const markers = [rawCommand, promptMarker, credentialMarker, acceptedSessionMarker, rejectedSessionMarker];
     const outputs = [started.stdout, started.stderr, supported.stdout, supported.stderr, rejected.stdout, rejected.stderr, hooks.stdout, hooks.stderr, inspection.stdout, inspection.stderr];
     for (const marker of markers) {
       assert.equal(readFileSync(databasePath(dataDir)).includes(Buffer.from(marker)), false, `experience SQLite contains ${marker}`);
       assert.equal(readFileSync(join(dataDir, 'capture-diagnostics.sqlite')).includes(Buffer.from(marker)), false, `diagnostic SQLite contains ${marker}`);
       for (const output of outputs) assert.equal(output.includes(marker), false, `CLI output contains ${marker}`);
     }
+    for (const output of outputs) assert.equal(output.includes(workspace), false, 'CLI output contains the technical event path');
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(dataDir, { recursive: true, force: true });

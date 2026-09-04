@@ -2,7 +2,9 @@ import { adaptCursorPassiveHook, adaptPassiveHook } from './hook-adapters/index.
 import { MAX_HOOK_INPUT_BYTES, type PassiveHookSource } from './hook-adapters/contracts.js';
 import { type DiagnosticScope, resolveDiagnosticScope } from './diagnostic-scope.js';
 import type { CursorCaptureDiagnosticCategory } from './hook-diagnostics.js';
-import { createPassiveCaptureService } from './passive-service.js';
+import { createHash } from 'node:crypto';
+import type { SessionId } from '../domain/types.js';
+import { createPassiveCaptureService, type PassiveCaptureRecord } from './passive-service.js';
 import { CaptureDiagnosticStore } from '../storage/capture-diagnostic-store.js';
 import { ExperienceStore } from '../storage/experience-store.js';
 import { resolveRepository } from '../repository/local-repository.js';
@@ -75,11 +77,29 @@ function cursorRecord(
   scope: DiagnosticScope
 ) {
   const adaptation = adaptCursorPassiveHook(payload, options.now(), repositoryId);
-  if (adaptation.state === 'accepted') return adaptation.record;
+  if (adaptation.state === 'accepted') return anonymizeCursorSession(adaptation.record);
   if (adaptation.state === 'ignored') return undefined;
   incrementDiagnostic(options, scope, adaptation.category);
   if (adaptation.category === 'unsupported-tool') return undefined;
   throw new HookIngressDiagnosticError(adaptation.ingressCode ?? 'INVALID_INPUT');
+}
+
+function anonymizeCursorSession(record: PassiveCaptureRecord): PassiveCaptureRecord {
+  switch (record.kind) {
+    case 'session-start':
+      return Object.freeze({ kind: 'session-start', session: Object.freeze({ ...record.session, id: anonymousCursorSessionId(record.session.id) }) });
+    case 'session-end':
+      return Object.freeze({ ...record, sessionId: anonymousCursorSessionId(record.sessionId) });
+    case 'technical':
+      return Object.freeze({
+        ...record,
+        event: Object.freeze({ ...record.event, sessionId: anonymousCursorSessionId(record.event.sessionId) })
+      });
+  }
+}
+
+function anonymousCursorSessionId(sessionId: SessionId): SessionId {
+  return createHash('sha256').update('ael:cursor-passive-session:v1\0').update(sessionId).digest('hex') as SessionId;
 }
 
 function incrementDiagnostic(

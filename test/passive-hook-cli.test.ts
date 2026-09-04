@@ -24,6 +24,15 @@ function readSession(dataDir: string, id: string) {
   }
 }
 
+function storedSessionSource(dataDir: string): string | undefined {
+  const database = new DatabaseSync(join(dataDir, 'experience.sqlite'));
+  try {
+    return (database.prepare('SELECT source FROM sessions').get() as { source?: string } | undefined)?.source;
+  } finally {
+    database.close();
+  }
+}
+
 test('captures a Codex hook with empty stdout and exit zero', async () => {
   const dataDir = temporaryDataDirectory();
   try {
@@ -59,7 +68,7 @@ test('dispatches Cursor hooks and ignores nontechnical events', async () => {
       { hookInput: JSON.stringify({ conversation_id: 'session-1', hook_event_name: 'sessionStart' }), now }
     );
     assert.deepEqual(captured, { exitCode: 0, stdout: '', stderr: '' });
-    assert.equal(readSession(dataDir, 'session-1')?.source, 'cursor');
+    assert.equal(storedSessionSource(dataDir), 'cursor');
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

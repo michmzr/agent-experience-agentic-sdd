@@ -2,7 +2,6 @@ import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
-import type { SessionId } from '../domain/types.js';
 import { ExperienceStore } from '../storage/experience-store.js';
 
 export type HookReadinessSource = 'codex' | 'cursor';
@@ -61,8 +60,12 @@ function verifySource(root: string, dataDir: string, source: HookReadinessSource
   }
   const store = new ExperienceStore(join(dataDir, 'experience.sqlite'));
   try {
-    return store.loadSession(sessionId as SessionId)?.endedAt !== undefined
-      && store.listCapturedEventsPage().entries.filter((event) => event.source === source && event.sessionId === sessionId).length === 2;
+    const events = store.listCapturedEventsPage().entries.filter((event) => event.source === source);
+    const sessionId = events[0]?.sessionId;
+    return sessionId !== undefined
+      && events.length === 2
+      && events.every((event) => event.sessionId === sessionId)
+      && store.loadSession(sessionId)?.endedAt !== undefined;
   } finally { store.close(); }
 }
 
