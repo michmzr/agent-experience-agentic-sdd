@@ -45,6 +45,7 @@ export function initializeDiagnosticWorkspace(directory: string, workspaceId?: s
   const serialized = `${JSON.stringify({ version: 1, workspaceId: id }, null, 2)}\n`;
   try {
     writeFileSync(configurationPath, serialized, { encoding: 'utf8', mode: WORKSPACE_CONFIGURATION_MODE, flag: 'wx' });
+    chmodSync(configurationPath, WORKSPACE_CONFIGURATION_MODE);
   } catch (error) {
     if (!isExistingPath(error)) throw error;
     const configuration = readWorkspaceConfiguration(workspaceRoot);

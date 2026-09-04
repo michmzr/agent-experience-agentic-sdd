@@ -38,6 +38,19 @@ test('initializes a Git-trackable workspace configuration from the folder name',
   assert.equal(lstatSync(configPath).mode & 0o777, 0o644);
 });
 
+test('sets workspace configuration modes independently of a restrictive process umask', () => {
+  const workspace = temporaryDirectory('ael-diagnostic-umask-workspace-');
+  const originalUmask = process.umask(0o077);
+  try {
+    resolveDiagnosticScope(workspace);
+
+    assert.equal(lstatSync(join(workspace, '.ael')).mode & 0o777, 0o755);
+    assert.equal(lstatSync(join(workspace, '.ael', 'workspace.json')).mode & 0o777, 0o644);
+  } finally {
+    process.umask(originalUmask);
+  }
+});
+
 test('initializes an explicit workspace ID without replacing valid configuration', () => {
   const workspace = temporaryDirectory('ael-diagnostic-explicit-workspace-');
 
