@@ -75,13 +75,30 @@ test('retains a valid workspace configuration after Git initialization', () => {
 });
 
 test('rejects a malformed existing workspace configuration without replacing it', () => {
-  const workspace = temporaryDirectory('ael-diagnostic-invalid-configuration-');
-  const configDirectory = join(workspace, '.ael');
-  const configPath = join(configDirectory, 'workspace.json');
-  mkdirSync(configDirectory, { mode: 0o755 });
-  const configuration = '{"version":1,"workspaceId":"not a slug"}';
-  writeFileSync(configPath, configuration, { mode: 0o644 });
+  const configurations = [
+    '{"version":1,"workspaceId":"not a slug"}',
+    '{"version":1,"workspaceId":"valid-workspace","unexpected":true}',
+    '{"version":1,"workspaceId":"-leading-hyphen"}',
+    '{"version":1,"workspaceId":"trailing-hyphen-"}',
+    '{"version":1,"workspaceId":"repeated--hyphen"}',
+    '{"version":1,"workspaceId":"Uppercase-workspace"}',
+    `{\"version\":1,\"workspaceId\":\"${'a'.repeat(65)}\"}`
+  ];
+  for (const configuration of configurations) {
+    const workspace = temporaryDirectory('ael-diagnostic-invalid-configuration-');
+    const configDirectory = join(workspace, '.ael');
+    const configPath = join(configDirectory, 'workspace.json');
+    mkdirSync(configDirectory, { mode: 0o755 });
+    writeFileSync(configPath, configuration, { mode: 0o644 });
 
-  assert.throws(() => resolveDiagnosticScope(workspace), /workspace configuration/i);
-  assert.equal(readFileSync(configPath, 'utf8'), configuration);
+    assert.throws(() => resolveDiagnosticScope(workspace), /workspace configuration/i);
+    assert.equal(readFileSync(configPath, 'utf8'), configuration);
+  }
+});
+
+test('accepts a workspace ID at the 64-character boundary', () => {
+  const workspace = temporaryDirectory('ael-diagnostic-max-workspace-id-');
+  const workspaceId = 'a'.repeat(64);
+
+  assert.deepEqual(initializeDiagnosticWorkspace(workspace, workspaceId), { kind: 'workspace', id: workspaceId });
 });
