@@ -31,6 +31,8 @@ function workspaceDirectory(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
+const scopeOptions = { dataDirectory: workspaceDirectory('ael-diagnostic-scope-data-') };
+
 function repositoryScope(): DiagnosticScope {
   const directory = workspaceDirectory('ael-diagnostic-repository-');
   initializeGitRepository(directory);
@@ -38,7 +40,7 @@ function repositoryScope(): DiagnosticScope {
 }
 
 function workspaceScope(): DiagnosticScope {
-  return resolveDiagnosticScope(workspaceDirectory('ael-diagnostic-workspace-'));
+  return resolveDiagnosticScope(workspaceDirectory('ael-diagnostic-workspace-'), scopeOptions);
 }
 
 function cursorScope(scope: DiagnosticScope = resolveDiagnosticScope()): { readonly source: 'cursor'; readonly scope: DiagnosticScope } {
@@ -90,7 +92,7 @@ test('rejects invalid scope and category inputs before mutating counts or persis
   const store = new CaptureDiagnosticStore(path);
   const scope = cursorScope(repositoryScope());
   const workspace = workspaceDirectory('ael-diagnostic-private-workspace-');
-  const workspaceScope = cursorScope(resolveDiagnosticScope(workspace));
+  const workspaceScope = cursorScope(resolveDiagnosticScope(workspace, scopeOptions));
   const workspaceConfiguration = JSON.parse(readFileSync(join(workspace, '.ael', 'workspace.json'), 'utf8')) as { workspaceId: string };
   const initial = store.counts(scope);
 

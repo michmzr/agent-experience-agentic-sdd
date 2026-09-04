@@ -1,8 +1,10 @@
+import { createHash } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, join, normalize } from 'node:path';
 
 import type { RepositoryId } from '../domain/types.js';
 import { resolveRepository } from '../repository/local-repository.js';
+import { resolvePrivateDataDirectory } from '../storage/database.js';
 
 export type DiagnosticScope =
   | { readonly kind: 'repository'; readonly id: RepositoryId }
@@ -14,31 +16,51 @@ interface WorkspaceConfiguration {
   readonly workspaceId: string;
 }
 
+export interface DiagnosticScopeResolutionOptions {
+  readonly dataDirectory?: string;
+}
+
 const WORKSPACE_DIRECTORY_MODE = 0o755;
 const WORKSPACE_CONFIGURATION_MODE = 0o644;
+const WORKSPACE_CLAIM_DIRECTORY_MODE = 0o700;
+const WORKSPACE_CLAIM_MODE = 0o600;
+const WORKSPACE_HASH_SUFFIX_LENGTH = 8;
 const workspaceConfigurationName = 'workspace.json';
 const workspaceConfigurationDirectory = '.ael';
+const workspaceClaimDirectory = 'workspace-scope-claims';
 const WORKSPACE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const PATH_HASH = /^[a-f0-9]{64}$/;
 const MAX_WORKSPACE_ID_LENGTH = 64;
 const resolvedScopes = new WeakSet<object>();
 
-export function resolveDiagnosticScope(directory?: string): DiagnosticScope {
+export function resolveDiagnosticScope(directory?: string, options: DiagnosticScopeResolutionOptions = {}): DiagnosticScope {
   if (directory === undefined) return resolvedScope({ kind: 'global', id: 'global' });
   const workspaceRoot = normalizeRealDirectory(directory);
   const configuration = readWorkspaceConfiguration(workspaceRoot);
   if (configuration !== undefined) return workspaceScope(configuration.workspaceId);
 
   const repository = resolveRepository(workspaceRoot);
-  if (repository !== undefined) return resolvedScope({ kind: 'repository', id: repository.id as RepositoryId });
-  return initializeDiagnosticWorkspace(workspaceRoot);
+  if (repository !== undefined) {
+    const repositoryRoot = normalizeRealDirectory(repository.root);
+    const rootConfiguration = readWorkspaceConfiguration(repositoryRoot);
+    if (rootConfiguration !== undefined) return workspaceScope(rootConfiguration.workspaceId);
+    return resolvedScope({ kind: 'repository', id: repository.id as RepositoryId });
+  }
+  return initializeDiagnosticWorkspace(workspaceRoot, undefined, options);
 }
 
-export function initializeDiagnosticWorkspace(directory: string, workspaceId?: string): DiagnosticScope {
+export function initializeDiagnosticWorkspace(
+  directory: string,
+  workspaceId?: string,
+  options: DiagnosticScopeResolutionOptions = {}
+): DiagnosticScope {
   const workspaceRoot = normalizeRealDirectory(directory);
   const existing = readWorkspaceConfiguration(workspaceRoot);
   if (existing !== undefined) return workspaceScope(existing.workspaceId);
 
-  const id = workspaceId === undefined ? slugifyWorkspaceDirectory(workspaceRoot) : checkedWorkspaceId(workspaceId);
+  const id = workspaceId === undefined
+    ? claimDefaultWorkspaceId(workspaceRoot, options.dataDirectory ?? resolvePrivateDataDirectory())
+    : checkedWorkspaceId(workspaceId);
   const configurationDirectory = join(workspaceRoot, workspaceConfigurationDirectory);
   const configurationPath = join(configurationDirectory, workspaceConfigurationName);
   ensureWorkspaceConfigurationDirectory(configurationDirectory);
@@ -130,6 +152,46 @@ function slugifyWorkspaceDirectory(directory: string): string {
   const slug = basename(directory).normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
     .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, MAX_WORKSPACE_ID_LENGTH).replace(/-+$/g, '');
   return checkedWorkspaceId(slug || 'workspace');
+}
+
+function claimDefaultWorkspaceId(workspaceRoot: string, dataDirectory: string): string {
+  const readableId = slugifyWorkspaceDirectory(workspaceRoot);
+  const pathHash = createHash('sha256').update(workspaceRoot).digest('hex');
+  const claimDirectory = join(dataDirectory, workspaceClaimDirectory);
+  ensureWorkspaceClaimDirectory(claimDirectory);
+  if (claimWorkspaceId(claimDirectory, readableId, pathHash)) return readableId;
+
+  const suffix = pathHash.slice(0, WORKSPACE_HASH_SUFFIX_LENGTH);
+  const readableLimit = MAX_WORKSPACE_ID_LENGTH - WORKSPACE_HASH_SUFFIX_LENGTH - 1;
+  const prefix = readableId.slice(0, readableLimit).replace(/-+$/g, '') || 'workspace';
+  const disambiguatedId = `${prefix}-${suffix}`;
+  if (claimWorkspaceId(claimDirectory, disambiguatedId, pathHash)) return disambiguatedId;
+  throw new TypeError('Diagnostic workspace ID collision cannot be resolved.');
+}
+
+function ensureWorkspaceClaimDirectory(directory: string): void {
+  mkdirSync(directory, { recursive: true, mode: WORKSPACE_CLAIM_DIRECTORY_MODE });
+  const metadata = lstatSync(directory);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new TypeError('Diagnostic workspace claim registry is invalid.');
+  chmodSync(directory, WORKSPACE_CLAIM_DIRECTORY_MODE);
+}
+
+function claimWorkspaceId(directory: string, workspaceId: string, pathHash: string): boolean {
+  const claimPath = join(directory, workspaceId);
+  try {
+    writeFileSync(claimPath, `${pathHash}\n`, { encoding: 'utf8', mode: WORKSPACE_CLAIM_MODE, flag: 'wx' });
+    chmodSync(claimPath, WORKSPACE_CLAIM_MODE);
+    return true;
+  } catch (error) {
+    if (!isExistingPath(error)) throw error;
+  }
+
+  const metadata = lstatSync(claimPath);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) throw new TypeError('Diagnostic workspace claim registry is invalid.');
+  const claimedHash = readFileSync(claimPath, 'utf8').trim();
+  if (!PATH_HASH.test(claimedHash)) throw new TypeError('Diagnostic workspace claim registry is invalid.');
+  chmodSync(claimPath, WORKSPACE_CLAIM_MODE);
+  return claimedHash === pathHash;
 }
 
 function workspaceScope(id: string): DiagnosticScope {

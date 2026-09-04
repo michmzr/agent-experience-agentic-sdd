@@ -39,12 +39,14 @@ export interface CursorCaptureDiagnosticsReport {
 }
 
 export class ExperienceService {
+  private readonly dataDirectory: string;
   private readonly databasePath: string;
   private readonly runtime: RuntimeService;
 
   constructor(options: ExperienceServiceOptions = {}) {
     this.databasePath = options.dataDir ? join(options.dataDir, 'experience.sqlite') : defaultDatabasePath();
-    this.runtime = new RuntimeService({ dataDir: options.dataDir ?? dirname(this.databasePath) });
+    this.dataDirectory = options.dataDir ?? dirname(this.databasePath);
+    this.runtime = new RuntimeService({ dataDir: this.dataDirectory });
   }
 
   init(): { databasePath: string } {
@@ -54,7 +56,7 @@ export class ExperienceService {
   }
   initWorkspace(directory: string, workspaceId?: string): DiagnosticScope {
     try {
-      return initializeDiagnosticWorkspace(directory, workspaceId);
+      return initializeDiagnosticWorkspace(directory, workspaceId, { dataDirectory: this.dataDirectory });
     } catch {
       throw new DomainError('WORKSPACE_INITIALIZATION_FAILED', 'Workspace initialization failed.');
     }
@@ -181,7 +183,7 @@ export class ExperienceService {
   cursorCaptureDiagnostics(directory: string = process.cwd()): CursorCaptureDiagnosticsReport {
     let store: CaptureDiagnosticStore | undefined;
     try {
-      const scope = resolveDiagnosticScope(directory);
+      const scope = resolveDiagnosticScope(directory, { dataDirectory: this.dataDirectory });
       store = new CaptureDiagnosticStore(join(dirname(this.databasePath), 'capture-diagnostics.sqlite'));
       return Object.freeze({ version: 1, source: 'cursor', scope, counts: store.counts({ source: 'cursor', scope }) });
     } catch {

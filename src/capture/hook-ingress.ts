@@ -26,6 +26,7 @@ export type HookIngressResult =
   | { readonly status: 'degraded'; readonly code: 'INVALID_INPUT' | 'PRIVATE_INPUT' | 'PERSISTENCE_FAILED' };
 
 export function ingestPassiveHook(options: HookIngressOptions): HookIngressResult {
+  let scope: DiagnosticScope | undefined;
   let store: ExperienceStore | undefined;
   try {
     if (!isPassiveHookSource(options.source)) return degraded('INVALID_INPUT');
@@ -41,7 +42,9 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
     }
 
     const workingDirectory = options.workingDirectory ?? process.cwd();
-    const scope = options.source === 'cursor' ? resolveDiagnosticScope(workingDirectory) : undefined;
+    scope = options.source === 'cursor'
+      ? resolveDiagnosticScope(workingDirectory, { dataDirectory: dirname(options.databasePath) })
+      : undefined;
     const repository = resolveRepository(workingDirectory);
     const record = options.source === 'cursor'
       ? cursorRecord(options, payload, repository?.id as never, scope!)
@@ -60,7 +63,9 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
     }
     return result;
   } catch (error) {
-    return degraded(inputErrorCode(error));
+    const code = inputErrorCode(error);
+    if (code === 'PERSISTENCE_FAILED' && scope !== undefined) incrementDiagnostic(options, scope, 'persistence-failure');
+    return degraded(code);
   } finally {
     try {
       store?.close();
