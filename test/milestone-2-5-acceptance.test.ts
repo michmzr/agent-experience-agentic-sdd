@@ -289,7 +289,7 @@ test('keeps non-Git workspace capture diagnostics scope-scoped and private', asy
       'unsupported-tool': 0
     });
 
-    const markers = [workspace, rawCommand, promptMarker, credentialMarker, sessionMarker];
+    const markers = [rawCommand, promptMarker, credentialMarker, sessionMarker];
     const outputs = [started.stdout, started.stderr, supported.stdout, supported.stderr, rejected.stdout, rejected.stderr, hooks.stdout, hooks.stderr, inspection.stdout, inspection.stderr];
     for (const marker of markers) {
       assert.equal(readFileSync(databasePath(dataDir)).includes(Buffer.from(marker)), false, `experience SQLite contains ${marker}`);

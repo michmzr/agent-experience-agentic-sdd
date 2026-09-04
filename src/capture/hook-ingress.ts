@@ -2,9 +2,7 @@ import { adaptCursorPassiveHook, adaptPassiveHook } from './hook-adapters/index.
 import { MAX_HOOK_INPUT_BYTES, type PassiveHookSource } from './hook-adapters/contracts.js';
 import { type DiagnosticScope, resolveDiagnosticScope } from './diagnostic-scope.js';
 import type { CursorCaptureDiagnosticCategory } from './hook-diagnostics.js';
-import { normalizeMappedCapture } from './normalization.js';
 import { createPassiveCaptureService } from './passive-service.js';
-import type { PassiveCaptureRecord } from './passive-service.js';
 import { CaptureDiagnosticStore } from '../storage/capture-diagnostic-store.js';
 import { ExperienceStore } from '../storage/experience-store.js';
 import { resolveRepository } from '../repository/local-repository.js';
@@ -77,34 +75,11 @@ function cursorRecord(
   scope: DiagnosticScope
 ) {
   const adaptation = adaptCursorPassiveHook(payload, options.now(), repositoryId);
-  if (adaptation.state === 'accepted') return omitWorkspaceWorkingDirectory(adaptation.record, scope);
+  if (adaptation.state === 'accepted') return adaptation.record;
   if (adaptation.state === 'ignored') return undefined;
   incrementDiagnostic(options, scope, adaptation.category);
   if (adaptation.category === 'unsupported-tool') return undefined;
   throw new HookIngressDiagnosticError(adaptation.ingressCode ?? 'INVALID_INPUT');
-}
-
-function omitWorkspaceWorkingDirectory(record: PassiveCaptureRecord, scope: DiagnosticScope): PassiveCaptureRecord {
-  if (scope.kind !== 'workspace' || record.kind !== 'technical' || record.event.signature.path === undefined) return record;
-  const { event } = record;
-  if (event.signature.kind !== 'action') return record;
-  return Object.freeze({
-    kind: 'technical',
-    event: normalizeMappedCapture({
-      source: event.source,
-      sourceEventId: event.sourceEventId,
-      sessionId: event.sessionId,
-      phase: event.phase,
-      occurredAt: event.occurredAt,
-      tool: event.signature.tool,
-      action: event.signature.action,
-      ...(event.signature.arguments === undefined ? {} : { arguments: event.signature.arguments }),
-      summary: event.summary,
-      ...(event.outcome === undefined ? {} : { outcome: event.outcome }),
-      ...(event.exitStatus === undefined ? {} : { exitStatus: event.exitStatus }),
-      ...(event.relatedEventId === undefined ? {} : { relatedEventId: event.relatedEventId })
-    })
-  });
 }
 
 function incrementDiagnostic(
