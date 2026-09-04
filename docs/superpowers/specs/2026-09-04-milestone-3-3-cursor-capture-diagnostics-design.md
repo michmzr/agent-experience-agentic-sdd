@@ -61,7 +61,7 @@ The store contains one aggregate row per source, scope and category:
 source | scope_kind | scope_id | category | count
 ```
 
-`source` is fixed to `cursor` in this increment. `scope_kind` is `repository`, `workspace` or `global`. A repository scope uses the existing canonical repository identifier. A workspace scope is created from a UUID stored in an owner-only `.ael/workspace-id` file at the selected non-Git workspace root; the SQLite `scope_id` is the SHA-256 hash of that UUID, never the UUID or a path. The marker remains stable when its directory is moved or copied. Global is a fixed sentinel used only when no directory scope is available. Direct store callers cannot submit arbitrary scope identifiers. `category` is constrained to the four declared values. `count` is a positive safe integer incremented atomically.
+`source` is fixed to `cursor` in this increment. `scope_kind` is `repository`, `workspace` or `global`. A repository scope uses the existing canonical repository identifier. A workspace scope uses the readable slug in `.ael/workspace.json`. `ael init` derives the initial slug from the folder name, accepts an explicit `--workspace-id`, and interactively offers an override. A collision with an existing local scope may use a short path hash suffix. The workspace slug is deliberately persisted and returned by diagnostics, so it may disclose a folder-name fragment; it must not include a full path or hook data. The configuration remains stable when its directory is moved or copied. Global is a fixed sentinel used only when no directory scope is available. Direct store callers cannot submit arbitrary scope identifiers. `category` is constrained to the four declared values. `count` is a positive safe integer incremented atomically.
 
 The schema contains no timestamps, event identifiers or free-form text. The database file uses the same owner-only permission policy as the primary store. Invalid schema state fails closed for diagnostic reads and fails open for hook execution.
 
@@ -69,9 +69,9 @@ Diagnostic persistence is best effort. If the diagnostic database itself cannot 
 
 ## Hook data flow
 
-For a Cursor delivery, ingress resolves the scope before adaptation. It uses a verified Git top level when present, otherwise the normalized real current working directory as a workspace scope. The resolver creates `.ael/` with mode 0700 and `workspace-id` with mode 0600 on first non-Git use, generates its UUID with `randomUUID`, and rejects malformed existing markers without writing a replacement. The adapter classifies the hook and returns its typed result.
+For a Cursor delivery, ingress resolves the scope before adaptation. It uses a verified Git top level unless `.ael/workspace.json` already exists, in which case that stable workspace scope is retained after Git initialization. Otherwise it uses the normalized real current working directory as a workspace scope. `ael init` creates `.ael/` with mode 0755 and `workspace.json` with mode 0644 on first use. The resolver validates the version and slug format and rejects malformed existing configuration without writing a replacement. The adapter classifies the hook and returns its typed result.
 
-The resolver does not add `.ael/` or `workspace-id` to `.gitignore`. The marker remains available for Git tracking when a workspace later becomes a repository; its UUID is still excluded from SQLite and diagnostics output.
+The resolver does not add `.ael/` or `workspace.json` to `.gitignore`. The configuration remains available for Git tracking when a workspace later becomes a repository. Its readable workspace slug is intentionally emitted by diagnostics.
 
 An accepted record follows the existing passive-capture path. If primary persistence fails, ingress attempts one `persistence-failure` increment in the separate diagnostic store and returns the existing generic fail-open result.
 
@@ -89,7 +89,7 @@ The focused command exits nonzero for invalid command syntax or unreadable diagn
 
 ## Privacy and security
 
-The diagnostic write API accepts only a fixed source, a resolver-created repository, workspace or global scope, and a fixed category. It has no parameter for raw hook input, paths, descriptive text or caller-provided scope IDs.
+The diagnostic write API accepts only a fixed source, a resolver-created repository, workspace or global scope, and a fixed category. It has no parameter for raw hook input, full paths or caller-provided scope IDs.
 
 Tests will scan the diagnostic database bytes and both CLI outputs for commands, working directories, prompts, credentials, session identifiers and supplied marker values. Category names and integer counts are the only hook-derived diagnostic information that may leave the ingress boundary.
 
@@ -105,13 +105,13 @@ Counter overflow, invalid category values, corrupt schema and malformed stored c
 
 Unit tests will cover each typed classification boundary, including unsupported Cursor tools, empty and malformed working directories, shell metacharacters, excessive arguments and credential-like input.
 
-Storage and resolver tests will prove atomic increments, repository and workspace isolation, workspace identity stability after a directory move, marker modes, malformed-marker rejection, global fallback scope, deterministic ordering, owner-only permissions, safe reopen behavior, overflow rejection and corrupt-schema rejection. They will prove direct caller-provided paths and arbitrary IDs cannot reach database bytes.
+Storage and resolver tests will prove atomic increments, repository and workspace isolation, workspace identity stability after a directory move, configuration modes, malformed-configuration rejection, global fallback scope, deterministic ordering, safe reopen behavior, overflow rejection and corrupt-schema rejection. They will prove full paths, hook values and arbitrary caller-provided IDs cannot reach database bytes, while the configured workspace slug is intentionally retained.
 
 Ingress tests will prove supported actions still persist, unsupported tools increment once and remain ignored, invalid working directories and unsafe commands increment once and remain fail-open, primary persistence failures attempt the separate counter, and diagnostic-store failure cannot affect hook behavior.
 
 CLI tests will prove identical category counts in `hooks diagnostics` and `experience inspect`, stable text and JSON output, zero-count behavior, automatic repository and workspace selection, explicit directory selection, symlink normalization and generic reporting failures.
 
-Privacy tests will scan SQLite files, JSON, stdout and stderr for representative commands, paths, prompts, credentials, session identifiers and arbitrary marker values.
+Privacy tests will scan SQLite files, JSON, stdout and stderr for representative commands, full paths, prompts, credentials, session identifiers and arbitrary hook marker values. The configured workspace slug is an explicit exception.
 
 The full regression suite must pass with zero failures and zero skipped tests. The existing Milestone 2.5 passive-capture acceptance contract remains unchanged.
 

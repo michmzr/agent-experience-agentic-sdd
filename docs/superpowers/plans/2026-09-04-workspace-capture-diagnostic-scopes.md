@@ -12,7 +12,7 @@
 
 ## Global constraints
 
-- A workspace ID is a SHA-256 hash of the UUID in owner-only `.ael/workspace-id`; paths and UUIDs are never stored in SQLite or emitted.
+- A workspace ID is the readable slug in Git-trackable `.ael/workspace.json`; it may disclose a folder-name fragment but never a full path or hook value.
 - A Git scope uses the existing canonical repository ID and its verified top-level root.
 - Scope kinds are exactly `repository`, `workspace`, and `global`.
 - The aggregate store rejects raw paths and arbitrary caller-provided IDs.
@@ -32,12 +32,12 @@
 **Interfaces:**
 
 - Produces `DiagnosticScope = { readonly kind: 'repository'; readonly id: RepositoryId } | { readonly kind: 'workspace'; readonly id: string } | { readonly kind: 'global'; readonly id: 'global' }`.
-- Produces `resolveDiagnosticScope(directory?: string): DiagnosticScope`, which resolves Git top levels first and otherwise creates or reads an owner-only `.ael/workspace-id` UUID and hashes it.
+- Produces `resolveDiagnosticScope(directory?: string): DiagnosticScope`, which retains `.ael/workspace.json` after Git initialization and otherwise resolves Git top levels or a workspace configuration.
 - Changes `CaptureDiagnosticStore.increment(scope: { readonly source: 'cursor'; readonly scope: DiagnosticScope }, category)` and `counts` to the same scope shape.
 
 - [ ] **Step 1: Write failing scope and store tests**
 
-Add tests proving a Git directory returns the existing canonical repository ID, a non-Git directory creates a mode-0600 UUID marker and returns its 64-character lowercase hexadecimal hash, and a moved workspace retains the same scope. Assert a symlink returns its target scope and a malformed marker rejects without replacement. Add store tests proving repository and workspace hashes isolate rows, a raw path and `sk-test-credential` cannot be supplied as a scope ID, and database bytes contain neither representative paths nor marker UUIDs.
+Add tests proving `ael init` creates mode-0755 `.ael/workspace.json` with a folder-name slug, an explicit workspace ID overrides it, a moved workspace retains its scope, and an existing workspace configuration remains authoritative after Git initialization. Assert a malformed configuration rejects without replacement. Add store tests proving repository and workspace slugs isolate rows, a raw path and `sk-test-credential` cannot be supplied as a scope ID, and database bytes contain neither full paths nor hook markers while retaining the configured slug.
 
 - [ ] **Step 2: Verify RED**
 
@@ -49,7 +49,7 @@ Expected: scope resolver imports or scope-shaped store calls fail because worksp
 
 - [ ] **Step 3: Implement closed scope resolution and persistence**
 
-Create a resolver that calls the existing Git-root resolver, uses its canonical ID for Git, and otherwise calls `realpath`, creates `.ael` mode 0700, atomically creates or reads `workspace-id` mode 0600 containing a `randomUUID`, validates the marker format, then computes `createHash('sha256').update(uuid).digest('hex')`. The store schema has `scope_kind` constrained to `repository`, `workspace`, `global`; `scope_id` constrained to `global` for global and 64 lowercase hexadecimal characters for repository or workspace. Do not expose a public constructor that accepts a string scope ID.
+Create `ael init [--workspace-id <slug>]` and a resolver that first reads a valid `.ael/workspace.json`, otherwise resolves a Git top level, otherwise initializes the selected non-Git workspace with a slugified folder name. Create `.ael` mode 0755 and `workspace.json` mode 0644. The store schema has `scope_kind` constrained to `repository`, `workspace`, `global`; `scope_id` constrained to `global`, canonical repository IDs, or validated lowercase workspace slugs. Do not expose a public constructor that accepts a string scope ID.
 
 - [ ] **Step 4: Verify GREEN**
 
