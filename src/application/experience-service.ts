@@ -7,6 +7,8 @@ import { resolveRepositoryRoot } from '../repository/local-repository.js';
 
 import { ingestPassiveHook, type HookIngressResult } from '../capture/hook-ingress.js';
 import type { PassiveHookSource } from '../capture/hook-adapters/contracts.js';
+import { initializeDiagnosticWorkspace, resolveDiagnosticScope, type DiagnosticScope } from '../capture/diagnostic-scope.js';
+import { CaptureDiagnosticStore, type CursorDiagnosticCounts } from '../storage/capture-diagnostic-store.js';
 import type { ExperienceImport, KnowledgeEntry, KnowledgeState } from '../domain/types.js';
 import { validateImport } from '../domain/validation.js';
 import { defaultDatabasePath } from '../storage/database.js';
@@ -29,6 +31,13 @@ export interface ExperienceServiceOptions {
   readonly dataDir?: string;
 }
 
+export interface CursorCaptureDiagnosticsReport {
+  readonly version: 1;
+  readonly source: 'cursor';
+  readonly scope: DiagnosticScope;
+  readonly counts: CursorDiagnosticCounts;
+}
+
 export class ExperienceService {
   private readonly databasePath: string;
   private readonly runtime: RuntimeService;
@@ -42,6 +51,13 @@ export class ExperienceService {
     const store = this.openStore();
     store.close();
     return { databasePath: this.databasePath };
+  }
+  initWorkspace(directory: string, workspaceId?: string): DiagnosticScope {
+    try {
+      return initializeDiagnosticWorkspace(directory, workspaceId);
+    } catch {
+      throw new DomainError('WORKSPACE_INITIALIZATION_FAILED', 'Workspace initialization failed.');
+    }
   }
   initRepository(input: { id: string; root: string; sources: readonly ('codex' | 'cursor')[]; observedAt: string }): { databasePath: string } {
     const store = this.openStore(); try { store.registerRepository({ id: input.id, root: input.root, selectedSources: input.sources, observedAt: input.observedAt }); return { databasePath: this.databasePath }; } finally { store.close(); }
@@ -158,8 +174,25 @@ export class ExperienceService {
     return this.runtime.promoteKnowledge(repository, inputPath);
   }
 
-  captureHook(source: PassiveHookSource, input: string, now: () => string = () => new Date().toISOString()): HookIngressResult {
-    return ingestPassiveHook({ source, input, databasePath: this.databasePath, now });
+  captureHook(source: PassiveHookSource, input: string, now: () => string = () => new Date().toISOString(), workingDirectory?: string): HookIngressResult {
+    return ingestPassiveHook({ source, input, databasePath: this.databasePath, now, workingDirectory });
+  }
+
+  cursorCaptureDiagnostics(directory: string = process.cwd()): CursorCaptureDiagnosticsReport {
+    let store: CaptureDiagnosticStore | undefined;
+    try {
+      const scope = resolveDiagnosticScope(directory);
+      store = new CaptureDiagnosticStore(join(dirname(this.databasePath), 'capture-diagnostics.sqlite'));
+      return Object.freeze({ version: 1, source: 'cursor', scope, counts: store.counts({ source: 'cursor', scope }) });
+    } catch {
+      throw new DomainError('DIAGNOSTICS_UNAVAILABLE', 'Capture diagnostics are unavailable.');
+    } finally {
+      try {
+        store?.close();
+      } catch {
+        // Reporting only exposes a bounded failure from the surrounding operation.
+      }
+    }
   }
 
   private openStore(): ExperienceStore {

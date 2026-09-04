@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -61,6 +61,24 @@ test('dispatches Cursor hooks and ignores nontechnical events', async () => {
     assert.deepEqual(captured, { exitCode: 0, stdout: '', stderr: '' });
     assert.equal(readSession(dataDir, 'session-1')?.source, 'cursor');
   } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('keeps Cursor hooks fail-open when workspace scope resolution fails', async () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'ael-hook-invalid-workspace-'));
+  const dataDir = temporaryDataDirectory();
+  try {
+    mkdirSync(join(workspace, '.ael'));
+    writeFileSync(join(workspace, '.ael', 'workspace.json'), '{broken');
+    const result = await runCliAsync(
+      ['capture', 'hook', '--source', 'cursor', '--data-dir', dataDir],
+      { workingDirectory: workspace, hookInput: JSON.stringify({ conversation_id: 'session-1', hook_event_name: 'sessionStart' }), now }
+    );
+    assert.deepEqual(result, { exitCode: 0, stdout: '', stderr: 'AEL_CAPTURE_INVALID_INPUT: Passive capture skipped.\n' });
+    assert.equal(result.stderr.includes(workspace), false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
     rmSync(dataDir, { recursive: true, force: true });
   }
 });

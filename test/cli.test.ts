@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, renameSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -41,14 +41,40 @@ test('returns a nonzero status when repository hooks are unavailable', () => {
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 
-test('requires explicit hook selection without a terminal and installs an interactive multi-selection', async () => {
+test('initializes an idempotent workspace configuration without replacing a valid ID', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'ael-workspace-init-'));
+  try {
+    const first = runCli(['init', '--workspace-id', 'explicit-workspace', '--json'], { workingDirectory: workspace });
+    assert.equal(first.exitCode, 0, first.stderr);
+    assert.deepEqual(JSON.parse(first.stdout), { kind: 'workspace', id: 'explicit-workspace' });
+
+    const repeated = runCli(['init', '--workspace-id', 'replacement-workspace', '--json'], { workingDirectory: workspace });
+    assert.equal(repeated.exitCode, 0, repeated.stderr);
+    assert.deepEqual(JSON.parse(repeated.stdout), { kind: 'workspace', id: 'explicit-workspace' });
+    assert.deepEqual(JSON.parse(readFileSync(join(workspace, '.ael', 'workspace.json'), 'utf8')), { version: 1, workspaceId: 'explicit-workspace' });
+  } finally { rmSync(workspace, { recursive: true, force: true }); }
+});
+
+test('returns a bounded error for malformed workspace configuration', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'ael-workspace-invalid-'));
+  try {
+    mkdirSync(join(workspace, '.ael'));
+    writeFileSync(join(workspace, '.ael', 'workspace.json'), '{bad json');
+    const result = runCli(['init', '--json'], { workingDirectory: workspace });
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(JSON.parse(result.stdout), { error: { code: 'WORKSPACE_INITIALIZATION_FAILED', message: 'Workspace initialization failed.' } });
+    assert.equal(result.stdout.includes(workspace), false);
+  } finally { rmSync(workspace, { recursive: true, force: true }); }
+});
+
+test('initializes a repository when its hook scope is explicit', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ael-init-'));
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-init-data-'));
   const terminal = { write() {}, async readLine() { return '2'; } };
   try {
     initializeGitRepository(root);
-    assert.equal(runCli(['init', '--data-dir', dataDir, '--json']).exitCode, 2);
-    const result = await runCliAsync(['init', '--data-dir', dataDir, '--json'], { terminal, workingDirectory: root, cliEntrypoint: join(process.cwd(), 'dist', 'src', 'cli.js') });
+    assert.equal(runCli(['init', '--data-dir', dataDir, '--json']).exitCode, 0);
+    const result = await runCliAsync(['init', '--scope', 'repo', '--hooks', 'codex,cursor', '--data-dir', dataDir, '--json'], { terminal, workingDirectory: root, cliEntrypoint: join(process.cwd(), 'dist', 'src', 'cli.js') });
     assert.equal(result.exitCode, 0, result.stderr);
     assert.equal(runCli(['init', '--scope', 'repo', '--hooks', 'codex', '--data-dir', dataDir, '--json'], { workingDirectory: root, cliEntrypoint: join(process.cwd(), 'dist', 'src', 'cli.js') }).exitCode, 0);
     const global = runCli(['status-global', '--data-dir', dataDir, '--json']);
