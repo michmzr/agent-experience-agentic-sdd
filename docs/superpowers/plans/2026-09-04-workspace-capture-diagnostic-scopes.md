@@ -49,7 +49,7 @@ Expected: scope resolver imports or scope-shaped store calls fail because worksp
 
 - [ ] **Step 3: Implement closed scope resolution and persistence**
 
-Create `ael init [--workspace-id <slug>]` and a resolver that first reads a valid `.ael/workspace.json`, otherwise resolves a Git top level, otherwise initializes the selected non-Git workspace with a slugified folder name. Create `.ael` mode 0755 and `workspace.json` mode 0644. The store schema has `scope_kind` constrained to `repository`, `workspace`, `global`; `scope_id` constrained to `global`, canonical repository IDs, or validated lowercase workspace slugs. Do not expose a public constructor that accepts a string scope ID.
+Create idempotent `ael init [--workspace-id <slug>]`: when valid `.ael/workspace.json` exists, print its configured workspace ID and exit successfully without modification; otherwise initialize the selected non-Git workspace with a slugified folder name or explicit slug. The resolver first reads a valid workspace configuration, otherwise resolves a Git top level. Create `.ael` mode 0755 and `workspace.json` mode 0644. The store schema has `scope_kind` constrained to `repository`, `workspace`, `global`; `scope_id` constrained to `global`, canonical repository IDs, or validated lowercase workspace slugs. Do not expose a public constructor that accepts a string scope ID.
 
 - [ ] **Step 4: Verify GREEN**
 
