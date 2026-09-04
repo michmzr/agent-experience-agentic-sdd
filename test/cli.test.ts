@@ -73,7 +73,7 @@ test('initializes a repository when its hook scope is explicit', async () => {
   const terminal = { write() {}, async readLine() { return '2'; } };
   try {
     initializeGitRepository(root);
-    assert.equal(runCli(['init', '--data-dir', dataDir, '--json']).exitCode, 0);
+    assert.equal(runCli(['init', '--data-dir', dataDir, '--json'], { workingDirectory: root }).exitCode, 0);
     const result = await runCliAsync(['init', '--scope', 'repo', '--hooks', 'codex,cursor', '--data-dir', dataDir, '--json'], { terminal, workingDirectory: root, cliEntrypoint: join(process.cwd(), 'dist', 'src', 'cli.js') });
     assert.equal(result.exitCode, 0, result.stderr);
     assert.equal(runCli(['init', '--scope', 'repo', '--hooks', 'codex', '--data-dir', dataDir, '--json'], { workingDirectory: root, cliEntrypoint: join(process.cwd(), 'dist', 'src', 'cli.js') }).exitCode, 0);
