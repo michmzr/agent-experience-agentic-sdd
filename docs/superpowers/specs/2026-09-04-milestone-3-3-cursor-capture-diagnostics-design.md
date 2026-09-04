@@ -61,7 +61,7 @@ The store contains one aggregate row per source, scope and category:
 source | scope_kind | scope_id | category | count
 ```
 
-`source` is fixed to `cursor` in this increment. `scope_kind` is `repository`, `workspace` or `global`. A repository scope uses the existing canonical repository identifier. A workspace scope uses a SHA-256 identifier derived inside the resolver from the normalized real path of an automatically selected non-Git directory; the path is never persisted. Global is a fixed sentinel used only when no directory scope is available. Direct store callers cannot submit arbitrary scope identifiers. `category` is constrained to the four declared values. `count` is a positive safe integer incremented atomically.
+`source` is fixed to `cursor` in this increment. `scope_kind` is `repository`, `workspace` or `global`. A repository scope uses the existing canonical repository identifier. A workspace scope is created from a UUID stored in an owner-only `.ael/workspace-id` file at the selected non-Git workspace root; the SQLite `scope_id` is the SHA-256 hash of that UUID, never the UUID or a path. The marker remains stable when its directory is moved or copied. Global is a fixed sentinel used only when no directory scope is available. Direct store callers cannot submit arbitrary scope identifiers. `category` is constrained to the four declared values. `count` is a positive safe integer incremented atomically.
 
 The schema contains no timestamps, event identifiers or free-form text. The database file uses the same owner-only permission policy as the primary store. Invalid schema state fails closed for diagnostic reads and fails open for hook execution.
 
@@ -69,7 +69,7 @@ Diagnostic persistence is best effort. If the diagnostic database itself cannot 
 
 ## Hook data flow
 
-For a Cursor delivery, ingress resolves the scope before adaptation. It uses a verified Git top level when present, otherwise the normalized real current working directory as a workspace scope. The adapter classifies the hook and returns its typed result.
+For a Cursor delivery, ingress resolves the scope before adaptation. It uses a verified Git top level when present, otherwise the normalized real current working directory as a workspace scope. The resolver creates `.ael/` with mode 0700 and `workspace-id` with mode 0600 on first non-Git use, generates its UUID with `randomUUID`, and rejects malformed existing markers without writing a replacement. The adapter classifies the hook and returns its typed result.
 
 An accepted record follows the existing passive-capture path. If primary persistence fails, ingress attempts one `persistence-failure` increment in the separate diagnostic store and returns the existing generic fail-open result.
 
@@ -79,7 +79,7 @@ Diagnostic-store failure never changes the adapter result, primary capture resul
 
 ## Reporting
 
-`ael hooks diagnostics` reads aggregate counts for the scope resolved automatically from the current working directory. An explicit repository option may select another directory. Git directories resolve to their verified top level; non-Git directories resolve to their normalized real path as a workspace scope. Text output lists fixed categories in lexical order with integer counts, including zero counts. JSON output uses a versioned closed object containing source, scope kind, scope ID and category counts.
+`ael hooks diagnostics` reads aggregate counts for the scope resolved automatically from the current working directory. An explicit repository option may select another directory. Git directories resolve to their verified top level; non-Git directories resolve to their normalized real path and stable workspace marker as a workspace scope. Text output lists fixed categories in lexical order with integer counts, including zero counts. JSON output uses a versioned closed object containing source, scope kind, scope ID and category counts.
 
 `ael experience inspect` adds the same diagnostic object to its repository inspection result. It does not implement independent aggregation or formatting logic. Both commands call one application-service query and therefore return identical counts for the same repository and data directory.
 
@@ -91,7 +91,7 @@ The diagnostic write API accepts only a fixed source, a resolver-created reposit
 
 Tests will scan the diagnostic database bytes and both CLI outputs for commands, working directories, prompts, credentials, session identifiers and supplied marker values. Category names and integer counts are the only hook-derived diagnostic information that may leave the ingress boundary.
 
-Scope selection resolves symlinks before classification. Git selection uses the existing verified top-level resolver. A supplied directory without Git is a separate workspace scope derived from its normalized real path; it cannot read another directory's counts. Nested Git paths resolve to the Git top level.
+Scope selection resolves symlinks before classification. Git selection uses the existing verified top-level resolver. A supplied directory without Git is a separate workspace scope rooted at its normalized real path and its stable local marker; it cannot read another directory's counts. Nested Git paths resolve to the Git top level.
 
 ## Error handling
 
@@ -103,7 +103,7 @@ Counter overflow, invalid category values, corrupt schema and malformed stored c
 
 Unit tests will cover each typed classification boundary, including unsupported Cursor tools, empty and malformed working directories, shell metacharacters, excessive arguments and credential-like input.
 
-Storage tests will prove atomic increments, repository and workspace isolation, global fallback scope, deterministic ordering, owner-only permissions, safe reopen behavior, overflow rejection and corrupt-schema rejection. They will prove direct caller-provided paths and arbitrary IDs cannot reach database bytes.
+Storage and resolver tests will prove atomic increments, repository and workspace isolation, workspace identity stability after a directory move, marker modes, malformed-marker rejection, global fallback scope, deterministic ordering, owner-only permissions, safe reopen behavior, overflow rejection and corrupt-schema rejection. They will prove direct caller-provided paths and arbitrary IDs cannot reach database bytes.
 
 Ingress tests will prove supported actions still persist, unsupported tools increment once and remain ignored, invalid working directories and unsafe commands increment once and remain fail-open, primary persistence failures attempt the separate counter, and diagnostic-store failure cannot affect hook behavior.
 
