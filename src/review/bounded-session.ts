@@ -26,8 +26,6 @@ export function createBoundedSessionAccumulator(limits: { readonly maxEvents?: n
   let nextOrdinal = 0;
   let startedAt: string | undefined;
   let endedAt: string | undefined;
-  let startedAtMillis = Number.POSITIVE_INFINITY;
-  let endedAtMillis = Number.NEGATIVE_INFINITY;
   let textBytes = 0;
 
   return {
@@ -40,9 +38,21 @@ export function createBoundedSessionAccumulator(limits: { readonly maxEvents?: n
       while (usedOrdinals.has(nextOrdinal)) nextOrdinal += 1;
       if (!Number.isSafeInteger(nextOrdinal)) throw new Error('Session record ordinal is invalid.');
       const sourceOrdinal = record.sourceOrdinal ?? nextOrdinal;
+      const evicted = maxEvents > 0 && records.length >= maxEvents ? records[0] : undefined;
+      if (usedOrdinals.has(sourceOrdinal) && evicted?.sourceOrdinal !== sourceOrdinal) {
+        throw new Error('Session record ordinal is duplicated.');
+      }
+      if (evicted !== undefined) {
+        const removed = records.shift()!;
+        usedOrdinals.delete(removed.sourceOrdinal!);
+        if (typeof removed.text === 'string') textBytes -= Buffer.byteLength(removed.text, 'utf8');
+      }
       if (usedOrdinals.has(sourceOrdinal)) throw new Error('Session record ordinal is duplicated.');
-      usedOrdinals.add(sourceOrdinal);
       nextOrdinal = Math.max(nextOrdinal, sourceOrdinal + 1);
+      if (startedAt === undefined) startedAt = record.occurredAt;
+      endedAt = record.occurredAt;
+      if (maxEvents === 0) return;
+      usedOrdinals.add(sourceOrdinal);
       const text = record.text;
       const retainedText = typeof text === 'string' && Buffer.byteLength(text, 'utf8') <= maxTextBytes ? text : undefined;
       const retainedRecord: LocalSessionRecord = {
@@ -53,18 +63,6 @@ export function createBoundedSessionAccumulator(limits: { readonly maxEvents?: n
       if (retainedText === undefined) delete (retainedRecord as { text?: string }).text;
       records.push(retainedRecord);
       textBytes += retainedText === undefined ? 0 : Buffer.byteLength(retainedText, 'utf8');
-      if (occurredAtMillis < startedAtMillis) {
-        startedAtMillis = occurredAtMillis;
-        startedAt = record.occurredAt;
-      }
-      if (occurredAtMillis > endedAtMillis) {
-        endedAtMillis = occurredAtMillis;
-        endedAt = record.occurredAt;
-      }
-      while (records.length > maxEvents) {
-        const removed = records.shift()!;
-        if (typeof removed.text === 'string') textBytes -= Buffer.byteLength(removed.text, 'utf8');
-      }
       for (const retained of records) {
         if (textBytes <= maxTextBytes) break;
         if (typeof retained.text === 'string') {
@@ -78,7 +76,7 @@ export function createBoundedSessionAccumulator(limits: { readonly maxEvents?: n
         throw new Error('A session must contain at least one retained record.');
       }
       return {
-        records: [...records].sort((left, right) => Date.parse(left.occurredAt) - Date.parse(right.occurredAt)),
+        records: [...records],
         startedAt,
         endedAt
       };
