@@ -4,9 +4,8 @@ import { adaptCursorPassiveHook } from './cursor.js';
 import type { PassiveCaptureRecord } from '../passive-service.js';
 import type { Session } from '../../domain/types.js';
 
-const adapters: Readonly<Record<PassiveHookSource, PassiveHookAdapter>> = Object.freeze({
-  codex: Object.freeze({ adapt: adaptCodexPassiveHook }),
-  cursor: Object.freeze({ adapt: adaptCursorPassiveHook })
+const adapters: Readonly<Record<'codex', PassiveHookAdapter>> = Object.freeze({
+  codex: Object.freeze({ adapt: adaptCodexPassiveHook })
 });
 
 export function adaptPassiveHook(
@@ -15,8 +14,13 @@ export function adaptPassiveHook(
   receivedAt: string,
   repositoryId?: Session['repositoryId']
 ): PassiveCaptureRecord | undefined {
-  return adapters[source].adapt(payload, receivedAt, repositoryId);
+  if (source === 'codex') return adapters.codex.adapt(payload, receivedAt, repositoryId);
+  const adaptation = adaptCursorPassiveHook(payload, receivedAt, repositoryId);
+  return adaptation.state === 'accepted' ? adaptation.record : undefined;
 }
 
-export type { PassiveHookAdapter, PassiveHookSource } from './contracts.js';
+export { adaptCursorPassiveHook } from './cursor.js';
+export type { CursorHookAdaptation, PassiveHookAdapter, PassiveHookSource } from './contracts.js';
 export { MAX_HOOK_INPUT_BYTES } from './contracts.js';
+export { cursorCaptureDiagnosticCategories } from '../hook-diagnostics.js';
+export type { CursorCaptureDiagnosticCategory } from '../hook-diagnostics.js';

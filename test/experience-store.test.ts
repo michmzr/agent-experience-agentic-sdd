@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import type { ExperienceImport, EventId, KnowledgeEntry } from '../src/domain/types.js';
-import { ExperienceStore } from '../src/storage/experience-store.js';
+import { ExperienceStore, ExperienceStoreInitializationError } from '../src/storage/experience-store.js';
 
 function validImport(): ExperienceImport {
   return {
@@ -39,6 +40,28 @@ test('creates a local SQLite database file with owner-only permissions', () => {
 
   assert.equal(statSync(databasePath).mode & 0o777, 0o600);
   store.close();
+});
+
+test('wraps migration schema failures in a typed initialization error', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-store-malformed-migration-')), 'experience.sqlite');
+  const database = new DatabaseSync(databasePath);
+  database.exec('CREATE TABLE schema_migrations (unexpected INTEGER)');
+  database.close();
+
+  assert.throws(
+    () => new ExperienceStore(databasePath),
+    (error: unknown) => error instanceof ExperienceStoreInitializationError && error.stage === 'migration'
+  );
+});
+
+test('wraps database open failures in a typed initialization error', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-store-open-failure-')), 'experience.sqlite');
+  mkdirSync(databasePath);
+
+  assert.throws(
+    () => new ExperienceStore(databasePath),
+    (error: unknown) => error instanceof ExperienceStoreInitializationError && error.stage === 'open'
+  );
 });
 
 test('rejects an invalid import before it can mutate stored knowledge', () => {

@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { runCli } from '../src/cli.js';
+import { initializeDiagnosticWorkspace, resolveDiagnosticScope } from '../src/capture/diagnostic-scope.js';
+import { CaptureDiagnosticStore } from '../src/storage/capture-diagnostic-store.js';
+import { initializeGitRepository } from './helpers/git-repository.js';
 
 const fixture = (name: string) => join(process.cwd(), 'test', 'fixtures', name);
 
@@ -28,6 +31,60 @@ test('imports, validates, lists, inspects, retrieves, and exports a fixture', ()
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
     rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test('reports the same path-free workspace diagnostic scope through both CLI forms', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'ael-diagnostic-workspace-'));
+  const alias = `${workspace}-alias`;
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-diagnostic-data-'));
+  try {
+    const scope = initializeDiagnosticWorkspace(workspace, 'workspace-diagnostics');
+    const store = new CaptureDiagnosticStore(join(dataDir, 'capture-diagnostics.sqlite'));
+    store.increment({ source: 'cursor', scope }, 'unsafe-command-shape');
+    store.close();
+    symlinkSync(workspace, alias, 'dir');
+
+    const automatic = runCli(['hooks', 'diagnostics', '--data-dir', dataDir, '--json'], { workingDirectory: workspace });
+    const explicit = runCli(['hooks', 'diagnostics', '--repository', alias, '--data-dir', dataDir, '--json'], { workingDirectory: workspace });
+    const inspection = runCli(['experience', 'inspect', '--data-dir', dataDir, '--json'], { workingDirectory: workspace });
+    assert.equal(automatic.exitCode, 0, automatic.stderr);
+    assert.deepEqual(JSON.parse(explicit.stdout), JSON.parse(automatic.stdout));
+    assert.deepEqual(JSON.parse(inspection.stdout), JSON.parse(automatic.stdout));
+    assert.deepEqual(JSON.parse(automatic.stdout), {
+      version: 1,
+      source: 'cursor',
+      scope: { kind: 'workspace', id: 'workspace-diagnostics' },
+      counts: { 'invalid-working-directory': 0, 'persistence-failure': 0, 'unsafe-command-shape': 1, 'unsupported-tool': 0 }
+    });
+    assert.equal(automatic.stdout.includes(workspace), false);
+    assert.match(runCli(['hooks', 'diagnostics', '--data-dir', dataDir], { workingDirectory: workspace }).stdout, /Scope: workspace workspace-diagnostics/);
+    assert.deepEqual(resolveDiagnosticScope(alias), scope);
+  } finally {
+    rmSync(alias, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('retains an existing nested workspace scope after Git initialization', () => {
+  const repository = mkdtempSync(join(tmpdir(), 'ael-diagnostic-repository-'));
+  const workspace = join(repository, 'workspace');
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-diagnostic-data-'));
+  try {
+    mkdirSync(workspace);
+    const scope = initializeDiagnosticWorkspace(workspace, 'nested-workspace');
+    initializeGitRepository(repository);
+    const store = new CaptureDiagnosticStore(join(dataDir, 'capture-diagnostics.sqlite'));
+    store.increment({ source: 'cursor', scope }, 'invalid-working-directory');
+    store.close();
+
+    const report = runCli(['hooks', 'diagnostics', '--data-dir', dataDir, '--json'], { workingDirectory: workspace });
+    assert.equal(report.exitCode, 0, report.stderr);
+    assert.deepEqual(JSON.parse(report.stdout).scope, { kind: 'workspace', id: 'nested-workspace' });
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });
 

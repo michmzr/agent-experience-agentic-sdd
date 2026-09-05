@@ -13,7 +13,7 @@ import { createProcessDebriefTerminalHost, runSessionDebrief, type DebriefTermin
 import { createProcessTerminalHost, TerminalReviewSelectionPrompt, type TerminalHost } from './review/terminal-prompt.js';
 import { verifyHookReadiness } from './cli/hook-readiness.js';
 import { resolveRepository, resolveRepositoryRoot } from './repository/local-repository.js';
-import { installHooks, parseHookSelection, TerminalHookSelectionPrompt, type HookSelectionPrompt, verifyInstalledHooks } from './cli/hook-installation.js';
+import { installHooks, parseHookSelection, type HookSelectionPrompt, verifyInstalledHooks } from './cli/hook-installation.js';
 import { AelSkillError, inspectAelSkill, installAelSkill, uninstallAelSkill, updateAelSkill, validateAelSkill, type AelSkillLocation, type AelSkillScope } from './skill/ael-skill.js';
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string; }
@@ -55,12 +55,6 @@ export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workin
 
 export async function runCliAsync(args: string[], options: RunCliAsyncOptions = {}): Promise<CliResult> {
   if (isCaptureHookCommand(args)) return runCaptureHookCli(args, options);
-  if (args[0] === 'init' && !args.includes('--hooks') && !args.includes('--scope')) {
-    const terminal = options.terminal ?? (process.stdin.isTTY ? createProcessTerminalHost() : undefined);
-    if (terminal === undefined) return runCli(args, options);
-    const sources = await (options.hookSelectionPrompt ?? new TerminalHookSelectionPrompt(terminal)).choose();
-    return runCli([...args, '--scope', 'repo', '--hooks', sources.join(',')], options);
-  }
   if (args[0] !== 'review') return runCli(args, options);
   try {
     const parsed = parseArguments(args); const json = parsed.options.has('json');
@@ -99,7 +93,7 @@ async function runCaptureHookCli(args: string[], options: RunCliAsyncOptions): P
     const input = options.hookInput === undefined ? await readBoundedStdin() : { input: options.hookInput, oversized: false };
     if (input.oversized) return hookCliResult({ status: 'degraded', code: 'INVALID_INPUT' });
     const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
-    return hookCliResult(service.captureHook(source as PassiveHookSource, input.input, options.now));
+    return hookCliResult(service.captureHook(source as PassiveHookSource, input.input, options.now, options.workingDirectory));
   } catch (error) {
     return hookCliResult({ status: 'degraded', code: hookErrorCode(error) });
   }
@@ -142,9 +136,13 @@ async function readBoundedStdin(): Promise<{ readonly input: string; readonly ov
 function execute(service: ExperienceService, parsed: ParsedArguments, options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory'>): unknown {
   const [command, subcommand, ...rest] = parsed.positionals;
   if (command === 'init' && subcommand === undefined && rest.length === 0) {
-    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'scope', 'hooks']);
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'scope', 'hooks', 'workspace-id']);
     const scope = optionalScope(parsed.options);
-    if (scope === undefined) throw new SyntaxError('Initialization requires --scope global or --scope repo.');
+    if (scope === undefined) {
+      if (parsed.options.has('hooks')) throw new SyntaxError('--hooks requires --scope repo.');
+      return service.initWorkspace(options.workingDirectory ?? process.cwd(), optionalString(parsed.options, 'workspace-id'));
+    }
+    if (parsed.options.has('workspace-id')) throw new SyntaxError('--workspace-id may not be used with --scope.');
     if (scope === 'global') {
       if (parsed.options.has('hooks')) throw new SyntaxError('--hooks may be used only with --scope repo.');
       return service.init();
@@ -160,6 +158,10 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   }
   if (command === 'experience' && subcommand === 'add' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'input']); return service.add(requiredString(parsed.options, 'input'));
+  }
+  if (command === 'experience' && subcommand === 'inspect' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository']);
+    return service.cursorCaptureDiagnostics(diagnosticDirectory(parsed.options, options.workingDirectory));
   }
   if (command === 'validate' && subcommand === undefined && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'scope']); optionalScope(parsed.options); return service.validate();
@@ -225,8 +227,16 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
     assertNoUnknownOptions(parsed.options, ['worktree', 'json']);
     return verifyHookReadiness({ worktreePath: requiredString(parsed.options, 'worktree') });
   }
+  if (command === 'hooks' && subcommand === 'diagnostics' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository']);
+    return service.cursorCaptureDiagnostics(diagnosticDirectory(parsed.options, options.workingDirectory));
+  }
   if (command === 'skill') return executeSkill(parsed, options);
   throw invalidCommand(command);
+}
+
+function diagnosticDirectory(options: Map<string, string | true>, workingDirectory?: string): string {
+  return optionalString(options, 'repository') ?? workingDirectory ?? process.cwd();
 }
 
 function executeSkill(parsed: ParsedArguments, options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory'>): unknown {
@@ -367,7 +377,13 @@ function success(value: unknown, json: boolean, positionals: readonly string[]):
 }
 function humanOutput(value: unknown, positionals: readonly string[]): string {
   const [command, subcommand] = positionals;
-  if (command === 'init') return `Initialized local experience store at ${(value as { databasePath: string }).databasePath}.`;
+  if (command === 'init') {
+    const workspace = value as { kind?: string; id?: string; databasePath?: string };
+    return workspace.kind === 'workspace' ? `Initialized workspace ${workspace.id}.` : `Initialized local experience store at ${workspace.databasePath}.`;
+  }
+  if ((command === 'hooks' && subcommand === 'diagnostics') || (command === 'experience' && subcommand === 'inspect')) {
+    return formatCaptureDiagnostics(value as { scope: { kind: string; id: string }; counts: Record<string, number> });
+  }
   if (command === 'experience' && subcommand === 'add') return `Imported ${countLabel((value as { imported: number }).imported, 'knowledge entry')}.`;
   if (command === 'validate') return 'Validation passed.';
   if (command === 'inspect') return formatKnowledge(value as KnowledgeRecord, true);
@@ -446,6 +462,9 @@ function formatRepositoryStatus(status: { status: string; repository: { id: stri
     ...status.sources.map((source) => `${source.source}: ${source.status}${source.code ? ` (${source.code})` : ''}`)
   ].join('\n');
 }
+function formatCaptureDiagnostics(report: { scope: { kind: string; id: string }; counts: Record<string, number> }): string {
+  return [`Scope: ${report.scope.kind} ${report.scope.id}`, ...Object.keys(report.counts).sort().map((category) => `${category}: ${report.counts[category]}`)].join('\n');
+}
 function formatKnowledgeList(entries: readonly KnowledgeRecord[]): string { return entries.length ? entries.map((entry) => formatKnowledge(entry, false)).join('\n') : 'No knowledge entries found.'; }
 function formatKnowledge(entry: KnowledgeRecord, includeEvidence: boolean): string { return `${entry.id} [${entry.state}]${entry.authoritative ? ' [authoritative]' : ''}\n${entry.statement}${includeEvidence ? `\nEvidence: ${entry.evidenceIds.join(', ')}` : ''}`; }
 function countLabel(count: number, singular: string): string { return `${count} ${count === 1 ? singular : `${singular}s`}`; }
@@ -477,7 +496,7 @@ function invalidCommand(command: string | undefined): SyntaxError {
     ? `Unknown command form for ${command}.`
     : 'Unknown command.');
 }
-function usage(): string { return 'Usage: ael <init --scope global|repo [--hooks codex,cursor]|list records|stats|status|status-global|experience add|validate|inspect|lessons list|retrieve|export|capture hook --source codex|cursor|hooks verify --worktree path|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote|skill install|update|status|validate|uninstall> [options]'; }
+function usage(): string { return 'Usage: ael <init [--workspace-id slug]|init --scope global|repo [--hooks codex,cursor]|list records|stats|status|status-global|experience add|experience inspect|validate|inspect|lessons list|retrieve|export|capture hook --source codex|cursor|hooks verify --worktree path|hooks diagnostics|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote|skill install|update|status|validate|uninstall> [options]'; }
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } {
   return error instanceof DomainError || error instanceof RuntimeServiceError
     ? { code: error.code, message: error.message }

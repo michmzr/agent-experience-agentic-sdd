@@ -3,32 +3,41 @@ import { containsCredentialMaterial } from '../../privacy/structured-arguments.j
 import { MAX_CAPTURE_IDENTIFIER_LENGTH } from '../contracts.js';
 import { normalizeMappedCapture } from '../normalization.js';
 import type { PassiveCaptureRecord } from '../passive-service.js';
-import { technicalSignature } from './technical-signature.js';
+import type { CursorHookAdaptation } from './contracts.js';
+import {
+  TechnicalSignatureRejection,
+  technicalSignature,
+  technicalWorkingDirectory
+} from './technical-signature.js';
 
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,511}$/;
 
-export function adaptCursorPassiveHook(payload: unknown, receivedAt: string, repositoryId?: import('../../domain/types.js').Session['repositoryId']): PassiveCaptureRecord | undefined {
+export function adaptCursorPassiveHook(
+  payload: unknown,
+  receivedAt: string,
+  repositoryId?: import('../../domain/types.js').Session['repositoryId']
+): CursorHookAdaptation {
   assertCanonicalTimestamp(receivedAt);
   const record = hookRecord(payload);
   switch (record.hook_event_name) {
     case 'sessionStart':
-      return Object.freeze({
+      return accepted(Object.freeze({
         kind: 'session-start',
         session: Object.freeze({ id: lifecycleSessionId(record), source: 'cursor', startedAt: receivedAt, ...(repositoryId === undefined ? {} : { repositoryId }) })
-      });
+      }));
     case 'sessionEnd':
-      return Object.freeze({
+      return accepted(Object.freeze({
         kind: 'session-end',
         source: 'cursor',
         sessionId: lifecycleSessionId(record),
         endedAt: receivedAt
-      });
+      }));
     case 'preToolUse':
       return technical(record, 'pre-action', receivedAt);
     case 'postToolUse':
       return technical(record, 'post-result', receivedAt);
     default:
-      return undefined;
+      return ignored();
   }
 }
 
@@ -36,37 +45,63 @@ function technical(
   record: Readonly<Record<string, unknown>>,
   phase: 'pre-action' | 'post-result',
   receivedAt: string
-): PassiveCaptureRecord | undefined {
-  const toolName = stringField(record.tool_name);
-  const signature = technicalSignature({
-    toolName,
-    toolInput: record.tool_input,
-    ...(typeof record.cwd === 'string' ? { cwd: record.cwd } : {})
-  });
-  if (signature === undefined) return undefined;
-  const toolUseId = stringField(record.tool_use_id);
-  const exitStatus = phase === 'post-result' ? optionalExitStatus(record) : undefined;
-  const sourceEventId = `${toolUseId}:${phase === 'pre-action' ? 'pre' : 'post'}`;
-  return Object.freeze({
-    kind: 'technical',
-    event: normalizeMappedCapture({
-      source: 'cursor',
-      sourceEventId,
-      sessionId: technicalSessionId(record),
-      phase,
-      occurredAt: receivedAt,
-      tool: signature.tool,
-      action: signature.action,
-      arguments: signature.arguments,
-      path: signature.path,
-      summary: signature.summary,
-      ...(phase === 'post-result' ? {
-        outcome: outcome(exitStatus),
-        ...(exitStatus === undefined ? {} : { exitStatus }),
-        relatedEventId: `${toolUseId}:pre`
-      } : {})
-    })
-  });
+): CursorHookAdaptation {
+  let cwd: string;
+  try {
+    cwd = technicalWorkingDirectory(record.cwd);
+  } catch (error) {
+    return error instanceof TechnicalSignatureRejection && error.code === 'PRIVATE_INPUT'
+      ? diagnostic('unsafe-command-shape', 'PRIVATE_INPUT')
+      : diagnostic('invalid-working-directory');
+  }
+
+  try {
+    const toolName = stringField(record.tool_name);
+    const signature = technicalSignature({ toolName, toolInput: record.tool_input, cwd });
+    if (signature === undefined) return diagnostic('unsupported-tool');
+    const toolUseId = stringField(record.tool_use_id);
+    const exitStatus = phase === 'post-result' ? optionalExitStatus(record) : undefined;
+    const sourceEventId = `${toolUseId}:${phase === 'pre-action' ? 'pre' : 'post'}`;
+    return accepted(Object.freeze({
+      kind: 'technical',
+      event: normalizeMappedCapture({
+        source: 'cursor',
+        sourceEventId,
+        sessionId: technicalSessionId(record),
+        phase,
+        occurredAt: receivedAt,
+        tool: signature.tool,
+        action: signature.action,
+        arguments: signature.arguments,
+        path: signature.path,
+        summary: signature.summary,
+        ...(phase === 'post-result' ? {
+          outcome: outcome(exitStatus),
+          ...(exitStatus === undefined ? {} : { exitStatus }),
+          relatedEventId: `${toolUseId}:pre`
+        } : {})
+      })
+    }));
+  } catch (error) {
+    return error instanceof TechnicalSignatureRejection && error.code === 'PRIVATE_INPUT'
+      ? diagnostic('unsafe-command-shape', 'PRIVATE_INPUT')
+      : diagnostic('unsafe-command-shape');
+  }
+}
+
+function accepted(record: PassiveCaptureRecord): CursorHookAdaptation {
+  return Object.freeze({ state: 'accepted', record });
+}
+
+function ignored(): CursorHookAdaptation {
+  return Object.freeze({ state: 'ignored' });
+}
+
+function diagnostic(
+  category: Exclude<import('../hook-diagnostics.js').CursorCaptureDiagnosticCategory, 'persistence-failure'>,
+  ingressCode?: 'INVALID_INPUT' | 'PRIVATE_INPUT'
+): CursorHookAdaptation {
+  return Object.freeze({ state: 'diagnostic', category, ...(ingressCode === undefined ? {} : { ingressCode }) });
 }
 
 function hookRecord(value: unknown): Readonly<Record<string, unknown>> {
@@ -84,10 +119,12 @@ function technicalSessionId(record: Readonly<Record<string, unknown>>): SessionI
 
 function stringField(value: unknown): string {
   if (typeof value !== 'string') throw rejected();
+  if (containsCredentialMaterial(value)) throw privateInput();
   return value;
 }
 
 function identifier(value: unknown): string {
+  if (typeof value === 'string' && containsCredentialMaterial(value)) throw privateInput();
   if (typeof value !== 'string'
     || value.length < 1
     || value.length > MAX_CAPTURE_IDENTIFIER_LENGTH
@@ -119,4 +156,8 @@ function assertCanonicalTimestamp(value: string): void {
 
 function rejected(): TypeError {
   return new TypeError('Passive hook payload is unsupported.');
+}
+
+function privateInput(): TechnicalSignatureRejection {
+  return new TechnicalSignatureRejection('PRIVATE_INPUT');
 }

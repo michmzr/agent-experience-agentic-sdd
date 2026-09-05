@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { adaptPassiveHook } from '../src/capture/hook-adapters/index.js';
+import {
+  adaptCursorPassiveHook,
+  adaptPassiveHook,
+  type CursorHookAdaptation
+} from '../src/capture/hook-adapters/index.js';
 import { normalizeCaptureBatch } from '../src/capture/normalization.js';
 import type { PassiveCaptureRecord } from '../src/capture/passive-service.js';
 
@@ -22,6 +26,16 @@ function comparableTechnical(record: PassiveCaptureRecord | undefined): unknown 
     ...common
   } = event;
   return common;
+}
+
+function cursorAdapt(payload: unknown): CursorHookAdaptation {
+  return adaptCursorPassiveHook(payload, preTime);
+}
+
+function acceptedCursor(payload: unknown): PassiveCaptureRecord {
+  const adaptation = cursorAdapt(payload);
+  if (adaptation.state !== 'accepted') assert.fail(`Expected accepted Cursor adaptation, received ${adaptation.state}.`);
+  return adaptation.record;
 }
 
 test('normalizes equivalent public shell hooks without raw output', () => {
@@ -194,6 +208,7 @@ test('omits MCP prompt, content, output, and user identity scalar keys', () => {
   const record = technical(adaptPassiveHook('cursor', {
     conversation_id: 'session-1',
     hook_event_name: 'preToolUse',
+    cwd: '/work/repo',
     tool_name: 'mcp__github__create_issue',
     tool_use_id: 'mcp-private-scalars',
     tool_input: {
@@ -250,6 +265,7 @@ test('maps file edits without patch or content fields', () => {
   const record = technical(adaptPassiveHook('cursor', {
     conversation_id: 'session-1',
     hook_event_name: 'preToolUse',
+    cwd: '/work/repo',
     tool_name: 'Edit',
     tool_use_id: 'edit-1',
     tool_input: {
@@ -296,13 +312,14 @@ test('rejects oversized values and complex shell syntax with generic errors', ()
   ];
 
   for (const tool_input of cases) {
-    assert.throws(() => adaptPassiveHook('cursor', {
+    assert.deepEqual(cursorAdapt({
       conversation_id: 'session-1',
       hook_event_name: 'preToolUse',
+      cwd: '/work/repo',
       tool_name: 'Shell',
       tool_use_id: 'unsafe-shell',
       tool_input
-    }, preTime), /passive hook|credential|private|limit/i);
+    }), { state: 'diagnostic', category: 'unsafe-command-shape' });
   }
 });
 
@@ -334,12 +351,171 @@ test('ignores unknown, prompt, and nontechnical hook events', () => {
   ]) {
     assert.equal(adaptPassiveHook('codex', payload, preTime), undefined);
   }
-  assert.equal(adaptPassiveHook('cursor', {
+  assert.deepEqual(adaptPassiveHook('cursor', {
     conversation_id: 'session-1',
     hook_event_name: 'preToolUse',
     tool_name: 'ListDirectory',
     tool_input: { path: 'src' }
   }, preTime), undefined);
+});
+
+test('classifies Cursor hook diagnostics without retaining rejected input', () => {
+  const commandMarker = 'classified-command-marker';
+  const pathMarker = 'classified-path-marker';
+  const credentialMarker = 'classified-credential-marker';
+  const promptMarker = 'classified-prompt-marker';
+  const sessionMarker = 'classified-session-marker';
+  const excessiveArguments = ['git', ...Array.from({ length: 65 }, (_, index) => `arg${index}`)].join(' ');
+
+  const cases: readonly {
+    readonly payload: Readonly<Record<string, unknown>>;
+    readonly expected: unknown;
+  }[] = [
+    {
+      payload: {
+        conversation_id: sessionMarker,
+        hook_event_name: 'preToolUse',
+        cwd: '/work/repo',
+        tool_name: 'Read',
+        tool_input: { file_path: pathMarker }
+      },
+      expected: { state: 'diagnostic', category: 'unsupported-tool' }
+    },
+    {
+      payload: {
+        conversation_id: sessionMarker,
+        hook_event_name: 'preToolUse',
+        cwd: '/work/repo',
+        tool_name: 'Grep',
+        tool_input: { query: commandMarker }
+      },
+      expected: { state: 'diagnostic', category: 'unsupported-tool' }
+    },
+    {
+      payload: {
+        conversation_id: sessionMarker,
+        hook_event_name: 'preToolUse',
+        tool_name: 'Shell',
+        tool_input: { command: commandMarker }
+      },
+      expected: { state: 'diagnostic', category: 'invalid-working-directory' }
+    },
+    {
+      payload: {
+        conversation_id: sessionMarker,
+        hook_event_name: 'preToolUse',
+        cwd: '',
+        tool_name: 'Shell',
+        tool_input: { command: commandMarker }
+      },
+      expected: { state: 'diagnostic', category: 'invalid-working-directory' }
+    },
+    {
+      payload: {
+        conversation_id: sessionMarker,
+        hook_event_name: 'preToolUse',
+        cwd: '/work/repo',
+        tool_name: 'Shell',
+        tool_input: { command: `${commandMarker}; git status` }
+      },
+      expected: { state: 'diagnostic', category: 'unsafe-command-shape' }
+    },
+    {
+      payload: {
+        conversation_id: sessionMarker,
+        hook_event_name: 'preToolUse',
+        cwd: '/work/repo',
+        tool_name: 'Shell',
+        tool_input: { command: excessiveArguments }
+      },
+      expected: { state: 'diagnostic', category: 'unsafe-command-shape' }
+    },
+    {
+      payload: {
+        conversation_id: sessionMarker,
+        hook_event_name: 'preToolUse',
+        cwd: '/work/repo',
+        tool_name: 'Shell',
+        tool_input: { command: `curl Authorization:Bearer=${credentialMarker}` }
+      },
+      expected: { state: 'diagnostic', category: 'unsafe-command-shape', ingressCode: 'PRIVATE_INPUT' }
+    }
+  ];
+
+  for (const { payload, expected } of cases) {
+    const result = cursorAdapt(payload);
+    assert.deepEqual(result, expected);
+    const serialized = JSON.stringify(result);
+    for (const marker of [commandMarker, pathMarker, credentialMarker, promptMarker, sessionMarker]) {
+      assert.equal(serialized.includes(marker), false, marker);
+    }
+  }
+
+  for (const payload of [
+    { conversation_id: sessionMarker, hook_event_name: 'beforeSubmitPrompt', prompt: promptMarker },
+    { conversation_id: sessionMarker, hook_event_name: 'unknownEvent', prompt: promptMarker }
+  ]) {
+    assert.deepEqual(cursorAdapt(payload), { state: 'ignored' });
+  }
+});
+
+test('preserves private ingress diagnostics for Cursor technical envelope fields', () => {
+  const credentialMarker = 'classified-envelope-credential';
+  const validEnvelope = {
+    conversation_id: 'session-1',
+    hook_event_name: 'preToolUse',
+    cwd: '/work/repo',
+    tool_name: 'Shell',
+    tool_use_id: 'tool-1',
+    tool_input: { command: 'git status' }
+  };
+
+  for (const payload of [
+    { ...validEnvelope, conversation_id: `Bearer=${credentialMarker}` },
+    { ...validEnvelope, cwd: `Bearer=${credentialMarker}` },
+    { ...validEnvelope, tool_name: `Bearer=${credentialMarker}` },
+    { ...validEnvelope, tool_use_id: `Bearer=${credentialMarker}` }
+  ]) {
+    const adaptation = cursorAdapt(payload);
+    assert.deepEqual(adaptation, {
+      state: 'diagnostic',
+      category: 'unsafe-command-shape',
+      ingressCode: 'PRIVATE_INPUT'
+    });
+    assert.equal(JSON.stringify(adaptation).includes(credentialMarker), false);
+  }
+});
+
+test('preserves existing Cursor records inside accepted classifications', () => {
+  const shell = acceptedCursor({
+    conversation_id: 'session-1',
+    hook_event_name: 'preToolUse',
+    cwd: '/work/repo',
+    tool_name: 'Shell',
+    tool_use_id: 'shell-1',
+    tool_input: { command: 'git status --short' }
+  });
+  const mcp = acceptedCursor({
+    conversation_id: 'session-1',
+    hook_event_name: 'preToolUse',
+    cwd: '/work/repo',
+    tool_name: 'mcp__github__create_issue',
+    tool_use_id: 'mcp-1',
+    tool_input: { owner: 'octo', repo: 'repo' }
+  });
+  const edit = acceptedCursor({
+    conversation_id: 'session-1',
+    hook_event_name: 'preToolUse',
+    cwd: '/work/repo',
+    tool_name: 'Edit',
+    tool_use_id: 'edit-1',
+    tool_input: { file_path: 'src/index.ts', new_string: 'classified-prompt-marker' }
+  });
+
+  assert.equal(shell.kind, 'technical');
+  assert.equal(mcp.kind, 'technical');
+  assert.equal(edit.kind, 'technical');
+  assert.equal(JSON.stringify(edit).includes('classified-prompt-marker'), false);
 });
 
 test('validates canonical receivedAt before using hook timestamps', () => {
@@ -352,6 +528,7 @@ test('validates canonical receivedAt before using hook timestamps', () => {
     conversation_id: 'session-1',
     hook_event_name: 'preToolUse',
     timestamp: '2025-01-01T00:00:00.000Z',
+    cwd: '/work/repo',
     tool_name: 'Shell',
     tool_use_id: 'tool-1',
     tool_input: { command: 'git status' }

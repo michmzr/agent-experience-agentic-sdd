@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -21,6 +21,15 @@ function readSession(dataDir: string, id: string) {
     return store.loadSession(id as never);
   } finally {
     store.close();
+  }
+}
+
+function storedSessionSource(dataDir: string): string | undefined {
+  const database = new DatabaseSync(join(dataDir, 'experience.sqlite'));
+  try {
+    return (database.prepare('SELECT source FROM sessions').get() as { source?: string } | undefined)?.source;
+  } finally {
+    database.close();
   }
 }
 
@@ -59,8 +68,26 @@ test('dispatches Cursor hooks and ignores nontechnical events', async () => {
       { hookInput: JSON.stringify({ conversation_id: 'session-1', hook_event_name: 'sessionStart' }), now }
     );
     assert.deepEqual(captured, { exitCode: 0, stdout: '', stderr: '' });
-    assert.equal(readSession(dataDir, 'session-1')?.source, 'cursor');
+    assert.equal(storedSessionSource(dataDir), 'cursor');
   } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('keeps Cursor hooks fail-open when workspace scope resolution fails', async () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'ael-hook-invalid-workspace-'));
+  const dataDir = temporaryDataDirectory();
+  try {
+    mkdirSync(join(workspace, '.ael'));
+    writeFileSync(join(workspace, '.ael', 'workspace.json'), '{broken');
+    const result = await runCliAsync(
+      ['capture', 'hook', '--source', 'cursor', '--data-dir', dataDir],
+      { workingDirectory: workspace, hookInput: JSON.stringify({ conversation_id: 'session-1', hook_event_name: 'sessionStart' }), now }
+    );
+    assert.deepEqual(result, { exitCode: 0, stdout: '', stderr: 'AEL_CAPTURE_INVALID_INPUT: Passive capture skipped.\n' });
+    assert.equal(result.stderr.includes(workspace), false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
@@ -90,6 +117,45 @@ test('fails open with bounded generic diagnostics for invalid and private input'
     }
   } finally {
     for (const dataDir of dataDirectories) rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('retains generic private-error and persistence-error fallback classification', async () => {
+  const dataDir = temporaryDataDirectory();
+  const workspace = mkdtempSync(join(tmpdir(), 'ael-hook-fallback-workspace-'));
+  const regularFile = join(workspace, 'not-a-directory');
+  writeFileSync(regularFile, 'fixture');
+  try {
+    const privateFailure = await runCliAsync(
+      ['capture', 'hook', '--source', 'cursor', '--data-dir', dataDir],
+      {
+        workingDirectory: workspace,
+        hookInput: JSON.stringify({ conversation_id: 'private-fallback-session', hook_event_name: 'sessionStart' }),
+        now: () => { throw new Error('credential lookup failed'); }
+      }
+    );
+    assert.deepEqual(privateFailure, {
+      exitCode: 0,
+      stdout: '',
+      stderr: 'AEL_CAPTURE_PRIVATE_INPUT: Passive capture skipped.\n'
+    });
+
+    const persistenceFailure = await runCliAsync(
+      ['capture', 'hook', '--source', 'cursor', '--data-dir', dataDir],
+      {
+        workingDirectory: regularFile,
+        hookInput: JSON.stringify({ conversation_id: 'file-fallback-session', hook_event_name: 'sessionStart' }),
+        now
+      }
+    );
+    assert.deepEqual(persistenceFailure, {
+      exitCode: 0,
+      stdout: '',
+      stderr: 'AEL_CAPTURE_PERSISTENCE_FAILED: Passive capture skipped.\n'
+    });
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });
 

@@ -35,6 +35,15 @@ import { assertDurableTextSafe } from '../review/sanitizer.js';
 import { openExperienceDatabase, type ExperienceDatabaseOptions } from './database.js';
 import { ensureOverrideAuditUseMigration, ensureOverrideEvidenceMigration, overrideAuditMigration } from './override-store.js';
 
+export type ExperienceStoreInitializationStage = 'open' | 'migration';
+
+export class ExperienceStoreInitializationError extends Error {
+  constructor(readonly stage: ExperienceStoreInitializationStage, cause: unknown) {
+    super('Experience store initialization failed.', { cause });
+    this.name = 'ExperienceStoreInitializationError';
+  }
+}
+
 interface KnowledgeRow {
   id: string;
   candidate_id: string;
@@ -294,7 +303,12 @@ export class ExperienceStore {
   private readonly database: DatabaseSync;
 
   constructor(databasePath?: string, options: ExperienceDatabaseOptions = {}) {
-    const database = openExperienceDatabase(databasePath, options);
+    let database: DatabaseSync;
+    try {
+      database = openExperienceDatabase(databasePath, options);
+    } catch (error) {
+      throw new ExperienceStoreInitializationError('open', error);
+    }
     this.database = database;
     try {
       this.migrate();
@@ -304,7 +318,7 @@ export class ExperienceStore {
       } catch {
         // Preserve the migration failure if cleanup itself fails.
       }
-      throw error;
+      throw new ExperienceStoreInitializationError('migration', error);
     }
   }
 

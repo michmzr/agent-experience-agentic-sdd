@@ -91,7 +91,7 @@ Deliverables:
 
 ## Milestone 3.3: real-session capture and review reliability
 
-Status: The large-session-artifact review increment is complete on 2026-09-04. Cursor capture diagnostics and stale-session reconciliation remain deferred. ChatGPT export ingestion remains outside the product scope.
+Status: The large-session-artifact review and Cursor capture diagnostics increments are complete on 2026-09-04. Stale-session reconciliation remains deferred. ChatGPT export ingestion remains outside the product scope.
 
 Goal: make passive capture failures diagnosable and allow bounded analysis of representative real sessions without weakening privacy or fail-open behavior.
 
@@ -106,15 +106,15 @@ Observed evidence:
 Deliverables:
 
 - bounded streaming or selective normalization for large session artifacts, with limits applied to sanitized events and retained evidence, complete;
-- privacy-safe capture diagnostics that distinguish unsupported tools, invalid working directories, unsafe command shapes and host delivery failures, deferred;
+- privacy-safe capture diagnostics for verified Git repositories and automatically selected non-Git workspaces that distinguish unsupported tools, invalid working directories, unsafe command shapes and primary persistence failures, complete;
 - explicit incomplete-session state plus deterministic detection and reconciliation of stale open sessions, deferred;
 - real-session fixtures and benchmarks covering large Codex artifacts, complete; interrupted Cursor lifecycle delivery remains deferred.
 
 Acceptance gates:
 
 - a representative 7.97 MiB Codex Desktop artifact completes manual review within documented memory, event and evidence bounds;
-- supported Cursor technical actions are persisted, intentionally unsupported actions are counted by reason, and missing `sessionEnd` is visible without rewriting historical evidence;
-- diagnostics expose categories and counts without including commands, paths, prompts, credentials or raw session values;
+- supported Cursor technical actions are persisted, intentionally unsupported actions are counted by reason, and diagnostics do not claim to detect a hook or `sessionEnd` delivery that Cursor did not invoke;
+- accepted technical events retain normalized paths in local capture storage; diagnostics reports expose categories and counts without including commands, paths, prompts, credentials or raw session values;
 - the existing fail-open hook contract and manual-review sanitization boundary remain unchanged.
 
 Out of scope:
