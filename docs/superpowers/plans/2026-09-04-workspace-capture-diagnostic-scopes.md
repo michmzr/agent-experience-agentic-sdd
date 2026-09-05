@@ -151,3 +151,13 @@ Expected: zero failures and zero skipped tests.
 ## Plan self-review
 
 Task 1 covers scope derivation, schema closure and privacy. Task 2 routes the same scope through ingress and both reporting surfaces. Task 3 verifies user-visible behavior and records release evidence. The plan does not permit raw paths or arbitrary scope IDs to reach SQLite, output or hook diagnostics.
+
+## Extra repair round
+
+- [x] Replaced hook-ingress message matching for `ExperienceStore` constructor failures with `ExperienceStoreInitializationError` stages for database open and migration failures.
+- [x] Added direct boundary tests plus a Cursor regression that creates a malformed `schema_migrations` table and verifies one best-effort `persistence-failure` count.
+- [x] Re-ran invalid-input, private-input and diagnostic-store-failure coverage without changing the fail-open contract.
+- [x] Documented the per-data-directory workspace claim registry, allocation and collision rules, corruption handling, permissions and move, copy and orphan lifecycle.
+- [x] Verified the source repair with 18 focused tests and the complete suite with 578 passed, 0 failed and 0 skipped.
+
+Source commit: `4a7215ed29e3536f86097493cd0e6140c6c4b5e6`.
