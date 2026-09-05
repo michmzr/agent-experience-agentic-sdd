@@ -104,6 +104,34 @@ test('counts one persistence failure when opening the primary experience databas
   }
 });
 
+test('counts one persistence failure when the primary migration schema is malformed', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'ael-cursor-migration-failure-workspace-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-cursor-migration-failure-data-'));
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const malformed = new DatabaseSync(databasePath);
+  malformed.exec('CREATE TABLE schema_migrations (unexpected INTEGER)');
+  malformed.close();
+  try {
+    const result = ingestPassiveHook({
+      source: 'cursor',
+      input: JSON.stringify({ conversation_id: 'migration-failure-session', hook_event_name: 'sessionStart' }),
+      databasePath,
+      workingDirectory: workspace,
+      now
+    });
+
+    assert.deepEqual(result, { status: 'degraded', code: 'PERSISTENCE_FAILED' });
+    const scope = resolveDiagnosticScope(workspace);
+    const diagnostics = new CaptureDiagnosticStore(join(dataDir, 'capture-diagnostics.sqlite'));
+    try {
+      assert.equal(diagnostics.counts({ source: 'cursor', scope })['persistence-failure'], 1);
+    } finally { diagnostics.close(); }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test('keeps a primary open failure fail-open when the diagnostic store also fails', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'ael-cursor-double-failure-workspace-'));
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-cursor-double-failure-data-'));
