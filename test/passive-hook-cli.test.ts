@@ -120,6 +120,45 @@ test('fails open with bounded generic diagnostics for invalid and private input'
   }
 });
 
+test('retains generic private-error and persistence-error fallback classification', async () => {
+  const dataDir = temporaryDataDirectory();
+  const workspace = mkdtempSync(join(tmpdir(), 'ael-hook-fallback-workspace-'));
+  const regularFile = join(workspace, 'not-a-directory');
+  writeFileSync(regularFile, 'fixture');
+  try {
+    const privateFailure = await runCliAsync(
+      ['capture', 'hook', '--source', 'cursor', '--data-dir', dataDir],
+      {
+        workingDirectory: workspace,
+        hookInput: JSON.stringify({ conversation_id: 'private-fallback-session', hook_event_name: 'sessionStart' }),
+        now: () => { throw new Error('credential lookup failed'); }
+      }
+    );
+    assert.deepEqual(privateFailure, {
+      exitCode: 0,
+      stdout: '',
+      stderr: 'AEL_CAPTURE_PRIVATE_INPUT: Passive capture skipped.\n'
+    });
+
+    const persistenceFailure = await runCliAsync(
+      ['capture', 'hook', '--source', 'cursor', '--data-dir', dataDir],
+      {
+        workingDirectory: regularFile,
+        hookInput: JSON.stringify({ conversation_id: 'file-fallback-session', hook_event_name: 'sessionStart' }),
+        now
+      }
+    );
+    assert.deepEqual(persistenceFailure, {
+      exitCode: 0,
+      stdout: '',
+      stderr: 'AEL_CAPTURE_PERSISTENCE_FAILED: Passive capture skipped.\n'
+    });
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test('fails open for missing or unsupported sources while preserving ordinary syntax errors', async () => {
   const dataDirectories = [temporaryDataDirectory(), temporaryDataDirectory()];
   try {

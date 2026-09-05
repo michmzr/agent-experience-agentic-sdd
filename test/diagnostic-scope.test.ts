@@ -63,6 +63,32 @@ test('keeps the first readable slug and disambiguates an equal basename with a p
   assert.equal(readFileSync(join(moved, '.ael', 'workspace.json'), 'utf8'), secondConfiguration);
 });
 
+test('rejects claim files whose raw content is not one hash followed by one newline', () => {
+  const malformedClaims = [
+    'a'.repeat(64),
+    ` ${'a'.repeat(64)}\n`,
+    `${'a'.repeat(64)}\n\n`,
+    `${'g'.repeat(64)}\n`
+  ];
+
+  for (const claim of malformedClaims) {
+    const parent = temporaryDirectory('ael-diagnostic-corrupt-claim-parent-');
+    const dataDirectory = temporaryDirectory('ael-diagnostic-corrupt-claim-data-');
+    const workspace = join(parent, 'project');
+    const claimDirectory = join(dataDirectory, 'workspace-scope-claims');
+    const claimPath = join(claimDirectory, 'project');
+    mkdirSync(workspace);
+    mkdirSync(claimDirectory);
+    writeFileSync(claimPath, claim);
+
+    assert.throws(
+      () => resolveDiagnosticScope(workspace, { dataDirectory }),
+      /claim registry/i
+    );
+    assert.equal(readFileSync(claimPath, 'utf8'), claim);
+  }
+});
+
 test('sets workspace configuration modes independently of a restrictive process umask', () => {
   const workspace = temporaryDirectory('ael-diagnostic-umask-workspace-');
   const originalUmask = process.umask(0o077);

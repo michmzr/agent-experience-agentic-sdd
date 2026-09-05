@@ -134,9 +134,13 @@ function isPassiveHookSource(value: unknown): value is PassiveHookSource {
 }
 
 function inputErrorCode(error: unknown): 'INVALID_INPUT' | 'PRIVATE_INPUT' | 'PERSISTENCE_FAILED' {
+  if (error instanceof ExperienceStoreInitializationError) return 'PERSISTENCE_FAILED';
   if (error instanceof HookIngressDiagnosticError) return error.code;
   if (error instanceof TechnicalSignatureRejection) return error.code === 'PRIVATE_INPUT' ? 'PRIVATE_INPUT' : 'INVALID_INPUT';
-  if (error instanceof ExperienceStoreInitializationError) return 'PERSISTENCE_FAILED';
+  if (error instanceof Error && /private|credential/i.test(error.message)) return 'PRIVATE_INPUT';
+  if (error instanceof Error && /sqlite|database|directory|file|path|permission|busy|locked|constraint/i.test(error.message)) {
+    return 'PERSISTENCE_FAILED';
+  }
   return 'INVALID_INPUT';
 }
 

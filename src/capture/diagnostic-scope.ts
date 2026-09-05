@@ -29,7 +29,7 @@ const workspaceConfigurationName = 'workspace.json';
 const workspaceConfigurationDirectory = '.ael';
 const workspaceClaimDirectory = 'workspace-scope-claims';
 const WORKSPACE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const PATH_HASH = /^[a-f0-9]{64}$/;
+const PATH_HASH_CLAIM = /^[a-f0-9]{64}\n$/;
 const MAX_WORKSPACE_ID_LENGTH = 64;
 const resolvedScopes = new WeakSet<object>();
 
@@ -188,10 +188,10 @@ function claimWorkspaceId(directory: string, workspaceId: string, pathHash: stri
 
   const metadata = lstatSync(claimPath);
   if (!metadata.isFile() || metadata.isSymbolicLink()) throw new TypeError('Diagnostic workspace claim registry is invalid.');
-  const claimedHash = readFileSync(claimPath, 'utf8').trim();
-  if (!PATH_HASH.test(claimedHash)) throw new TypeError('Diagnostic workspace claim registry is invalid.');
+  const claim = readFileSync(claimPath, 'utf8');
+  if (!PATH_HASH_CLAIM.test(claim)) throw new TypeError('Diagnostic workspace claim registry is invalid.');
   chmodSync(claimPath, WORKSPACE_CLAIM_MODE);
-  return claimedHash === pathHash;
+  return claim.slice(0, -1) === pathHash;
 }
 
 function workspaceScope(id: string): DiagnosticScope {
