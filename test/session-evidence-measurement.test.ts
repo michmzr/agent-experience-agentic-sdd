@@ -109,6 +109,12 @@ test('rejects malformed usage and unrestricted secret-bearing fields without ech
       lineageId: 'root', inputTokens: 5, cacheReadTokens: 6
     }]
   })), /cache/i);
+  assert.throws(() => reconstructSessionEvidence(input({
+    usageSnapshots: [
+      { id: 'usage-1', occurredAt: '2026-09-06T08:00:01.000Z', mode: 'cumulative', scope: 'session', lineageId: 'root', inputTokens: 10 },
+      { id: 'usage-2', occurredAt: '2026-09-06T08:00:02.000Z', mode: 'cumulative', scope: 'session', lineageId: 'root', inputTokens: 9 }
+    ]
+  })), /cumulative.*decrease/i);
 
   const credential = 'token=must-not-appear';
   assert.throws(() => reconstructSessionEvidence(input({

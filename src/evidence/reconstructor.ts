@@ -17,6 +17,9 @@ const identifierPattern = /^[A-Za-z0-9._:/-]{1,512}$/;
 const observationKeys = new Set(['id', 'sourceEventId', 'kind', 'occurredAt', 'relatedEventId', 'tool', 'outcome', 'exitStatus', 'endedAt']);
 const usageKeys = new Set(['id', 'occurredAt', 'mode', 'scope', 'lineageId', 'parentLineageId', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'analysisTokens']);
 const transportKeys = new Set(['id', 'capturedAt', 'admittedAt', 'committedAt', 'hookDurationMs']);
+const inputKeys = new Set(['schemaVersion', 'source', 'sessionId', 'startedAt', 'sourceEndedAt', 'observedThrough', 'reconciliation', 'observations', 'usageSnapshots', 'transportMeasurements', 'coverage']);
+const reconciliationKeys = new Set(['attempted', 'expectedThrough', 'committedThrough']);
+const coverageKeys = new Set(['supportedClasses', 'skippedClasses', 'unsupportedClasses', 'truncatedObservations', 'synthetic']);
 
 export function reconstructSessionEvidence(input: SessionEvidenceInput): SessionEvidenceReport {
   validateInput(input);
@@ -139,11 +142,26 @@ function uniqueObservations(observations: readonly EvidenceObservation[]): { obs
     else if (JSON.stringify(existing) === JSON.stringify(observation)) duplicateCount += 1;
     else throw new TypeError('Conflicting duplicate evidence identity.');
   }
-  return { observations: [...byId.values()], duplicateCount };
+  const bySourceEvent = new Map<string, EvidenceObservation>();
+  for (const observation of [...byId.values()].sort(compareObservation)) {
+    const key = `${observation.kind}\0${observation.sourceEventId}`;
+    const existing = bySourceEvent.get(key);
+    if (existing === undefined) {
+      bySourceEvent.set(key, observation);
+      continue;
+    }
+    const { id: _existingId, ...existingEvidence } = existing;
+    const { id: _observationId, ...observationEvidence } = observation;
+    if (JSON.stringify(existingEvidence) !== JSON.stringify(observationEvidence)) throw new TypeError('Conflicting duplicate source-event identity.');
+    duplicateCount += 1;
+  }
+  return { observations: [...bySourceEvent.values()], duplicateCount };
 }
 
 function validateInput(input: SessionEvidenceInput): void {
   if (!input || typeof input !== 'object' || input.schemaVersion !== SESSION_EVIDENCE_SCHEMA_VERSION) throw new TypeError('Unsupported session evidence schema version.');
+  const unexpected = Object.keys(input).find((key) => !inputKeys.has(key));
+  if (unexpected !== undefined) throw new TypeError(`Unsupported session evidence field: ${unexpected}.`);
   if (!['codex', 'claude-code', 'cursor'].includes(input.source)) throw new TypeError('Session evidence source is invalid.');
   assertIdentifier(input.sessionId, 'Session identity');
   const startedAt = canonicalTimestamp(input.startedAt, 'Session start timestamp');
@@ -164,6 +182,7 @@ function validateInput(input: SessionEvidenceInput): void {
   }
   const reconciliation = input.reconciliation;
   if (reconciliation !== undefined) {
+    assertAllowedObject(reconciliation, reconciliationKeys, 'reconciliation evidence');
     if (typeof reconciliation.attempted !== 'boolean') throw new TypeError('Reconciliation evidence is invalid.');
     for (const value of [reconciliation.expectedThrough, reconciliation.committedThrough]) {
       if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) throw new TypeError('Reconciliation bound is invalid.');
@@ -171,6 +190,10 @@ function validateInput(input: SessionEvidenceInput): void {
     if (reconciliation.committedThrough !== undefined && reconciliation.expectedThrough !== undefined && reconciliation.committedThrough > reconciliation.expectedThrough) {
       throw new TypeError('Committed reconciliation bound exceeds expected bound.');
     }
+  }
+  if (input.coverage !== undefined) {
+    assertAllowedObject(input.coverage, coverageKeys, 'coverage evidence');
+    if (input.coverage.synthetic !== undefined && typeof input.coverage.synthetic !== 'boolean') throw new TypeError('Coverage synthetic label is invalid.');
   }
 }
 
@@ -294,8 +317,10 @@ function aggregateUsage(snapshots: readonly UsageSnapshot[]): SessionEvidenceMet
   for (const lineage of byLineage.values()) {
     const modes = new Set(lineage.map(({ mode }) => mode));
     if (modes.size !== 1) throw new TypeError('Usage lineage mixes cumulative and delta snapshots.');
+    const ordered = [...lineage].sort((left, right) => left.occurredAt.localeCompare(right.occurredAt) || left.id.localeCompare(right.id));
+    if (lineage[0]!.mode === 'cumulative') assertMonotonicCumulativeUsage(ordered);
     const values = lineage[0]!.mode === 'cumulative'
-      ? [[...lineage].sort((left, right) => left.occurredAt.localeCompare(right.occurredAt) || left.id.localeCompare(right.id)).at(-1)!]
+      ? [ordered.at(-1)!]
       : lineage;
     for (const field of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'analysisTokens'] as const) {
       const supplied = values.flatMap((value) => value[field] === undefined ? [] : [value[field]]);
@@ -310,4 +335,16 @@ function aggregateUsage(snapshots: readonly UsageSnapshot[]): SessionEvidenceMet
     ...(totals.analysisTokens === undefined ? {} : { analysisTokens: totals.analysisTokens }),
     source: 'source-provided'
   });
+}
+
+function assertMonotonicCumulativeUsage(values: readonly UsageSnapshot[]): void {
+  for (const field of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'analysisTokens'] as const) {
+    let previous: number | undefined;
+    for (const value of values) {
+      const current = value[field];
+      if (current === undefined) continue;
+      if (previous !== undefined && current < previous) throw new TypeError('Cumulative usage counters cannot decrease.');
+      previous = current;
+    }
+  }
 }

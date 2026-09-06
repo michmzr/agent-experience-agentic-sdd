@@ -1,0 +1,15 @@
+{
+  "synthetic": true,
+  "scenarios": [
+    { "label": "command-failure", "expectedOutcome": "command-failed" },
+    { "label": "process-success-task-failure", "expectedOutcome": "task-verification-failed" },
+    { "label": "missing-result", "expectedOutcome": "unknown" },
+    { "label": "explicit-human-wait", "expectedWaitingMs": 10000 },
+    { "label": "cumulative-usage", "expectedInputTokens": 150 }
+  ],
+  "variants": [
+    { "label": "changed-environment", "unsupportedClass": "environment-snapshot" },
+    { "label": "missing-data", "usageAvailable": false },
+    { "label": "secret-bearing", "rawOutput": "token=synthetic-must-not-persist" }
+  ]
+}

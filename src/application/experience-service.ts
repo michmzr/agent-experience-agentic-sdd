@@ -13,6 +13,10 @@ import type { ExperienceImport, KnowledgeEntry, KnowledgeState } from '../domain
 import { validateImport } from '../domain/validation.js';
 import { defaultDatabasePath } from '../storage/database.js';
 import { ExperienceStore, type KnowledgeScope, type RetrievalFilter, type RetrievedKnowledgeEntry } from '../storage/experience-store.js';
+import { projectCapturedSessionEvidence } from '../evidence/capture-projection.js';
+import { sourceEvidenceCapabilities } from '../evidence/capabilities.js';
+import { SessionEvidenceRepository } from '../evidence/repository.js';
+import type { SessionId } from '../domain/types.js';
 import {
   RuntimeService,
   type BuiltInRuntimeProfileId,
@@ -194,6 +198,24 @@ export class ExperienceService {
       } catch {
         // Reporting only exposes a bounded failure from the surrounding operation.
       }
+    }
+  }
+
+  sessionEvidence(sessionId: string) {
+    const store = this.openStore();
+    let captured;
+    try {
+      captured = store.loadCapturedSession(sessionId as SessionId);
+    } finally {
+      store.close();
+    }
+    if (captured === undefined) throw new DomainError('NOT_FOUND', 'Session evidence was not found.');
+    const repository = new SessionEvidenceRepository(this.databasePath);
+    try {
+      const stored = repository.save(projectCapturedSessionEvidence(captured));
+      return Object.freeze({ ...stored, capabilities: sourceEvidenceCapabilities[captured.session.source] });
+    } finally {
+      repository.close();
     }
   }
 

@@ -61,6 +61,27 @@ test('deduplicates equal evidence while rejecting conflicting transport identiti
   );
 });
 
+test('deduplicates equivalent transport records for one source event without double counting', () => {
+  const report = reconstructSessionEvidence({
+    ...base,
+    observations: [
+      { id: 'transport-b', sourceEventId: 'request-1', kind: 'request', occurredAt: '2026-09-06T08:00:01.000Z', tool: 'shell' },
+      { id: 'transport-a', sourceEventId: 'request-1', kind: 'request', occurredAt: '2026-09-06T08:00:01.000Z', tool: 'shell' }
+    ]
+  });
+  assert.equal(report.operations.length, 1);
+  assert.equal(report.operations[0]?.requestEvidenceId, 'transport-a');
+  assert.equal(report.coverage.duplicateObservations, 1);
+
+  assert.throws(() => reconstructSessionEvidence({
+    ...base,
+    observations: [
+      { id: 'transport-a', sourceEventId: 'request-1', kind: 'request', occurredAt: '2026-09-06T08:00:01.000Z', tool: 'shell' },
+      { id: 'transport-b', sourceEventId: 'request-1', kind: 'request', occurredAt: '2026-09-06T08:00:01.000Z', tool: 'git' }
+    ]
+  }), /conflicting duplicate source-event identity/i);
+});
+
 test('does not pair records by repeated timestamps or adjacency', () => {
   const occurredAt = '2026-09-06T08:00:01.000Z';
   const report = reconstructSessionEvidence({
@@ -124,4 +145,5 @@ test('keeps missing results unknown and rejects invalid temporal or identity ref
       occurredAt: '2026-09-06T08:00:00.000Z', relatedEventId: 'result', outcome: 'failed'
     }]
   }), /related|request/i);
+  assert.throws(() => reconstructSessionEvidence({ ...base, rawPrompt: 'must-not-be-retained' } as never), /unsupported session evidence field/i);
 });

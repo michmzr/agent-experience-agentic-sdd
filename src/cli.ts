@@ -35,7 +35,7 @@ interface ParsedArguments { readonly positionals: string[]; readonly options: Ma
 const scopes = new Set(['global', 'repo'] as const);
 const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired']);
 const reviewSources = new Set(['codex', 'claude-code', 'cursor'] as const);
-const knownCommands = new Set(['init', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill']);
+const knownCommands = new Set(['init', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence']);
 
 export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory'> = {}): CliResult {
   if (args.length === 1 && args[0] === '--help') return { exitCode: 0, stdout: `${usage()}\n`, stderr: '' };
@@ -189,6 +189,10 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   }
   if (command === 'stats' && subcommand === undefined && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.stats(repositoryId(parsed.options, options.workingDirectory));
+  }
+  if (command === 'evidence' && subcommand === 'session' && rest.length === 1) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json']);
+    return service.sessionEvidence(rest[0]);
   }
   if (command === 'status-global' && subcommand === undefined && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.statusGlobal(optionalRepositoryId(parsed.options)?.id);
@@ -390,6 +394,15 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
   if (command === 'lessons' || command === 'retrieve') return formatKnowledgeList(value as KnowledgeRecord[]);
   if (command === 'list' && subcommand === 'records') return formatRecords(value as Array<{ session: { id: string; source: string; startedAt: string; endedAt?: string }; events: Array<{ phase: string; occurredAt: string; summary: string; outcome?: string }> }>);
   if (command === 'stats') return formatStatistics(value as { sessions: number; events: number; knowledge: number; firstRecordedAt?: string; lastRecordedAt?: string; sources: Record<string, number>; phases: Record<string, number> });
+  if (command === 'evidence' && subcommand === 'session') {
+    const stored = value as { version: number; report: { sessionId: string; lifecycle: { state: string }; operations: readonly unknown[]; metrics: { tokenUsage?: unknown } } };
+    return [
+      `Session ${stored.report.sessionId} evidence version ${stored.version}.`,
+      `Lifecycle: ${stored.report.lifecycle.state}`,
+      `Operations: ${stored.report.operations.length}`,
+      `Token usage: ${stored.report.metrics.tokenUsage === undefined ? 'unavailable' : 'source-provided'}`
+    ].join('\n');
+  }
   if (command === 'status') return formatRepositoryStatus(value as { status: string; repository: { id: string; root?: string }; selectedSources: readonly string[]; cli: { entrypoint: string; available: boolean }; database: { path: string; available: boolean }; sources: readonly { source: string; status: string; code?: string }[] });
   if (command === 'status-global') {
     const status = value as { status: string; database: { path: string; available: boolean }; cli: { entrypoint: string; available: boolean }; repositories: Array<{ status: string; repository: { id: string; root?: string }; selectedSources: readonly string[]; sources: readonly { source: string; status: string; code?: string }[] }> };
@@ -496,7 +509,7 @@ function invalidCommand(command: string | undefined): SyntaxError {
     ? `Unknown command form for ${command}.`
     : 'Unknown command.');
 }
-function usage(): string { return 'Usage: ael <init [--workspace-id slug]|init --scope global|repo [--hooks codex,cursor]|list records|stats|status|status-global|experience add|experience inspect|validate|inspect|lessons list|retrieve|export|capture hook --source codex|cursor|hooks verify --worktree path|hooks diagnostics|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote|skill install|update|status|validate|uninstall> [options]'; }
+function usage(): string { return 'Usage: ael <init [--workspace-id slug]|init --scope global|repo [--hooks codex,cursor]|list records|stats|status|status-global|experience add|experience inspect|validate|inspect|lessons list|retrieve|export|evidence session <id>|capture hook --source codex|cursor|hooks verify --worktree path|hooks diagnostics|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote|skill install|update|status|validate|uninstall> [options]'; }
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } {
   return error instanceof DomainError || error instanceof RuntimeServiceError
     ? { code: error.code, message: error.message }

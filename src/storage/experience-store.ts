@@ -384,6 +384,18 @@ export class ExperienceStore {
     return row === undefined ? undefined : sessionFromRow(row);
   }
 
+  loadCapturedSession(id: SessionId): RepositoryRecord | undefined {
+    const session = this.loadSession(id);
+    if (session === undefined) return undefined;
+    const rows = this.database.prepare(`
+      SELECT ce.rowid AS sequence, ce.event_id, ce.source, ce.source_event_id, ce.phase, ce.signature_json, ce.summary,
+        ce.capture_outcome, ce.related_event_id, e.session_id, e.occurred_at, e.exit_status
+      FROM capture_events ce JOIN events e ON e.id = ce.event_id
+      WHERE e.session_id = ? ORDER BY e.occurred_at, ce.rowid
+    `).all(id) as unknown as CaptureRow[];
+    return Object.freeze({ session, events: Object.freeze(rows.map(captureFromRow)) });
+  }
+
   endSession(source: Session['source'], id: SessionId, endedAt: string): IncrementalAppendResult {
     assertCanonicalTimestamp(endedAt);
     this.database.exec('BEGIN IMMEDIATE');
