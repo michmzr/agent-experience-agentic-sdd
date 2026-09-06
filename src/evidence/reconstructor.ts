@@ -206,11 +206,16 @@ function validateObservation(value: EvidenceObservation): void {
   if (!['request', 'result', 'task-verification', 'human-wait'].includes(value.kind)) throw new TypeError('Evidence observation kind is invalid.');
   const occurredAt = canonicalTimestamp(value.occurredAt, 'Evidence timestamp');
   if (value.relatedEventId !== undefined) assertIdentifier(value.relatedEventId, 'Related request identity');
+  if (value.tool !== undefined) assertIdentifier(value.tool, 'Evidence tool');
   if (value.relatedEventId === value.sourceEventId) throw new TypeError('Related request identity cannot reference the evidence itself.');
   if ((value.kind === 'result' || value.kind === 'task-verification') && value.relatedEventId === undefined) throw new TypeError('Result evidence requires a related request identity.');
   if (value.kind === 'request' && value.relatedEventId !== undefined) throw new TypeError('Request evidence cannot relate to another request.');
   if (value.outcome !== undefined && !['succeeded', 'failed', 'unknown'].includes(value.outcome)) throw new TypeError('Evidence outcome is invalid.');
   if (value.exitStatus !== undefined && (!Number.isSafeInteger(value.exitStatus) || value.kind !== 'result')) throw new TypeError('Evidence exit status is invalid.');
+  if (value.kind === 'result' && value.exitStatus !== undefined && value.outcome !== undefined && value.outcome !== 'unknown') {
+    const exitOutcome = value.exitStatus === 0 ? 'succeeded' : 'failed';
+    if (value.outcome !== exitOutcome) throw new TypeError('Evidence exit status conflicts with its outcome.');
+  }
   if (value.endedAt !== undefined) {
     const endedAt = canonicalTimestamp(value.endedAt, 'Evidence end timestamp');
     if (value.kind !== 'human-wait' || endedAt < occurredAt) throw new TypeError('Observed waiting interval is invalid.');

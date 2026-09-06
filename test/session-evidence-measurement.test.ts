@@ -123,4 +123,10 @@ test('rejects malformed usage and unrestricted secret-bearing fields without ech
       occurredAt: '2026-09-06T08:00:01.000Z', rawOutput: credential
     } as never]
   })), (error: unknown) => error instanceof Error && /unsupported evidence observation field/i.test(error.message) && !error.message.includes(credential));
+  assert.throws(() => reconstructSessionEvidence(input({
+    observations: [{
+      id: 'result', sourceEventId: 'result', kind: 'result', occurredAt: '2026-09-06T08:00:02.000Z',
+      relatedEventId: 'request', outcome: 'succeeded', exitStatus: 1
+    }]
+  })), /exit status.*outcome/i);
 });
