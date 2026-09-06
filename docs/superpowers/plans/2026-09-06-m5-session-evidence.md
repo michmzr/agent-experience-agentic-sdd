@@ -1,6 +1,6 @@
 # M5 session evidence implementation plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Reconstruct privacy-safe session operations, lifecycle state, coverage, time and token measurements from explicitly supplied structured evidence, and preserve versioned reports.
 
@@ -17,17 +17,17 @@
 - Create: `src/evidence/reconstructor.ts`
 - Test: `test/session-evidence-reconstruction.test.ts`
 
-- [ ] **Step 1: Write failing correlation and lifecycle tests**
+- [x] **Step 1: Write failing correlation and lifecycle tests**
 
 Define fixtures containing reordered results, duplicate identities, unmatched results, repeated timestamps, source-end-before-drain and missing source-end cases. Assert exact-ID pairing, stable operation IDs, explicit unmatched records and the four lifecycle states.
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `pnpm build && node --test dist/test/session-evidence-reconstruction.test.js`
 
 Expected: compilation fails because `reconstructSessionEvidence` does not exist.
 
-- [ ] **Step 3: Implement the minimal public contract and reconstructor**
+- [x] **Step 3: Implement the minimal public contract and reconstructor**
 
 Expose `SessionEvidenceInput`, `SessionEvidenceReport`, `SessionOperation`, `SessionLifecycleState`, and:
 
@@ -37,7 +37,7 @@ export function reconstructSessionEvidence(input: SessionEvidenceInput): Session
 
 Validate identifiers, canonical timestamps, bounded arrays and source consistency. De-duplicate equal evidence identities, reject conflicting duplicates, correlate only through `relatedEventId`, and derive lifecycle solely from `sourceEndedAt`, `reconciliationAttempted`, `expectedThrough` and `committedThrough`.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run: `pnpm build && node --test dist/test/session-evidence-reconstruction.test.js`
 
@@ -51,21 +51,21 @@ Expected: all reconstruction tests pass.
 - Create: `src/evidence/capabilities.ts`
 - Test: `test/session-evidence-measurement.test.ts`
 
-- [ ] **Step 1: Write failing outcome, waiting, usage and privacy tests**
+- [x] **Step 1: Write failing outcome, waiting, usage and privacy tests**
 
 Cover command failure, successful process followed by failed task verification, unknown result, explicit human waiting, cumulative usage, delta usage, parent/subagent overlap, cached-input subsets, unavailable usage, unsupported classes, truncation and secret-bearing rejected fields.
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `pnpm build && node --test dist/test/session-evidence-measurement.test.js`
 
 Expected: assertions fail for missing measurement behavior.
 
-- [ ] **Step 3: Implement bounded deterministic measurements**
+- [x] **Step 3: Implement bounded deterministic measurements**
 
 Publish source capability rows and derive elapsed, unioned active-operation duration, explicitly observed waiting, transport overhead/lag distributions and source-provided token totals. Treat cache tokens as an input subset, exclude child totals when a parent aggregate exists, and keep absent values undefined.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run: `pnpm build && node --test dist/test/session-evidence-measurement.test.js`
 
@@ -77,21 +77,21 @@ Expected: all measurement tests pass.
 - Create: `src/evidence/repository.ts`
 - Test: `test/session-evidence-repository.test.ts`
 
-- [ ] **Step 1: Write failing persistence and idempotency tests**
+- [x] **Step 1: Write failing persistence and idempotency tests**
 
 Assert that the same normalized input returns the same version, a late correction appends a new version, earlier JSON remains byte-identical, and references survive reopening the database.
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `pnpm build && node --test dist/test/session-evidence-repository.test.js`
 
 Expected: compilation fails because `SessionEvidenceRepository` does not exist.
 
-- [ ] **Step 3: Implement the versioned repository**
+- [x] **Step 3: Implement the versioned repository**
 
 Use a private SQLite table keyed by session and version, a unique `(session_id, input_digest)` constraint, canonical JSON, parameterized statements and immutable inserts. Expose `save`, `latest` and `history`.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run: `pnpm build && node --test dist/test/session-evidence-repository.test.js`
 
@@ -109,21 +109,21 @@ Expected: all repository tests pass.
 - Modify: `docs/product/roadmap.md`
 - Modify: `tasks/todo.md`
 
-- [ ] **Step 1: Write failing projection and CLI acceptance tests**
+- [x] **Step 1: Write failing projection and CLI acceptance tests**
 
 Assert `ael evidence session <id> --json` reports correlated stored operations without importing artifacts, exposes source capabilities and unavailable fields, and preserves existing raw-event counters. Run the five labeled synthetic scenarios plus changed-environment, missing-data and secret-bearing variants.
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `pnpm build && node --test dist/test/milestone-5-acceptance.test.js`
 
 Expected: CLI command and projection are unavailable.
 
-- [ ] **Step 3: Implement projection and read-only CLI reporting**
+- [x] **Step 3: Implement projection and read-only CLI reporting**
 
 Add a session-scoped capture read method, map pre-action/post-result records without retaining summaries or arguments, construct the report, save a derived version, and render JSON or a compact text report. Do not scan default artifact locations.
 
-- [ ] **Step 4: Verify focused and full gates**
+- [x] **Step 4: Verify focused and full gates**
 
 Run:
 
@@ -136,6 +136,6 @@ git diff --check
 
 Expected: every command exits 0 with zero failed and zero skipped tests.
 
-- [ ] **Step 5: Record measured evidence only after verification**
+- [x] **Step 5: Record measured evidence only after verification**
 
 Write the observed counts and representative local fixture inspection to the verification document, then update milestone status only if every acceptance criterion has direct evidence. Do not claim M4 transport guarantees as part of M5.
