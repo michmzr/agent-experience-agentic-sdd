@@ -146,4 +146,9 @@ test('keeps missing results unknown and rejects invalid temporal or identity ref
     }]
   }), /related|request/i);
   assert.throws(() => reconstructSessionEvidence({ ...base, rawPrompt: 'must-not-be-retained' } as never), /unsupported session evidence field/i);
+  assert.throws(() => reconstructSessionEvidence({
+    ...base,
+    observations: [{ id: 'early', sourceEventId: 'early', kind: 'request', occurredAt: '2026-09-06T07:59:59.999Z' }]
+  }), /session start/i);
+  assert.throws(() => reconstructSessionEvidence({ ...base, coverage: { supportedClasses: 'request' as never } }), /coverage.*array/i);
 });

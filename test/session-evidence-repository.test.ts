@@ -3,6 +3,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 
 import type { SessionEvidenceInput } from '../src/evidence/contracts.js';
 import { SessionEvidenceRepository } from '../src/evidence/repository.js';
@@ -65,4 +66,18 @@ test('keeps sessions isolated and returns empty history for an unknown identity'
   assert.equal(repository.history('missing').length, 0);
   assert.equal(repository.latest('missing'), undefined);
   repository.close();
+});
+
+test('rejects a corrupted stored report instead of returning unverified history', () => {
+  const path = databasePath();
+  const repository = new SessionEvidenceRepository(path, () => '2026-09-06T09:00:00.000Z');
+  repository.save(input);
+  repository.close();
+  const database = new DatabaseSync(path);
+  database.prepare('UPDATE session_evidence_reconstructions SET report_json = ? WHERE session_id = ?').run('{"altered":true}', input.sessionId);
+  database.close();
+
+  const reopened = new SessionEvidenceRepository(path);
+  assert.throws(() => reopened.latest(input.sessionId), /integrity|digest/i);
+  reopened.close();
 });

@@ -24,6 +24,7 @@ interface ReconstructionRow {
   session_id: string;
   version: number;
   input_digest: string;
+  schema_version: number;
   created_at: string;
   report_json: string;
 }
@@ -81,7 +82,7 @@ export class SessionEvidenceRepository {
   latest(sessionId: string): StoredSessionEvidence | undefined {
     assertIdentifier(sessionId);
     const row = this.database.prepare(`
-      SELECT session_id, version, input_digest, created_at, report_json
+      SELECT session_id, version, input_digest, schema_version, created_at, report_json
       FROM session_evidence_reconstructions WHERE session_id = ? ORDER BY version DESC LIMIT 1
     `).get(sessionId) as unknown as ReconstructionRow | undefined;
     return row === undefined ? undefined : storedFromRow(row);
@@ -90,7 +91,7 @@ export class SessionEvidenceRepository {
   history(sessionId: string): readonly StoredSessionEvidence[] {
     assertIdentifier(sessionId);
     const rows = this.database.prepare(`
-      SELECT session_id, version, input_digest, created_at, report_json
+      SELECT session_id, version, input_digest, schema_version, created_at, report_json
       FROM session_evidence_reconstructions WHERE session_id = ? ORDER BY version
     `).all(sessionId) as unknown as ReconstructionRow[];
     return Object.freeze(rows.map(storedFromRow));
@@ -98,13 +99,16 @@ export class SessionEvidenceRepository {
 
   private rowByDigest(sessionId: string, inputDigest: string): ReconstructionRow | undefined {
     return this.database.prepare(`
-      SELECT session_id, version, input_digest, created_at, report_json
+      SELECT session_id, version, input_digest, schema_version, created_at, report_json
       FROM session_evidence_reconstructions WHERE session_id = ? AND input_digest = ?
     `).get(sessionId, inputDigest) as unknown as ReconstructionRow | undefined;
   }
 }
 
 function storedFromRow(row: ReconstructionRow): StoredSessionEvidence {
+  if (row.schema_version !== 1 || createHash('sha256').update(row.report_json).digest('hex') !== row.input_digest) {
+    throw new Error('Session evidence history integrity check failed.');
+  }
   const report = JSON.parse(row.report_json) as SessionEvidenceReport;
   return deepFreeze({
     sessionId: row.session_id,

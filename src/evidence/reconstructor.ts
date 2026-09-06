@@ -24,11 +24,20 @@ const coverageKeys = new Set(['supportedClasses', 'skippedClasses', 'unsupported
 export function reconstructSessionEvidence(input: SessionEvidenceInput): SessionEvidenceReport {
   validateInput(input);
   const { observations, duplicateCount } = uniqueObservations(input.observations);
+  validateObservationBounds(input, observations);
   const requests = observations.filter((item) => item.kind === 'request').sort(compareObservation);
   const results = observations.filter((item) => item.kind === 'result').sort(compareObservation);
   const verifications = observations.filter((item) => item.kind === 'task-verification').sort(compareObservation);
+  const resultsByRequest = groupByRelatedRequest(results);
+  const verificationsByRequest = groupByRelatedRequest(verifications);
   const usedEvidence = new Set<string>();
-  const operations = requests.map((request) => operationFrom(request, results, verifications, usedEvidence, input));
+  const operations = requests.map((request) => operationFrom(
+    request,
+    resultsByRequest.get(request.sourceEventId) ?? [],
+    verificationsByRequest.get(request.sourceEventId) ?? [],
+    usedEvidence,
+    input
+  ));
   const unmatchedEvidenceIds = observations
     .filter((item) => (item.kind === 'result' || item.kind === 'task-verification') && !usedEvidence.has(item.id))
     .map(({ id }) => id)
@@ -71,9 +80,9 @@ function operationFrom(
   usedEvidence: Set<string>,
   input: SessionEvidenceInput
 ): SessionOperation {
-  const result = results.find((candidate) => candidate.relatedEventId === request.sourceEventId && !usedEvidence.has(candidate.id));
+  const result = results.find((candidate) => !usedEvidence.has(candidate.id));
   if (result !== undefined) usedEvidence.add(result.id);
-  const relatedVerifications = verifications.filter((candidate) => candidate.relatedEventId === request.sourceEventId);
+  const relatedVerifications = verifications;
   for (const verification of relatedVerifications) usedEvidence.add(verification.id);
   const processOutcome: SessionOperation['processOutcome'] = result === undefined || result.outcome === undefined || result.outcome === 'unknown'
     ? 'unknown'
@@ -194,6 +203,19 @@ function validateInput(input: SessionEvidenceInput): void {
   if (input.coverage !== undefined) {
     assertAllowedObject(input.coverage, coverageKeys, 'coverage evidence');
     if (input.coverage.synthetic !== undefined && typeof input.coverage.synthetic !== 'boolean') throw new TypeError('Coverage synthetic label is invalid.');
+    for (const values of [input.coverage.supportedClasses, input.coverage.skippedClasses, input.coverage.unsupportedClasses]) {
+      if (values !== undefined && (!Array.isArray(values) || values.length > 256)) throw new TypeError('Coverage class list must be a bounded array.');
+    }
+  }
+}
+
+function validateObservationBounds(input: SessionEvidenceInput, observations: readonly EvidenceObservation[]): void {
+  const startedAt = Date.parse(input.startedAt);
+  const sourceEndedAt = input.sourceEndedAt === undefined ? undefined : Date.parse(input.sourceEndedAt);
+  for (const observation of observations) {
+    if (Date.parse(observation.occurredAt) < startedAt) throw new TypeError('Evidence timestamp cannot precede session start.');
+    const effectiveEnd = observation.endedAt ?? observation.occurredAt;
+    if (sourceEndedAt !== undefined && Date.parse(effectiveEnd) > sourceEndedAt) throw new TypeError('Evidence timestamp cannot follow source end.');
   }
 }
 
@@ -282,6 +304,17 @@ function operationId(source: string, sessionId: string, requestId: string): stri
 
 function compareObservation(left: EvidenceObservation, right: EvidenceObservation): number {
   return left.occurredAt.localeCompare(right.occurredAt) || left.sourceEventId.localeCompare(right.sourceEventId) || left.id.localeCompare(right.id);
+}
+
+function groupByRelatedRequest(values: readonly EvidenceObservation[]): Map<string, EvidenceObservation[]> {
+  const grouped = new Map<string, EvidenceObservation[]>();
+  for (const value of values) {
+    const relatedEventId = value.relatedEventId!;
+    const entries = grouped.get(relatedEventId) ?? [];
+    entries.push(value);
+    grouped.set(relatedEventId, entries);
+  }
+  return grouped;
 }
 
 function sortedUnique(values: readonly string[]): string[] {
