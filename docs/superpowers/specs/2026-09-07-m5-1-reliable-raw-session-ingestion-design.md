@@ -61,14 +61,14 @@ A well-formed `token_usage_record` increments `skippedTechnicalRecords`. It prod
 
 Well-formed but unknown envelope types are skipped, counted in `unsupportedRecords` and reported through a structured warning log. They do not abort review. Malformed records still abort review with a bounded generic diagnostic.
 
-Unknown-record logs are aggregated deterministically by envelope or response-item type after ingestion. A log entry contains the code `UNSUPPORTED_CODEX_RECORD`, the classification level, a validated bounded type and the occurrence count. Text-mode execution writes the warning to stderr. JSON-mode execution exposes the same warning as structured diagnostics and keeps stdout valid JSON. A programmatic review caller receives the diagnostics in the result contract.
+Every unknown record emits one structured warning when the adapter encounters it. A log entry contains the code `UNSUPPORTED_CODEX_RECORD`, the classification level, a validated bounded type and the zero-based source ordinal. Text and JSON command modes write these warnings to stderr, while JSON stdout remains one valid result document. A programmatic review caller can supply a diagnostic sink that receives the same warning during ingestion.
 
 ```json
 {
   "code": "UNSUPPORTED_CODEX_RECORD",
   "level": "envelope",
   "recordType": "new_record_type",
-  "count": 3
+  "sourceOrdinal": 217
 }
 ```
 
@@ -126,9 +126,11 @@ Text truncation and structured-output omission are properties of normalized reco
 
 ### Unknown-record diagnostics
 
-Add an immutable `SessionIngestionDiagnostic` collection beside `SessionIngestionCoverage`. The adapter aggregates unknown records by classification level and type, sorts diagnostics by level and type and returns one diagnostic per group. The CLI renders every returned group, so each unknown record is represented by its group's count without producing an unbounded line per occurrence.
+Add an immutable `SessionIngestionDiagnostic` value and a `SessionIngestionDiagnosticSink` callback. The adapter invokes the sink exactly once for every unknown envelope or response-item subtype, in source order. The CLI supplies a sink that writes one bounded line to stderr. Programmatic callers may supply their own sink; omission selects a no-op sink. Diagnostics are not accumulated in `NormalizedSession` or `ManualReviewResult`.
 
-An exposed type must match `[A-Za-z0-9_.:/-]{1,128}`. A well-formed record with a type outside that display-safe grammar is logged as `unprintable` and counted without copying the value. No diagnostic contains payload fields, timestamps, session identifiers, artifact paths or reviewer-visible text.
+An exposed type must match `[A-Za-z0-9_.:/-]{1,128}`. A well-formed record with a type outside that display-safe grammar is logged as `unprintable` and counted without copying the value. `sourceOrdinal` identifies the record's position without exposing its byte offset or contents. No diagnostic contains payload fields, timestamps, session identifiers, artifact paths or reviewer-visible text.
+
+Diagnostic writes honor stream backpressure before ingestion continues. There is no grouping, sampling or suppression. The 64 MiB artifact limit remains the outer bound on how many warnings one selected artifact can generate, while every individual warning has a fixed schema and bounded fields.
 
 ## Error handling
 
@@ -148,7 +150,7 @@ All CLI failures retain the generic `REVIEW_ERROR` boundary. Error messages, dia
 
 Streaming projection is an ingestion boundary, not permission to retain more source data. The implementation must not create a normalized copy beside the source artifact or in a temporary directory. Omitted bytes are consumed and discarded.
 
-Logging an unknown record means logging its safe classification and aggregate count, not its serialized representation. Tests must treat unknown-record payloads as secret-bearing input and prove that unique markers do not reach stdout, stderr, structured results or persisted data.
+Logging an unknown record means logging its safe classification and source ordinal, not its serialized representation. Tests must treat unknown-record payloads as secret-bearing input and prove that unique markers do not reach stdout, stderr, structured results or persisted data.
 
 Token snapshots are not reviewer evidence. Structured tool output is retained only when it is already a bounded string accepted by the existing contract. Arrays and objects are omitted in full, even when individual leaves contain strings. This prevents accidental flattening of credentials, environment data or large command results.
 
@@ -177,12 +179,12 @@ Using M5 stored-evidence reconstruction was rejected as a substitute because it 
 - M5.1-A3: a generated Codex observed fixture containing a `custom_tool_call_output` line of at least 6,953,534 bytes completes review under the 64 MiB artifact limit, creates a tool event without output text and reports one omitted structured output.
 - M5.1-A4: buffered and streaming paths produce identical normalized events for the same supported record represented below the 4 MiB threshold.
 - M5.1-A5: malformed oversized JSON, invalid UTF-8, excessive nesting and malformed supported envelopes fail without leaking a unique marker from the source.
-- M5.1-A6: unknown well-formed envelopes and response-item subtypes are counted and omitted while later supported records remain reviewable. Text mode logs every aggregate group to stderr; JSON mode and programmatic results expose the equivalent structured diagnostics.
+- M5.1-A6: unknown well-formed envelopes and response-item subtypes are counted and omitted while later supported records remain reviewable. Text and JSON modes write exactly one warning per occurrence to stderr; a supplied programmatic sink receives the equivalent sequence.
 - M5.1-A7: the coverage partition invariant holds for buffered, streaming, skipped and unsupported records; counter overflow fails closed.
 - M5.1-A8: existing Codex, Cursor, Claude Code, sanitizer, resource-limit and reviewer tests retain their previous normalized evidence and findings.
 - M5.1-A9: no test or runtime path writes a transformed session artifact, and a scan of generated diagnostics contains no prompt, argument, output, token payload or absolute source path.
 - M5.1-A10: `pnpm check` passes with zero failed and zero skipped tests. A manual verification record identifies the source session by ID only and records no transcript content.
-- M5.1-A11: repeated unknown records produce deterministic grouped logs with exact counts; unsafe type strings are represented as `unprintable`, and a unique payload marker is absent from all output channels.
+- M5.1-A11: repeated unknown records produce separate deterministic logs with their exact ordinals in source order and no grouping, sampling or suppression; unsafe type strings are represented as `unprintable`, and a unique payload marker is absent from all output channels.
 
 ## Delivery boundary
 
