@@ -35,7 +35,7 @@ interface ParsedArguments { readonly positionals: string[]; readonly options: Ma
 const scopes = new Set(['global', 'repo'] as const);
 const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired']);
 const reviewSources = new Set(['codex', 'claude-code', 'cursor'] as const);
-const knownCommands = new Set(['init', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence']);
+const knownCommands = new Set(['init', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence', 'capture']);
 
 export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory'> = {}): CliResult {
   if (args.length === 1 && args[0] === '--help') return { exitCode: 0, stdout: `${usage()}\n`, stderr: '' };
@@ -158,6 +158,12 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   }
   if (command === 'experience' && subcommand === 'add' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'input']); return service.add(requiredString(parsed.options, 'input'));
+  }
+  if (command === 'capture' && subcommand === 'drain' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json']); return service.captureDrain();
+  }
+  if (command === 'capture' && subcommand === 'status' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json']); return service.captureStatus();
   }
   if (command === 'experience' && subcommand === 'inspect' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository']);
@@ -509,7 +515,7 @@ function invalidCommand(command: string | undefined): SyntaxError {
     ? `Unknown command form for ${command}.`
     : 'Unknown command.');
 }
-function usage(): string { return 'Usage: ael <init [--workspace-id slug]|init --scope global|repo [--hooks codex,cursor]|list records|stats|status|status-global|experience add|experience inspect|validate|inspect|lessons list|retrieve|export|evidence session <id>|capture hook --source codex|cursor|hooks verify --worktree path|hooks diagnostics|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote|skill install|update|status|validate|uninstall> [options]'; }
+function usage(): string { return 'Usage: ael <init [--workspace-id slug]|init --scope global|repo [--hooks codex,cursor]|list records|stats|status|status-global|experience add|experience inspect|validate|inspect|lessons list|retrieve|export|evidence session <id>|capture hook --source codex|cursor|capture drain|capture status|hooks verify --worktree path|hooks diagnostics|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote|skill install|update|status|validate|uninstall> [options]'; }
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } {
   return error instanceof DomainError || error instanceof RuntimeServiceError
     ? { code: error.code, message: error.message }
