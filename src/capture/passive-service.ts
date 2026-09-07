@@ -33,7 +33,7 @@ export function createPassiveCaptureService(options: PassiveCaptureServiceOption
   return Object.freeze({
     capture(record: PassiveCaptureRecord): PassiveCaptureResult {
       try {
-        const result = persist(options.store, record);
+        const result = persistPassiveCapture(options.store, record);
         return Object.freeze({ status: result.inserted ? 'captured' : 'duplicate' });
       } catch {
         return degraded(record.kind);
@@ -42,7 +42,7 @@ export function createPassiveCaptureService(options: PassiveCaptureServiceOption
   });
 }
 
-function persist(store: PassiveCaptureStore, record: PassiveCaptureRecord): IncrementalAppendResult {
+export function persistPassiveCapture(store: PassiveCaptureStore, record: PassiveCaptureRecord): IncrementalAppendResult {
   switch (record.kind) {
     case 'session-start':
       return store.appendIncremental({ session: record.session });

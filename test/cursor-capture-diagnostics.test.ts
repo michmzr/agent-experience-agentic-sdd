@@ -8,6 +8,7 @@ import test from 'node:test';
 import { runCliAsync } from '../src/cli.js';
 import { resolveDiagnosticScope } from '../src/capture/diagnostic-scope.js';
 import { ingestPassiveHook } from '../src/capture/hook-ingress.js';
+import { CaptureSpool } from '../src/capture/spool.js';
 import { CaptureDiagnosticStore } from '../src/storage/capture-diagnostic-store.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 
@@ -47,7 +48,7 @@ test('counts rejected Cursor delivery in its non-Git workspace scope', async () 
   }
 });
 
-test('counts one persistence failure when the primary experience database cannot be opened', () => {
+test('durably admits capture before the primary experience database can be opened', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'ael-cursor-open-failure-workspace-'));
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-cursor-open-failure-data-'));
   const databasePath = join(dataDir, 'experience.sqlite');
@@ -58,22 +59,24 @@ test('counts one persistence failure when the primary experience database cannot
       input: JSON.stringify({ conversation_id: 'open-failure-session', hook_event_name: 'sessionStart' }),
       databasePath,
       workingDirectory: workspace,
-      now
+      now,
+      scheduleDrain: () => undefined
     });
 
-    assert.deepEqual(result, { status: 'degraded', code: 'PERSISTENCE_FAILED' });
+    assert.deepEqual(result, { status: 'captured' });
     const scope = resolveDiagnosticScope(workspace);
     const diagnostics = new CaptureDiagnosticStore(join(dataDir, 'capture-diagnostics.sqlite'));
     try {
-      assert.equal(diagnostics.counts({ source: 'cursor', scope })['persistence-failure'], 1);
+      assert.equal(diagnostics.counts({ source: 'cursor', scope })['persistence-failure'], 0);
     } finally { diagnostics.close(); }
+    assertPending(dataDir);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
 
-test('counts one persistence failure when opening the primary experience database is busy', () => {
+test('durably admits capture while the primary experience database is busy', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'ael-cursor-busy-workspace-'));
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-cursor-busy-data-'));
   const databasePath = join(dataDir, 'experience.sqlite');
@@ -87,15 +90,17 @@ test('counts one persistence failure when opening the primary experience databas
       input: JSON.stringify({ conversation_id: 'busy-session', hook_event_name: 'sessionStart' }),
       databasePath,
       workingDirectory: workspace,
-      now
+      now,
+      scheduleDrain: () => undefined
     });
 
-    assert.deepEqual(result, { status: 'degraded', code: 'PERSISTENCE_FAILED' });
+    assert.deepEqual(result, { status: 'captured' });
     const scope = resolveDiagnosticScope(workspace);
     const diagnostics = new CaptureDiagnosticStore(join(dataDir, 'capture-diagnostics.sqlite'));
     try {
-      assert.equal(diagnostics.counts({ source: 'cursor', scope })['persistence-failure'], 1);
+      assert.equal(diagnostics.counts({ source: 'cursor', scope })['persistence-failure'], 0);
     } finally { diagnostics.close(); }
+    assertPending(dataDir);
   } finally {
     blocker.exec('ROLLBACK');
     blocker.close();
@@ -104,7 +109,7 @@ test('counts one persistence failure when opening the primary experience databas
   }
 });
 
-test('counts one persistence failure when the primary migration schema is malformed', () => {
+test('durably admits capture before a malformed primary migration is repaired', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'ael-cursor-migration-failure-workspace-'));
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-cursor-migration-failure-data-'));
   const databasePath = join(dataDir, 'experience.sqlite');
@@ -117,22 +122,24 @@ test('counts one persistence failure when the primary migration schema is malfor
       input: JSON.stringify({ conversation_id: 'migration-failure-session', hook_event_name: 'sessionStart' }),
       databasePath,
       workingDirectory: workspace,
-      now
+      now,
+      scheduleDrain: () => undefined
     });
 
-    assert.deepEqual(result, { status: 'degraded', code: 'PERSISTENCE_FAILED' });
+    assert.deepEqual(result, { status: 'captured' });
     const scope = resolveDiagnosticScope(workspace);
     const diagnostics = new CaptureDiagnosticStore(join(dataDir, 'capture-diagnostics.sqlite'));
     try {
-      assert.equal(diagnostics.counts({ source: 'cursor', scope })['persistence-failure'], 1);
+      assert.equal(diagnostics.counts({ source: 'cursor', scope })['persistence-failure'], 0);
     } finally { diagnostics.close(); }
+    assertPending(dataDir);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
 
-test('keeps a primary open failure fail-open when the diagnostic store also fails', () => {
+test('does not consult rejection diagnostics after durable admission', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'ael-cursor-double-failure-workspace-'));
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-cursor-double-failure-data-'));
   const databasePath = join(dataDir, 'experience.sqlite');
@@ -145,16 +152,27 @@ test('keeps a primary open failure fail-open when the diagnostic store also fail
       databasePath,
       workingDirectory: workspace,
       now,
+      scheduleDrain: () => undefined,
       diagnosticStoreFactory: () => {
         attempts += 1;
         throw new Error('diagnostic store unavailable');
       }
     });
 
-    assert.deepEqual(result, { status: 'degraded', code: 'PERSISTENCE_FAILED' });
-    assert.equal(attempts, 1);
+    assert.deepEqual(result, { status: 'captured' });
+    assert.equal(attempts, 0);
+    assertPending(dataDir);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+function assertPending(dataDir: string): void {
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  try {
+    assert.equal(spool.status().pending, 1);
+  } finally {
+    spool.close();
+  }
+}

@@ -4,14 +4,15 @@ import { TechnicalSignatureRejection } from './hook-adapters/technical-signature
 import { type DiagnosticScope, resolveDiagnosticScope } from './diagnostic-scope.js';
 import type { CursorCaptureDiagnosticCategory } from './hook-diagnostics.js';
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import type { SessionId } from '../domain/types.js';
-import { createPassiveCaptureService, type PassiveCaptureRecord } from './passive-service.js';
+import type { PassiveCaptureRecord } from './passive-service.js';
 import { CaptureDiagnosticStore } from '../storage/capture-diagnostic-store.js';
-import { ExperienceStore, ExperienceStoreInitializationError } from '../storage/experience-store.js';
 import { resolveRepository } from '../repository/local-repository.js';
 import { dirname, join } from 'node:path';
+import { CaptureSpool, CaptureSpoolCapacityError } from './spool.js';
 
-const HOOK_DATABASE_TIMEOUT_MS = 250;
 
 export interface HookIngressOptions {
   readonly source: PassiveHookSource;
@@ -20,6 +21,7 @@ export interface HookIngressOptions {
   readonly now: () => string;
   readonly workingDirectory?: string;
   readonly diagnosticStoreFactory?: (databasePath: string) => CaptureDiagnosticStore;
+  readonly scheduleDrain?: (dataDirectory: string) => void;
 }
 
 export type HookIngressResult =
@@ -28,7 +30,7 @@ export type HookIngressResult =
 
 export function ingestPassiveHook(options: HookIngressOptions): HookIngressResult {
   let scope: DiagnosticScope | undefined;
-  let store: ExperienceStore | undefined;
+  let spool: CaptureSpool | undefined;
   try {
     if (!isPassiveHookSource(options.source)) return degraded('INVALID_INPUT');
     if (typeof options.input !== 'string' || Buffer.byteLength(options.input, 'utf8') > MAX_HOOK_INPUT_BYTES) {
@@ -52,24 +54,20 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
       : adaptPassiveHook(options.source, payload, options.now(), repository?.id as never);
     if (record === undefined) return { status: 'ignored' };
 
-    store = new ExperienceStore(options.databasePath, { timeoutMs: HOOK_DATABASE_TIMEOUT_MS });
-    const service = createPassiveCaptureService({ store });
-    const result = service.capture(record);
-    if (repository !== undefined && result.status !== 'degraded') {
-      store.registerRepository({ id: repository.id, root: repository.root, observedAt: options.now() });
+    spool = new CaptureSpool(join(dirname(options.databasePath), 'capture-spool.sqlite'));
+    const result = spool.admit(record, options.now());
+    if (result.status === 'admitted') {
+      try { (options.scheduleDrain ?? startDrain)(dirname(options.databasePath)); }
+      catch { /* Durable admission does not depend on best-effort worker startup. */ }
     }
-    if (result.status === 'degraded') {
-      if (scope !== undefined) incrementDiagnostic(options, scope, 'persistence-failure');
-      return degraded('PERSISTENCE_FAILED');
-    }
-    return result;
+    return { status: result.status === 'admitted' ? 'captured' : 'duplicate' };
   } catch (error) {
     const code = inputErrorCode(error);
     if (code === 'PERSISTENCE_FAILED' && scope !== undefined) incrementDiagnostic(options, scope, 'persistence-failure');
     return degraded(code);
   } finally {
     try {
-      store?.close();
+      spool?.close();
     } catch {
       // Hook delivery is fail-open, including cleanup failures.
     }
@@ -134,7 +132,7 @@ function isPassiveHookSource(value: unknown): value is PassiveHookSource {
 }
 
 function inputErrorCode(error: unknown): 'INVALID_INPUT' | 'PRIVATE_INPUT' | 'PERSISTENCE_FAILED' {
-  if (error instanceof ExperienceStoreInitializationError) return 'PERSISTENCE_FAILED';
+  if (error instanceof CaptureSpoolCapacityError) return 'PERSISTENCE_FAILED';
   if (error instanceof HookIngressDiagnosticError) return error.code;
   if (error instanceof TechnicalSignatureRejection) return error.code === 'PRIVATE_INPUT' ? 'PRIVATE_INPUT' : 'INVALID_INPUT';
   if (error instanceof Error && /private|credential/i.test(error.message)) return 'PRIVATE_INPUT';
@@ -152,4 +150,13 @@ class HookIngressDiagnosticError extends Error {
 
 function degraded(code: 'INVALID_INPUT' | 'PRIVATE_INPUT' | 'PERSISTENCE_FAILED'): HookIngressResult {
   return { status: 'degraded', code };
+}
+
+function startDrain(dataDirectory: string): void {
+  try {
+    const entrypoint = join(dirname(fileURLToPath(import.meta.url)), '..', 'cli.js');
+    spawn(process.execPath, [entrypoint, 'capture', 'drain', '--data-dir', dataDirectory], { detached: true, stdio: 'ignore' }).unref();
+  } catch {
+    // Admission is durable even if the best-effort worker launch fails.
+  }
 }

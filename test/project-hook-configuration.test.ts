@@ -49,7 +49,7 @@ test('uses one fail-open wrapper without permission output', () => {
   assert.equal(statSync('.agents/hooks/ael-passive-capture.sh').mode & 0o111, 0o111);
 });
 
-test('resolves the Codex wrapper from a repository subdirectory', () => {
+test('resolves the Codex wrapper from a repository subdirectory', async () => {
   const codex = JSON.parse(readFileSync('.codex/hooks.json', 'utf8')) as {
     hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
   };
@@ -67,16 +67,13 @@ test('resolves the Codex wrapper from a repository subdirectory', () => {
     assert.equal(probe.status, 0, probe.stderr);
     assert.equal(probe.stdout, '');
     assert.equal(probe.stderr, '');
-    const store = new ExperienceStore(join(dataDirectory, 'experience.sqlite'));
-    try {
-      assert.equal(store.loadSession('configuration-probe' as SessionId)?.source, 'codex');
-    } finally { store.close(); }
+    assert.equal((await waitForSession(dataDirectory, 'configuration-probe'))?.source, 'codex');
   } finally {
     rmSync(dataDirectory, { recursive: true, force: true });
   }
 });
 
-test('uses a supported Node when hook PATH only contains git', () => {
+test('uses a supported Node when hook PATH only contains git', async () => {
   const dataDirectory = mkdtempSync(join(tmpdir(), 'ael-project-hook-node-'));
   try {
     const probe = spawnSync('/bin/sh', ['.agents/hooks/ael-passive-capture.sh', 'codex'], {
@@ -88,9 +85,22 @@ test('uses a supported Node when hook PATH only contains git', () => {
     assert.equal(probe.status, 0, probe.stderr);
     assert.equal(probe.stdout, '');
     assert.equal(probe.stderr, '');
-    const store = new ExperienceStore(join(dataDirectory, 'experience.sqlite'));
-    try {
-      assert.equal(store.loadSession('node-path-probe' as SessionId)?.source, 'codex');
-    } finally { store.close(); }
+    assert.equal((await waitForSession(dataDirectory, 'node-path-probe'))?.source, 'codex');
   } finally { rmSync(dataDirectory, { recursive: true, force: true }); }
 });
+
+async function waitForSession(dataDirectory: string, sessionId: string) {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() <= deadline) {
+    let store: ExperienceStore | undefined;
+    try {
+      store = new ExperienceStore(join(dataDirectory, 'experience.sqlite'));
+      const session = store.loadSession(sessionId as SessionId);
+      if (session !== undefined) return session;
+    } catch {
+      // The detached worker may still be creating the database.
+    } finally { try { store?.close(); } catch { /* the next poll retries */ } }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return undefined;
+}

@@ -6,6 +6,8 @@ import { verifyInstalledHooks } from '../cli/hook-installation.js';
 import { resolveRepositoryRoot } from '../repository/local-repository.js';
 
 import { ingestPassiveHook, type HookIngressResult } from '../capture/hook-ingress.js';
+import { drainCaptureSpool } from '../capture/spool-drain.js';
+import { CaptureSpool } from '../capture/spool.js';
 import type { PassiveHookSource } from '../capture/hook-adapters/contracts.js';
 import { initializeDiagnosticWorkspace, resolveDiagnosticScope, type DiagnosticScope } from '../capture/diagnostic-scope.js';
 import { CaptureDiagnosticStore, type CursorDiagnosticCounts } from '../storage/capture-diagnostic-store.js';
@@ -182,6 +184,15 @@ export class ExperienceService {
 
   captureHook(source: PassiveHookSource, input: string, now: () => string = () => new Date().toISOString(), workingDirectory?: string): HookIngressResult {
     return ingestPassiveHook({ source, input, databasePath: this.databasePath, now, workingDirectory });
+  }
+
+  captureDrain(now: () => string = () => new Date().toISOString()) {
+    return drainCaptureSpool({ databasePath: this.databasePath, now });
+  }
+
+  captureStatus() {
+    const spool = new CaptureSpool(join(this.dataDirectory, 'capture-spool.sqlite'));
+    try { return spool.status(); } finally { spool.close(); }
   }
 
   cursorCaptureDiagnostics(directory: string = process.cwd()): CursorCaptureDiagnosticsReport {

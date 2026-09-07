@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { runCliAsync } from '../src/cli.js';
+import { loadProjectSettings } from '../src/config/project-settings.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 import { resolveRepository } from '../src/repository/local-repository.js';
 
@@ -33,6 +34,20 @@ function storedSessionSource(dataDir: string): string | undefined {
   }
 }
 
+async function waitFor<T>(read: () => T | undefined): Promise<T> {
+  const deadline = Date.now() + loadProjectSettings(process.cwd()).captureDeliveryDeadlineMs;
+  do {
+    try {
+      const value = read();
+      if (value !== undefined) return value;
+    } catch {
+      // A detached drain may briefly hold the primary database migration lock.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  } while (Date.now() <= deadline);
+  assert.fail('Capture was not delivered before the configured deadline.');
+}
+
 test('captures a Codex hook with empty stdout and exit zero', async () => {
   const dataDir = temporaryDataDirectory();
   try {
@@ -47,8 +62,9 @@ test('captures a Codex hook with empty stdout and exit zero', async () => {
     );
 
     assert.deepEqual(result, { exitCode: 0, stdout: '', stderr: '' });
-    assert.equal(readSession(dataDir, 'session-1')?.source, 'codex');
-    assert.equal(readSession(dataDir, 'session-1')?.repositoryId, resolveRepository(process.cwd())?.id);
+    const session = await waitFor(() => readSession(dataDir, 'session-1'));
+    assert.equal(session.source, 'codex');
+    assert.equal(session.repositoryId, resolveRepository(process.cwd())?.id);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
@@ -68,7 +84,7 @@ test('dispatches Cursor hooks and ignores nontechnical events', async () => {
       { hookInput: JSON.stringify({ conversation_id: 'session-1', hook_event_name: 'sessionStart' }), now }
     );
     assert.deepEqual(captured, { exitCode: 0, stdout: '', stderr: '' });
-    assert.equal(storedSessionSource(dataDir), 'cursor');
+    assert.equal(await waitFor(() => storedSessionSource(dataDir)), 'cursor');
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
@@ -220,11 +236,7 @@ test('fails open promptly when the hook database is busy', async () => {
     const elapsedMs = Date.now() - startedAt;
 
     assert.ok(elapsedMs < 1_000, `hook lock handling took ${elapsedMs}ms`);
-    assert.deepEqual(result, {
-      exitCode: 0,
-      stdout: '',
-      stderr: 'AEL_CAPTURE_PERSISTENCE_FAILED: Passive capture skipped.\n'
-    });
+    assert.deepEqual(result, { exitCode: 0, stdout: '', stderr: '' });
   } finally {
     blocker.exec('ROLLBACK');
     blocker.close();
@@ -249,11 +261,7 @@ test('closes failed hook store migrations instead of leaking database connection
           now
         }
       );
-      assert.deepEqual(result, {
-        exitCode: 0,
-        stdout: '',
-        stderr: 'AEL_CAPTURE_PERSISTENCE_FAILED: Passive capture skipped.\n'
-      });
+      assert.deepEqual(result, { exitCode: 0, stdout: '', stderr: '' });
     }
 
     const descriptorsAfter = readdirSync('/dev/fd').length;

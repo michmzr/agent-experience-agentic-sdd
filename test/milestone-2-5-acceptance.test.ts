@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { runCli, runCliAsync, type CliResult } from '../src/cli.js';
+import { loadProjectSettings } from '../src/config/project-settings.js';
 import type { SessionId } from '../src/domain/types.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 
@@ -22,6 +23,35 @@ function dataDirectory(): string {
 
 function databasePath(dataDir: string): string {
   return join(dataDir, 'experience.sqlite');
+}
+
+async function waitForExperience(dataDir: string, predicate: (store: ExperienceStore) => boolean): Promise<void> {
+  const deadline = Date.now() + loadProjectSettings(process.cwd()).captureDeliveryDeadlineMs;
+  let lastError: unknown;
+  do {
+    try {
+      const store = new ExperienceStore(databasePath(dataDir));
+      try {
+        if (predicate(store)) return;
+      } finally {
+        store.close();
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  } while (Date.now() <= deadline);
+  assert.fail(`Capture was not delivered before the configured deadline${lastError instanceof Error ? `: ${lastError.message}` : ''}.`);
+}
+
+async function waitForQuarantine(dataDir: string): Promise<void> {
+  const deadline = Date.now() + loadProjectSettings(process.cwd()).captureDeliveryDeadlineMs;
+  do {
+    const result = runCli(['capture', 'status', '--data-dir', dataDir, '--json']);
+    if (result.exitCode === 0 && (JSON.parse(result.stdout) as { quarantined: number }).quarantined > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  } while (Date.now() <= deadline);
+  assert.fail('Rejected capture was not quarantined before the configured deadline.');
 }
 
 async function capture(
@@ -84,6 +114,15 @@ test('captures both sources end to end with correlation, migration and no learni
     await capture(dataDir, 'cursor', cursorPayload('postToolUse'), postTime);
     await capture(dataDir, 'codex', codexPayload('SessionEnd'), endTime);
     await capture(dataDir, 'cursor', cursorPayload('sessionEnd'), endTime);
+
+    await waitForExperience(dataDir, (store) => {
+      const captured = store.listCapturedEventsPage().entries;
+      const cursorSessionId = captured.find(({ source }) => source === 'cursor')?.sessionId;
+      return captured.length === 4
+        && store.loadSession('codex-session' as SessionId)?.endedAt === endTime
+        && cursorSessionId !== undefined
+        && store.loadSession(cursorSessionId)?.endedAt === endTime;
+    });
 
     const store = new ExperienceStore(databasePath(dataDir));
     try {
@@ -149,11 +188,8 @@ test('keeps duplicate deliveries idempotent and rejects events after immutable s
         now: () => afterEndTime
       }
     );
-    assert.deepEqual(afterClose, {
-      exitCode: 0,
-      stdout: '',
-      stderr: 'AEL_CAPTURE_PERSISTENCE_FAILED: Passive capture skipped.\n'
-    });
+    assert.deepEqual(afterClose, { exitCode: 0, stdout: '', stderr: '' });
+    await waitForQuarantine(dataDir);
 
     const store = new ExperienceStore(databasePath(dataDir));
     try {
@@ -202,6 +238,8 @@ test('excludes raw hook fields and credential markers from SQLite and diagnostic
       stderr: 'AEL_CAPTURE_PRIVATE_INPUT: Passive capture skipped.\n'
     });
     assert.equal(rejected.stderr.includes(credentialMarker), false);
+
+    await waitForExperience(dataDir, (store) => store.loadSession('privacy-session' as SessionId) !== undefined);
 
     const bytes = readFileSync(databasePath(dataDir));
     for (const marker of [rawMarker, credentialMarker, 'tool_response', 'transcript_path', 'prompt', 'user_email']) {
@@ -274,6 +312,8 @@ test('keeps non-Git workspace capture diagnostics scope-scoped and private', asy
       stdout: '',
       stderr: 'AEL_CAPTURE_PRIVATE_INPUT: Passive capture skipped.\n'
     });
+
+    await waitForExperience(dataDir, (store) => store.listCapturedEventsPage().entries.length === 1);
 
     const hooks = runCli(['hooks', 'diagnostics', '--data-dir', dataDir, '--json'], { workingDirectory: workspace });
     const inspection = runCli(['experience', 'inspect', '--data-dir', dataDir, '--json'], { workingDirectory: workspace });
