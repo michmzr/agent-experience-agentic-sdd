@@ -9,6 +9,7 @@ import { isBuiltInRuntimeProfileId, RuntimeServiceError, type BuiltInRuntimeProf
 import type { KnowledgeState } from './domain/types.js';
 import type { KnowledgeScope } from './storage/experience-store.js';
 import { discoverReviewSessions, runManualReview, runManualReviewExecution, type ManualReviewDependencies } from './review/review-service.js';
+import type { SessionIngestionDiagnostic } from './review/ingestion.js';
 import { createProcessDebriefTerminalHost, runSessionDebrief, type DebriefTerminalHost } from './review/debrief-terminal.js';
 import { createProcessTerminalHost, TerminalReviewSelectionPrompt, type TerminalHost } from './review/terminal-prompt.js';
 import { verifyHookReadiness } from './cli/hook-readiness.js';
@@ -28,6 +29,7 @@ export interface RunCliAsyncOptions {
   readonly reviewDependencies?: ManualReviewDependencies;
   readonly hookInput?: string;
   readonly now?: () => string;
+  readonly ingestionDiagnosticWrite?: (line: string) => void | Promise<void>;
 }
 
 interface ParsedArguments { readonly positionals: string[]; readonly options: Map<string, string | true>; }
@@ -60,9 +62,18 @@ export async function runCliAsync(args: string[], options: RunCliAsyncOptions = 
   try {
     const parsed = parseArguments(args); const json = parsed.options.has('json');
     const request = parseReviewRequest(parsed);
-    const reviewDependencies = request.kind === 'review' && request.interactive
-      ? { ...options.reviewDependencies, prompt: options.reviewDependencies?.prompt ?? new TerminalReviewSelectionPrompt(options.terminal ?? createProcessTerminalHost()) }
+    const baseDependencies = options.ingestionDiagnosticWrite
+      ? {
+          ...options.reviewDependencies,
+          ingestionDiagnosticSink: async (diagnostic: SessionIngestionDiagnostic) => {
+            await options.reviewDependencies?.ingestionDiagnosticSink?.(diagnostic);
+            await options.ingestionDiagnosticWrite!(formatIngestionDiagnostic(diagnostic));
+          }
+        }
       : options.reviewDependencies;
+    const reviewDependencies = request.kind === 'review' && request.interactive
+      ? { ...baseDependencies, prompt: baseDependencies?.prompt ?? new TerminalReviewSelectionPrompt(options.terminal ?? createProcessTerminalHost()) }
+      : baseDependencies;
     if (request.kind === 'discover') {
       const value = (await discoverReviewSessions(request)).map(({ source, id, updatedAt }) => ({ source, id, updatedAt }));
       return success(value, json, parsed.positionals);
@@ -82,6 +93,10 @@ export async function runCliAsync(args: string[], options: RunCliAsyncOptions = 
     const diagnostic = syntax ? toDiagnostic(error, 'INVALID_SYNTAX') : { code: 'REVIEW_ERROR', message: 'Review failed.' };
     return args.includes('--json') ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' } : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${diagnostic.code}: ${diagnostic.message}\n` };
   }
+}
+
+function formatIngestionDiagnostic(value: SessionIngestionDiagnostic): string {
+  return `${JSON.stringify(value)}\n`;
 }
 
 async function runHookReadinessCli(args: string[]): Promise<CliResult> {
@@ -432,8 +447,12 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
     return `Exported ${countLabel(knowledge.length, 'knowledge entry')}.${knowledge.length ? `\n${formatKnowledgeList(knowledge)}` : ''}`;
   }
   if (command === 'review' && subcommand === 'session') {
-    const review = value as { findings: readonly unknown[]; candidates: readonly unknown[]; proposals: readonly unknown[]; skippedReviewerIds: readonly string[] };
-    return `Review completed: ${review.findings.length} finding groups, ${review.candidates.length} candidates, ${review.proposals.length} proposals.${review.skippedReviewerIds.length ? ` Skipped reviewers: ${review.skippedReviewerIds.join(', ')}.` : ''}`;
+    const review = value as { findings: readonly unknown[]; candidates: readonly unknown[]; proposals: readonly unknown[]; skippedReviewerIds: readonly string[]; ingestionCoverage?: { skippedTechnicalRecords: number; unsupportedRecords: number; truncatedTextFields: number; omittedStructuredOutputs: number } };
+    const coverage = review.ingestionCoverage;
+    const omissions = coverage && (coverage.skippedTechnicalRecords + coverage.unsupportedRecords + coverage.truncatedTextFields + coverage.omittedStructuredOutputs > 0)
+      ? ` Ingestion: ${coverage.skippedTechnicalRecords} technical skipped, ${coverage.unsupportedRecords} unsupported, ${coverage.truncatedTextFields} text fields truncated, ${coverage.omittedStructuredOutputs} structured outputs omitted.`
+      : '';
+    return `Review completed: ${review.findings.length} finding groups, ${review.candidates.length} candidates, ${review.proposals.length} proposals.${review.skippedReviewerIds.length ? ` Skipped reviewers: ${review.skippedReviewerIds.join(', ')}.` : ''}${omissions}`;
   }
   if (command === 'review' && subcommand === 'sessions') return (value as readonly { id: string }[]).map(({ id }) => id).join('\n') || 'No sessions found.';
   if (command === 'runtime' && subcommand === 'evaluate') {
@@ -538,5 +557,15 @@ function toDiagnostic(error: unknown, fallbackCode: string): { code: string; mes
 }
 
 if (process.argv[1] && basename(process.argv[1]) === basename(fileURLToPath(import.meta.url))) {
-  const result = await runCliAsync(process.argv.slice(2)); process.stdout.write(result.stdout); process.stderr.write(result.stderr); process.exitCode = result.exitCode;
+  const result = await runCliAsync(process.argv.slice(2), { ingestionDiagnosticWrite: writeProcessStderr }); process.stdout.write(result.stdout); process.stderr.write(result.stderr); process.exitCode = result.exitCode;
+}
+
+function writeProcessStderr(line: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    try {
+      process.stderr.write(line, (error) => error ? reject(error) : resolve());
+    } catch (error) {
+      reject(error);
+    }
+  });
 }

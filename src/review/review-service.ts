@@ -5,6 +5,7 @@ import { CodexSessionAdapter } from './adapters/codex.js';
 import { discoverClaudeCodeArtifacts, normalizeClaudeCodeArtifact } from './adapters/claude-code.js';
 import { discoverCursorExports, readCursorMarkdownExport } from './adapters/cursor.js';
 import type { NormalizedSession } from './contracts.js';
+import type { SessionIngestionCoverage, SessionIngestionDiagnosticSink } from './ingestion.js';
 import { createDefaultReviewRuntime, defaultReviewProfile } from './default-reviewers.js';
 import { groupReviewFindings, type ReviewFinding as OrchestratorFinding, type ReviewFindingGroup } from './orchestrator.js';
 import {
@@ -35,6 +36,7 @@ export interface ManualReviewDependencies {
   readonly discover?: (input: Pick<ManualReviewInput, 'source' | 'root' | 'project'>) => Promise<readonly ReviewSessionDescriptor[]>;
   readonly prompt?: ReviewSelectionPrompt;
   readonly repositoryIdentityResolver?: RepositoryIdentityResolver;
+  readonly ingestionDiagnosticSink?: SessionIngestionDiagnosticSink;
 }
 
 export interface ReviewServiceDiagnostic {
@@ -44,7 +46,7 @@ export interface ReviewServiceDiagnostic {
 }
 
 export interface ManualReviewResult {
-  readonly source: AgentSource; readonly selectedSession: string; readonly profile: Pick<ReviewProfile, 'id' | 'version'>; readonly skippedReviewerIds: readonly string[]; readonly runtimeDiagnostics: readonly ReviewRuntimeDiagnostic[]; readonly findings: readonly ReviewFindingGroup[]; readonly projectImprovements: readonly ProjectImprovement[]; readonly projectReviewDiagnostics: readonly ProjectReviewDiagnostic[]; readonly serviceDiagnostics: readonly ReviewServiceDiagnostic[]; readonly candidates: readonly CandidateLesson[]; readonly proposals: readonly ImprovementProposal[];
+  readonly source: AgentSource; readonly selectedSession: string; readonly ingestionCoverage: SessionIngestionCoverage; readonly profile: Pick<ReviewProfile, 'id' | 'version'>; readonly skippedReviewerIds: readonly string[]; readonly runtimeDiagnostics: readonly ReviewRuntimeDiagnostic[]; readonly findings: readonly ReviewFindingGroup[]; readonly projectImprovements: readonly ProjectImprovement[]; readonly projectReviewDiagnostics: readonly ProjectReviewDiagnostic[]; readonly serviceDiagnostics: readonly ReviewServiceDiagnostic[]; readonly candidates: readonly CandidateLesson[]; readonly proposals: readonly ImprovementProposal[];
 }
 export interface ManualReviewExecution { readonly result: ManualReviewResult; readonly debrief: SessionDebrief; }
 interface ManualReviewPipelineExecution { readonly result: ManualReviewResult; readonly artifact: SanitizedReviewArtifact; }
@@ -70,7 +72,7 @@ export async function runManualReviewExecution(input: ManualReviewInput, depende
 
 async function executeManualReviewPipeline(input: ManualReviewInput, dependencies: ManualReviewDependencies = {}): Promise<ManualReviewPipelineExecution> {
   const session = await resolveSelectedSession(input, dependencies);
-  const normalized = await loadSession({ ...input, session });
+  const normalized = await loadSession({ ...input, session }, dependencies);
   const artifact = sanitizeForReview(normalized);
   const runtime = dependencies.runtime ?? createDefaultReviewRuntime();
   const run = await runtime.run({ artifact, profile: input.profile ?? defaultReviewProfile, allowExpensiveChecks: input.allowExpensiveChecks });
@@ -116,6 +118,7 @@ async function executeManualReviewPipeline(input: ManualReviewInput, dependencie
   const result: ManualReviewResult = {
     source: input.source,
     selectedSession: artifact.session.sessionId,
+    ingestionCoverage: artifact.session.ingestionCoverage,
     profile: run.profile,
     skippedReviewerIds: run.skippedReviewerIds,
     runtimeDiagnostics: run.diagnostics,
@@ -161,9 +164,9 @@ export async function discoverReviewSessions(input: Pick<ManualReviewInput, 'sou
   return discoverCursorExports(input.root).map(({ id, location, repositoryHint, repositoryHintVerified, repositoryIdentity, updatedAt }) => ({ source: input.source, id: `${id}.md`, location, repositoryHint, repositoryHintVerified, repositoryIdentity, updatedAt }));
 }
 
-async function loadSession(input: ManualReviewInput): Promise<NormalizedSession> {
+async function loadSession(input: ManualReviewInput, dependencies: ManualReviewDependencies): Promise<NormalizedSession> {
   if (!input.session) throw new SyntaxError('An explicit session artifact is required in non-interactive mode.');
-  if (input.source === 'codex') return new CodexSessionAdapter(input.root).read(input.session);
+  if (input.source === 'codex') return new CodexSessionAdapter(input.root, { diagnosticSink: dependencies.ingestionDiagnosticSink }).read(input.session);
   if (input.source === 'claude-code') {
     if (!input.project) throw new SyntaxError('Option is required: --project.');
     const artifacts = await discoverClaudeCodeArtifacts({ configDir: input.root, project: input.project });

@@ -123,14 +123,15 @@ Out of scope:
 
 ## Milestones 4–9: operational memory pivot
 
-Status: M4 is complete on 2026-09-07. M5–M9 specifications were prepared on 2026-09-06 and remain unapproved and unimplemented. Canonical scope, dependency graph, previous P0–P5 mapping and acceptance ownership are in the [operational memory milestone index](operational-memory-milestones.md).
+Status: M4, M5 and M5.1 are complete on 2026-09-07. M6–M9 specifications were prepared on 2026-09-06 and remain unapproved and unimplemented. Canonical scope, dependency graph, previous P0–P5 mapping and acceptance ownership are in the [operational memory milestone index](operational-memory-milestones.md).
 
 The proposed delivery sequence first provides asynchronous passive observation and local learning. Guidance remains an explicitly enabled later milestone. Existing completed milestones retain their historical status. Deferred M3.3 incomplete-session reconciliation is carried into M4 transport ordering and M5 reconstruction.
 
 | Milestone | Scope | Specification |
 |---|---|---|
 | M4 | Durable asynchronous capture and recovery, complete | [M4 specification](../superpowers/specs/2026-09-06-m4-asynchronous-passive-capture-design.md), [verification](../verification/2026-09-07-milestone-4-asynchronous-capture.md) |
-| M5 | Session reconstruction, outcomes, coverage and baseline | [M5 specification](../superpowers/specs/2026-09-06-m5-session-evidence-design.md) |
+| M5 | Session reconstruction, outcomes, coverage and baseline, complete | [M5 specification](../superpowers/specs/2026-09-06-m5-session-evidence-design.md), [verification](../verification/2026-09-06-milestone-5-session-evidence.md) |
+| M5.1 | Reliable raw Codex session ingestion, complete | [M5.1 specification](../superpowers/specs/2026-09-07-m5-1-reliable-raw-session-ingestion-design.md), [verification](../verification/2026-09-07-milestone-5-1-raw-session-ingestion.md) |
 | M6 | Passive operational episodes, tool conventions and repaired commands | [M6 specification](../superpowers/specs/2026-09-06-m6-operational-learning-design.md) |
 | M7 | Cloud resource/access knowledge and observed SSO intervention | [M7a resource discovery](../superpowers/specs/2026-09-06-m7-resource-discovery-design.md), [M7b SSO](../superpowers/specs/2026-09-06-m7-sso-observation-design.md) |
 | M8 | Explicitly enabled advice and cross-session application | [M8 specification](../superpowers/specs/2026-09-06-m8-advisory-reuse-design.md) |

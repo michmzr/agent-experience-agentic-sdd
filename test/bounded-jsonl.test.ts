@@ -82,6 +82,38 @@ test('accepts a nonempty line at the line limit and rejects one byte over it', a
   );
 });
 
+test('hands an oversized record to its overflow sink before reading the following line', async () => {
+  const path = await fixturePath('overflow-handoff.jsonl');
+  const oversized = Buffer.from('x'.repeat(MAX_SESSION_ARTIFACT_LINE_BYTES + 1));
+  await writeFile(path, Buffer.concat([oversized, Buffer.from('\r\nafter\n')]));
+  const received: Buffer[] = [];
+  const lines: string[] = [];
+  let factoryCalls = 0;
+  let finishCalls = 0;
+  let observedOrdinal = -1;
+
+  await readBoundedJsonl({
+    path,
+    onLine(line) { lines.push(line); },
+    overflowRecordFactory({ prefix, sourceOrdinal }) {
+      factoryCalls += 1;
+      observedOrdinal = sourceOrdinal;
+      received.push(prefix);
+      return {
+        write(chunk) { received.push(chunk); },
+        finish() { finishCalls += 1; }
+      };
+    },
+    streamFactory(streamPath) { return createReadStream(streamPath, { highWaterMark: 1024 }); }
+  });
+
+  assert.equal(factoryCalls, 1);
+  assert.equal(observedOrdinal, 0);
+  assert.equal(finishCalls, 1);
+  assert.deepEqual(Buffer.concat(received), oversized);
+  assert.deepEqual(lines, ['after']);
+});
+
 test('turns stream failures into a generic error and destroys the stream', async () => {
   const path = await fixturePath('stream-error.jsonl');
   const marker = 'stream-secret-marker';

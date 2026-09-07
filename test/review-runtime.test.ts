@@ -128,7 +128,16 @@ test('resolves only an exact, versioned review profile', async () => {
 
 test('accepts sanitized artifacts only at the runtime boundary', () => {
   const raw: NormalizedSession = {
-    source: 'codex', sessionId: 'raw', startedAt: '2026-08-24T10:00:00.000Z', endedAt: '2026-08-24T10:01:00.000Z', events: []
+    source: 'codex', sessionId: 'raw', startedAt: '2026-08-24T10:00:00.000Z', endedAt: '2026-08-24T10:01:00.000Z', events: [],
+    ingestionCoverage: {
+      totalRecords: 0,
+      normalizedRecords: 0,
+      skippedTechnicalRecords: 0,
+      unsupportedRecords: 0,
+      truncatedTextFields: 0,
+      omittedStructuredOutputs: 0,
+      usedStreamingProjection: false
+    }
   };
   const acceptsOnlySanitizedArtifact = (_artifact: SanitizedReviewArtifact): void => undefined;
 

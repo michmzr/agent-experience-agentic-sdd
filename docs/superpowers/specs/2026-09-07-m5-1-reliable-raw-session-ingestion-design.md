@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved, 2026-09-07. Extends the completed M5 session-evidence work and the completed M3.3 bounded-artifact work. It precedes M6 operational learning and does not absorb M6 scope.
+Complete, 2026-09-07. Extends the completed M5 session-evidence work and the completed M3.3 bounded-artifact work. It precedes M6 operational learning and does not absorb M6 scope.
 
 ## Problem
 
@@ -45,12 +45,12 @@ The existing `ael review session` command and selection rules remain unchanged. 
 
 ```json
 {
-  "totalRecords": 392,
-  "normalizedRecords": 349,
-  "skippedTechnicalRecords": 43,
-  "unsupportedRecords": 0,
+  "totalRecords": 761,
+  "normalizedRecords": 672,
+  "skippedTechnicalRecords": 87,
+  "unsupportedRecords": 2,
   "truncatedTextFields": 0,
-  "omittedStructuredOutputs": 1,
+  "omittedStructuredOutputs": 70,
   "usedStreamingProjection": true
 }
 ```
@@ -174,7 +174,7 @@ Using M5 stored-evidence reconstruction was rejected as a substitute because it 
 
 ## Acceptance criteria
 
-- M5.1-A1: the unchanged local artifact for session `01a07b11-0435-7a83-b162-f1770c90b072` completes `ael review session` without a preprocessed copy; verification records only bounded structural counts.
+- M5.1-A1: the unchanged local artifact for session `01a07b11-0435-7a83-b162-f1770c90b072` completes `ael review session` without a preprocessed copy. Verification records only bounded structural counts: 761 total records, 672 normalized records, 87 skipped technical records, 2 unsupported records and 70 omitted structured outputs.
 - M5.1-A2: a generated fixture containing 43 valid `token_usage_record` envelopes completes review, exposes `skippedTechnicalRecords: 43` and exposes none of their payload values to reviewers.
 - M5.1-A3: a generated Codex observed fixture containing a `custom_tool_call_output` line of at least 6,953,534 bytes completes review under the 64 MiB artifact limit, creates a tool event without output text and reports one omitted structured output.
 - M5.1-A4: buffered and streaming paths produce identical normalized events for the same supported record represented below the 4 MiB threshold.

@@ -101,7 +101,16 @@ test('normalizes allowlisted Claude Code evidence text without retaining unrelat
       { id: 'session-a:0', kind: 'message', occurredAt: '2026-08-24T10:00:00.000Z', text: 'token=secret', outcome: 'unknown' },
       { id: 'session-a:1', kind: 'tool', occurredAt: '2026-08-24T10:01:00.000Z', tool: 'Bash', exitStatus: 0, text: 'private-command', outcome: 'passed' },
       { id: 'session-a:2', kind: 'metadata', occurredAt: '2026-08-24T10:02:00.000Z', outcome: 'unknown' }
-    ]
+    ],
+    ingestionCoverage: {
+      totalRecords: 3,
+      normalizedRecords: 3,
+      skippedTechnicalRecords: 0,
+      unsupportedRecords: 0,
+      truncatedTextFields: 0,
+      omittedStructuredOutputs: 0,
+      usedStreamingProjection: false
+    }
   });
   assert.equal(JSON.stringify(session).includes('token=secret'), true);
   assert.equal(JSON.stringify(session).includes('private-command'), true);

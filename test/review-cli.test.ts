@@ -15,6 +15,7 @@ test('runs the complete local review pipeline for an explicit session', async ()
   assert.deepEqual(Object.keys(output), [
     'source',
     'selectedSession',
+    'ingestionCoverage',
     'profile',
     'skippedReviewerIds',
     'runtimeDiagnostics',
@@ -30,6 +31,26 @@ test('runs the complete local review pipeline for an explicit session', async ()
   assert.equal(output.proposals[0].requiresSpecification, true);
   assert.equal(output.findings[0].recommendation.state, 'agreed');
   assert.equal(result.stdout.includes('must-not-leak'), false);
+});
+
+test('writes each ingestion warning once without corrupting JSON stdout', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-review-warning-'));
+  const marker = 'warning-private-marker';
+  writeFileSync(join(root, 'session.jsonl'), [
+    JSON.stringify({ timestamp: '2026-08-24T10:00:00.000Z', type: 'future_record', payload: { marker } }),
+    JSON.stringify({ timestamp: '2026-08-24T10:00:01.000Z', type: 'future_record', payload: { marker } }),
+    JSON.stringify({ timestamp: '2026-08-24T10:00:02.000Z', type: 'event_msg', payload: { type: 'user_message', message: 'safe' } })
+  ].join('\n'));
+  const warnings: string[] = [];
+  const result = await runCliAsync(
+    ['review', 'session', '--source', 'codex', '--root', root, '--session', 'session.jsonl', '--json'],
+    { ingestionDiagnosticWrite: async (line) => { warnings.push(line); } }
+  );
+
+  assert.doesNotThrow(() => JSON.parse(result.stdout));
+  assert.equal(result.stderr, '');
+  assert.equal(warnings.length, 2);
+  assert.equal(warnings.every((line) => line.includes('UNSUPPORTED_CODEX_RECORD') && !line.includes(marker) && !line.includes(root)), true);
 });
 
 test('reports truthful non-JSON completion and keeps the async review path canonical', async () => {

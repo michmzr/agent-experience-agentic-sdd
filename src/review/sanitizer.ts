@@ -7,6 +7,7 @@ import {
   type NormalizedSession,
   type NormalizedSessionEvent
 } from './contracts.js';
+import { freezeIngestionCoverage, validateIngestionCoverage, type SessionIngestionCoverage } from './ingestion.js';
 
 export type RedactionCategory =
   | 'absolute-path'
@@ -32,6 +33,10 @@ export interface SanitizedReviewArtifact {
 export interface SanitizeForReviewOptions {
   readonly configuredPatterns?: readonly RegExp[];
 }
+
+type SanitizableSession = NormalizedSession | (Omit<NormalizedSession, 'ingestionCoverage'> & {
+  readonly ingestionCoverage?: SessionIngestionCoverage;
+});
 
 export class SanitizationError extends Error {
   readonly code = 'UNSUPPORTED_NORMALIZED_SESSION';
@@ -78,8 +83,9 @@ export function assertDurableTextSafe(value: string): void {
   if (sanitized !== value) throw new SanitizationError('Durable text is not sanitized and contains sensitive or private material.');
 }
 
-export function sanitizeForReview(input: NormalizedSession, options: SanitizeForReviewOptions = {}): SanitizedReviewArtifact {
-  validateNormalizedSession(input);
+export function sanitizeForReview(input: SanitizableSession, options: SanitizeForReviewOptions = {}): SanitizedReviewArtifact {
+  const normalizedInput = withIngestionCoverage(input);
+  validateNormalizedSession(normalizedInput);
   const configuredPatterns = normalizePatterns(options.configuredPatterns ?? []);
   const redactions = emptyCounts();
   const policy = { version: '1' as const, hash: policyHash(configuredPatterns) };
@@ -90,19 +96,20 @@ export function sanitizeForReview(input: NormalizedSession, options: SanitizeFor
     assertNoSensitiveValues([result], configuredPatterns);
     return result;
   };
-  const sanitizedEvents = input.events.map((event) => sanitizeEvent(event, sanitize));
+  const sanitizedEvents = normalizedInput.events.map((event) => sanitizeEvent(event, sanitize));
   if (totalTextLength(sanitizedEvents) > MAX_SESSION_REVIEW_TEXT_LENGTH) throw new SanitizationError('Session resource limit exceeded.');
 
   const artifact: SanitizedReviewArtifact = {
     policy,
     redactions,
     session: {
-      source: input.source,
-      sessionId: sanitize(input.sessionId, true),
-      ...(input.repositoryHint ? { repositoryHint: sanitize(input.repositoryHint) } : {}),
-      startedAt: input.startedAt,
-      endedAt: input.endedAt,
-      events: sanitizedEvents.map(truncateEventText)
+      source: normalizedInput.source,
+      sessionId: sanitize(normalizedInput.sessionId, true),
+      ...(normalizedInput.repositoryHint ? { repositoryHint: sanitize(normalizedInput.repositoryHint) } : {}),
+      startedAt: normalizedInput.startedAt,
+      endedAt: normalizedInput.endedAt,
+      events: sanitizedEvents.map(truncateEventText),
+      ingestionCoverage: freezeIngestionCoverage(normalizedInput.ingestionCoverage)
     }
   };
   assertNoSensitiveContent(artifact.session, configuredPatterns);
@@ -157,6 +164,7 @@ function pseudonymizeOpaqueId(value: string, counts: Record<RedactionCategory, n
 function freezeArtifact(artifact: SanitizedReviewArtifact): void {
   for (const event of artifact.session.events) Object.freeze(event);
   Object.freeze(artifact.session.events);
+  Object.freeze(artifact.session.ingestionCoverage);
   Object.freeze(artifact.session);
   Object.freeze(artifact.redactions);
   Object.freeze(artifact.policy);
@@ -173,6 +181,7 @@ function normalizePatterns(patterns: readonly RegExp[]): readonly RegExp[] {
 }
 
 function assertNoSensitiveContent(session: NormalizedSession, configuredPatterns: readonly RegExp[]): void {
+  validateIngestionCoverage(session.ingestionCoverage);
   const values = [
     session.source,
     session.repositoryHint,
@@ -211,14 +220,43 @@ function emptyCounts(): Record<RedactionCategory, number> {
 
 function validateNormalizedSession(value: unknown): asserts value is NormalizedSession {
   if (!isRecord(value) || !isSource(value.source) || !isNonEmptyString(value.sessionId) || !isTimestamp(value.startedAt) || !isTimestamp(value.endedAt) || !Array.isArray(value.events)) throw new SanitizationError();
-  if (!hasOnlyKeys(value, ['source', 'sessionId', 'repositoryHint', 'startedAt', 'endedAt', 'events'])) throw new SanitizationError();
+  if (!hasOnlyKeys(value, ['source', 'sessionId', 'repositoryHint', 'startedAt', 'endedAt', 'events', 'ingestionCoverage'])) throw new SanitizationError();
   if (value.repositoryHint !== undefined && typeof value.repositoryHint !== 'string') throw new SanitizationError();
+  try {
+    validateIngestionCoverage(value.ingestionCoverage);
+  } catch {
+    throw new SanitizationError();
+  }
   if (value.events.length > MAX_NORMALIZED_SESSION_EVENTS) throw new SanitizationError('Session resource limit exceeded.');
   let textLength = 0;
   for (const event of value.events) {
     validateEvent(event);
     textLength += event.text?.length ?? 0;
     if (textLength > MAX_SESSION_REVIEW_TEXT_LENGTH) throw new SanitizationError('Session resource limit exceeded.');
+  }
+}
+
+function withIngestionCoverage(input: SanitizableSession): NormalizedSession {
+  try {
+    validateSanitizableSessionShape(input);
+    const coverage = input.ingestionCoverage ?? {
+      totalRecords: input.events.length,
+      normalizedRecords: input.events.length,
+      skippedTechnicalRecords: 0,
+      unsupportedRecords: 0,
+      truncatedTextFields: 0,
+      omittedStructuredOutputs: 0,
+      usedStreamingProjection: false
+    };
+    return { ...input, ingestionCoverage: freezeIngestionCoverage(coverage) };
+  } catch {
+    throw new SanitizationError();
+  }
+}
+
+function validateSanitizableSessionShape(value: unknown): asserts value is SanitizableSession {
+  if (!isRecord(value) || !isSource(value.source) || !isNonEmptyString(value.sessionId) || !isTimestamp(value.startedAt) || !isTimestamp(value.endedAt) || !Array.isArray(value.events)) {
+    throw new SanitizationError();
   }
 }
 
