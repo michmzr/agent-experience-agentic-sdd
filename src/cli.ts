@@ -9,6 +9,7 @@ import { isBuiltInRuntimeProfileId, RuntimeServiceError, type BuiltInRuntimeProf
 import type { KnowledgeState } from './domain/types.js';
 import type { KnowledgeScope } from './storage/experience-store.js';
 import { discoverReviewSessions, runManualReview, runManualReviewExecution, type ManualReviewDependencies } from './review/review-service.js';
+import type { SessionIngestionDiagnostic } from './review/ingestion.js';
 import { createProcessDebriefTerminalHost, runSessionDebrief, type DebriefTerminalHost } from './review/debrief-terminal.js';
 import { createProcessTerminalHost, TerminalReviewSelectionPrompt, type TerminalHost } from './review/terminal-prompt.js';
 import { verifyHookReadiness } from './cli/hook-readiness.js';
@@ -28,6 +29,7 @@ export interface RunCliAsyncOptions {
   readonly reviewDependencies?: ManualReviewDependencies;
   readonly hookInput?: string;
   readonly now?: () => string;
+  readonly ingestionDiagnosticWrite?: (line: string) => void | Promise<void>;
 }
 
 interface ParsedArguments { readonly positionals: string[]; readonly options: Map<string, string | true>; }
@@ -60,9 +62,18 @@ export async function runCliAsync(args: string[], options: RunCliAsyncOptions = 
   try {
     const parsed = parseArguments(args); const json = parsed.options.has('json');
     const request = parseReviewRequest(parsed);
-    const reviewDependencies = request.kind === 'review' && request.interactive
-      ? { ...options.reviewDependencies, prompt: options.reviewDependencies?.prompt ?? new TerminalReviewSelectionPrompt(options.terminal ?? createProcessTerminalHost()) }
+    const baseDependencies = options.ingestionDiagnosticWrite
+      ? {
+          ...options.reviewDependencies,
+          ingestionDiagnosticSink: async (diagnostic: SessionIngestionDiagnostic) => {
+            await options.reviewDependencies?.ingestionDiagnosticSink?.(diagnostic);
+            await options.ingestionDiagnosticWrite!(formatIngestionDiagnostic(diagnostic));
+          }
+        }
       : options.reviewDependencies;
+    const reviewDependencies = request.kind === 'review' && request.interactive
+      ? { ...baseDependencies, prompt: baseDependencies?.prompt ?? new TerminalReviewSelectionPrompt(options.terminal ?? createProcessTerminalHost()) }
+      : baseDependencies;
     if (request.kind === 'discover') {
       const value = (await discoverReviewSessions(request)).map(({ source, id, updatedAt }) => ({ source, id, updatedAt }));
       return success(value, json, parsed.positionals);
@@ -82,6 +93,10 @@ export async function runCliAsync(args: string[], options: RunCliAsyncOptions = 
     const diagnostic = syntax ? toDiagnostic(error, 'INVALID_SYNTAX') : { code: 'REVIEW_ERROR', message: 'Review failed.' };
     return args.includes('--json') ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' } : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${diagnostic.code}: ${diagnostic.message}\n` };
   }
+}
+
+function formatIngestionDiagnostic(value: SessionIngestionDiagnostic): string {
+  return `${JSON.stringify(value)}\n`;
 }
 
 async function runHookReadinessCli(args: string[]): Promise<CliResult> {
