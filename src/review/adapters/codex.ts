@@ -18,6 +18,7 @@ import {
   incrementCodexIngestionCoverage,
   type CodexRecordDisposition
 } from './codex-records.js';
+import { createCodexStreamingProjector } from './codex-streaming-projector.js';
 
 /**
  * Reads the explicitly supplied, locally observed Codex JSONL artifact format.
@@ -63,7 +64,16 @@ export class CodexSessionAdapter {
     const accumulator = createBoundedSessionAccumulator();
     const coverage = createCodexIngestionCoverageCounter();
     let sourceOrdinal = 0;
+    let usedStreamingProjection = false;
     let parseError: unknown;
+    const consumeDisposition = async (disposition: CodexRecordDisposition, ordinal: number): Promise<void> => {
+      incrementCodexIngestionCoverage(coverage, disposition);
+      if (disposition.state === 'normalized') {
+        accumulator.add({ ...disposition.record, sourceOrdinal: ordinal });
+      } else if (disposition.state === 'unsupported') {
+        await this.options.diagnosticSink?.(disposition.diagnostic);
+      }
+    };
     await readBoundedJsonl({
       path: artifactPath,
       onLine: async (line) => {
@@ -72,15 +82,25 @@ export class CodexSessionAdapter {
           const currentSourceOrdinal = sourceOrdinal;
           sourceOrdinal = nextSourceOrdinal(sourceOrdinal);
           const disposition = this.parseRecord(line, currentSourceOrdinal);
-          incrementCodexIngestionCoverage(coverage, disposition);
-          if (disposition.state === 'normalized') {
-            accumulator.add({ ...disposition.record, sourceOrdinal: currentSourceOrdinal });
-          } else if (disposition.state === 'unsupported') {
-            await this.options.diagnosticSink?.(disposition.diagnostic);
-          }
+          await consumeDisposition(disposition, currentSourceOrdinal);
         } catch (error) {
           parseError = error;
         }
+      },
+      overflowRecordFactory: async ({ prefix, sourceOrdinal: overflowOrdinal }) => {
+        usedStreamingProjection = true;
+        const projector = createCodexStreamingProjector({
+          sourceOrdinal: overflowOrdinal
+        });
+        await projector.write(prefix);
+        return {
+          write: (chunk) => projector.write(chunk),
+          finish: async () => {
+            const disposition = await projector.finish();
+            await consumeDisposition(disposition, overflowOrdinal);
+            sourceOrdinal = nextSourceOrdinal(overflowOrdinal);
+          }
+        };
       }
     });
     if (parseError !== undefined) throw parseError;
@@ -91,7 +111,7 @@ export class CodexSessionAdapter {
       records: window.records,
       startedAt: window.startedAt,
       endedAt: window.endedAt,
-      ingestionCoverage: finalizeCodexIngestionCoverage(coverage, false)
+      ingestionCoverage: finalizeCodexIngestionCoverage(coverage, usedStreamingProjection)
     });
   }
 
