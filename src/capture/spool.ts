@@ -14,6 +14,11 @@ export interface SpoolAdmission {
   readonly deliveryId: string;
 }
 
+export interface CaptureSpoolOptions {
+  readonly maxActiveRecords?: number;
+  readonly maxActiveBytes?: number;
+}
+
 export interface CaptureSpoolStatus {
   readonly version: 1;
   readonly admitted: number;
@@ -24,10 +29,22 @@ export interface CaptureSpoolStatus {
   readonly failedAdmission: number;
 }
 
+export interface ClaimedSpoolRecord {
+  readonly deliveryId: string;
+  readonly record: PassiveCaptureRecord;
+  readonly attempts: number;
+}
+
+export type SpoolQuarantineCode = 'CORRUPT' | 'UNSUPPORTED';
+
 export class CaptureSpool {
   readonly #database: DatabaseSync;
+  readonly #maxActiveRecords: number;
+  readonly #maxActiveBytes: number;
 
-  constructor(path: string) {
+  constructor(path: string, options: CaptureSpoolOptions = {}) {
+    this.#maxActiveRecords = boundedPositiveInteger(options.maxActiveRecords, MAX_ACTIVE_RECORDS, 'Maximum active record count');
+    this.#maxActiveBytes = boundedPositiveInteger(options.maxActiveBytes, MAX_ACTIVE_BYTES, 'Maximum active byte count');
     ensurePrivatePath(path);
     this.#database = new DatabaseSync(path, { enableForeignKeyConstraints: true, timeout: 250 });
     chmodSync(path, 0o600);
@@ -51,6 +68,12 @@ export class CaptureSpool {
         quarantined INTEGER NOT NULL,
         failed_admission INTEGER NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS quarantined_records (
+        delivery_id TEXT PRIMARY KEY,
+        payload TEXT NOT NULL,
+        code TEXT NOT NULL CHECK (code IN ('CORRUPT', 'UNSUPPORTED')),
+        quarantined_at TEXT NOT NULL
+      ) STRICT;
       INSERT OR IGNORE INTO counters (id, admitted, committed, quarantined, failed_admission) VALUES (1, 0, 0, 0, 0);
     `);
   }
@@ -67,7 +90,7 @@ export class CaptureSpool {
         return Object.freeze({ status: 'duplicate', deliveryId });
       }
       const usage = this.#database.prepare('SELECT COUNT(*) AS count, COALESCE(SUM(payload_bytes), 0) AS bytes FROM records').get() as { count: number; bytes: number };
-      if (usage.count >= MAX_ACTIVE_RECORDS || usage.bytes + payloadBytes > MAX_ACTIVE_BYTES) throw new CaptureSpoolCapacityError();
+      if (usage.count >= this.#maxActiveRecords || usage.bytes + payloadBytes > this.#maxActiveBytes) throw new CaptureSpoolCapacityError();
       this.#database.prepare(`
         INSERT INTO records (delivery_id, version, payload, payload_bytes, state, admitted_at, next_retry_at)
         VALUES (?, ?, ?, ?, 'pending', ?, ?)
@@ -102,6 +125,76 @@ export class CaptureSpool {
     });
   }
 
+  claim(now: string, limit: number): readonly ClaimedSpoolRecord[] {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Capture spool claim limit must be between 1 and 100.');
+    const leaseUntil = new Date(Date.parse(now) + 30_000).toISOString();
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      this.#database.prepare(`
+        UPDATE records SET state = 'pending', lease_until = NULL
+        WHERE state = 'claimed' AND lease_until <= ?
+      `).run(now);
+      const rows = this.#database.prepare(`
+        SELECT delivery_id, version, payload, attempts
+        FROM records WHERE state = 'pending' AND next_retry_at <= ?
+        ORDER BY admitted_at, delivery_id LIMIT ?
+      `).all(now, limit) as Array<{ delivery_id: string; version: number; payload: string; attempts: number }>;
+      const claimed: ClaimedSpoolRecord[] = [];
+      for (const row of rows) {
+        const record = parseRecord(row);
+        if (record === undefined) {
+          quarantineRow(this.#database, row.delivery_id, row.payload, row.version === SPOOL_VERSION ? 'CORRUPT' : 'UNSUPPORTED', now);
+          continue;
+        }
+        this.#database.prepare(`
+          UPDATE records SET state = 'claimed', attempts = attempts + 1, lease_until = ?
+          WHERE delivery_id = ? AND state = 'pending'
+        `).run(leaseUntil, row.delivery_id);
+        claimed.push(Object.freeze({ deliveryId: row.delivery_id, record, attempts: row.attempts + 1 }));
+      }
+      this.#database.exec('COMMIT');
+      return Object.freeze(claimed);
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
+  acknowledge(deliveryId: string): void {
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const result = this.#database.prepare("DELETE FROM records WHERE delivery_id = ? AND state = 'claimed'").run(deliveryId);
+      if (result.changes === 1) this.#database.prepare('UPDATE counters SET committed = committed + 1 WHERE id = 1').run();
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
+  retry(deliveryId: string, now: string): void {
+    const row = this.#database.prepare('SELECT attempts FROM records WHERE delivery_id = ? AND state = \'claimed\'').get(deliveryId) as { attempts?: number } | undefined;
+    if (row?.attempts === undefined) return;
+    const delay = Math.min(30_000, 100 * 2 ** Math.max(0, row.attempts - 1));
+    const nextRetryAt = new Date(Date.parse(now) + delay).toISOString();
+    this.#database.prepare(`
+      UPDATE records SET state = 'pending', lease_until = NULL, next_retry_at = ?
+      WHERE delivery_id = ? AND state = 'claimed'
+    `).run(nextRetryAt, deliveryId);
+  }
+
+  quarantine(deliveryId: string, code: SpoolQuarantineCode, now = new Date().toISOString()): void {
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.#database.prepare('SELECT payload FROM records WHERE delivery_id = ?').get(deliveryId) as { payload?: string } | undefined;
+      if (row?.payload !== undefined) quarantineRow(this.#database, deliveryId, row.payload, code, now);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
   close(): void {
     this.#database.close();
   }
@@ -119,8 +212,41 @@ function ensurePrivatePath(path: string): void {
   if (existsSync(path) && lstatSync(path).isSymbolicLink()) throw new TypeError('Capture spool path must not be a symbolic link.');
 }
 
+function boundedPositiveInteger(value: number | undefined, fallback: number, name: string): number {
+  const result = value ?? fallback;
+  if (!Number.isSafeInteger(result) || result < 1 || result > fallback) throw new TypeError(`${name} must be a positive integer no greater than ${fallback}.`);
+  return result;
+}
+
 function rollback(database: DatabaseSync): void {
   try { database.exec('ROLLBACK'); } catch { /* transaction was already committed */ }
+}
+
+function parseRecord(row: { version: number; payload: string }): PassiveCaptureRecord | undefined {
+  if (row.version !== SPOOL_VERSION) return undefined;
+  try {
+    const value = JSON.parse(row.payload) as unknown;
+    return isPassiveCaptureRecord(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function quarantineRow(database: DatabaseSync, deliveryId: string, payload: string, code: SpoolQuarantineCode, now: string): void {
+  database.prepare(`
+    INSERT OR IGNORE INTO quarantined_records (delivery_id, payload, code, quarantined_at) VALUES (?, ?, ?, ?)
+  `).run(deliveryId, payload, code, now);
+  database.prepare('DELETE FROM quarantined_records WHERE rowid NOT IN (SELECT rowid FROM quarantined_records ORDER BY rowid DESC LIMIT 1000)').run();
+  const removed = database.prepare('DELETE FROM records WHERE delivery_id = ?').run(deliveryId);
+  if (removed.changes === 1) database.prepare('UPDATE counters SET quarantined = quarantined + 1 WHERE id = 1').run();
+}
+
+function isPassiveCaptureRecord(value: unknown): value is PassiveCaptureRecord {
+  if (value === null || typeof value !== 'object') return false;
+  const record = value as { kind?: unknown; session?: unknown; source?: unknown; sessionId?: unknown; endedAt?: unknown; event?: unknown };
+  if (record.kind === 'session-start') return record.session !== null && typeof record.session === 'object';
+  if (record.kind === 'session-end') return typeof record.source === 'string' && typeof record.sessionId === 'string' && typeof record.endedAt === 'string';
+  return record.kind === 'technical' && record.event !== null && typeof record.event === 'object';
 }
 
 function canonicalJson(value: unknown): string {
