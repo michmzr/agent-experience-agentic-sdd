@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { PassiveCaptureRecord } from './passive-service.js';
 
 const SPOOL_VERSION = 1;
+const ADMISSION_BUSY_TIMEOUT_MS = 100;
 const MAX_ACTIVE_RECORDS = 50_000;
 const MAX_ACTIVE_BYTES = 32 * 1024 * 1024;
 
@@ -51,7 +52,7 @@ export class CaptureSpool {
     this.#maxActiveRecords = boundedPositiveInteger(options.maxActiveRecords, MAX_ACTIVE_RECORDS, 'Maximum active record count');
     this.#maxActiveBytes = boundedPositiveInteger(options.maxActiveBytes, MAX_ACTIVE_BYTES, 'Maximum active byte count');
     ensurePrivatePath(path);
-    this.#database = new DatabaseSync(path, { enableForeignKeyConstraints: true, timeout: 250 });
+    this.#database = new DatabaseSync(path, { enableForeignKeyConstraints: true, timeout: ADMISSION_BUSY_TIMEOUT_MS });
     chmodSync(path, 0o600);
     this.#database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;');
     this.#database.exec(`

@@ -56,6 +56,30 @@ test('keeps admitted work pending when consumer startup fails and drains it late
   }
 });
 
+test('fails open within the hook deadline when the durable spool is busy', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-m4-spool-lock-'));
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const spoolPath = join(dataDir, 'capture-spool.sqlite');
+  const initialized = runCli(['capture', 'status', '--data-dir', dataDir, '--json']);
+  assert.equal(initialized.exitCode, 0);
+  const blocker = new DatabaseSync(spoolPath);
+  blocker.exec('BEGIN IMMEDIATE');
+  const startedAt = performance.now();
+  try {
+    const result = ingestPassiveHook({
+      source: 'codex', databasePath, now: () => '2026-09-07T08:00:00.000Z', scheduleDrain: () => undefined,
+      input: JSON.stringify({ session_id: 'busy-spool-session', hook_event_name: 'SessionStart', source: 'startup' })
+    });
+    const elapsedMs = performance.now() - startedAt;
+    assert.deepEqual(result, { status: 'degraded', code: 'PERSISTENCE_FAILED' });
+    assert.ok(elapsedMs < 250, `busy-spool admission took ${elapsedMs}ms`);
+  } finally {
+    blocker.exec('ROLLBACK');
+    blocker.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test('reports aggregate spool status through the explicit CLI', () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-m4-status-'));
   try {
