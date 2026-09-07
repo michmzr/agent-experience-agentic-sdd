@@ -121,6 +121,21 @@ Out of scope:
 
 - ChatGPT export discovery, normalization, import and review adapters.
 
+## Milestone 4: durable asynchronous capture
+
+Status: Complete on 2026-09-07. Implementation commit `17403c60ed3fdf575e2dcbf29da0f808eaaacc28` passed the focused durability and benchmark gate. The complete repository gate passed with 613 tests, 0 failed and 0 skipped.
+
+Goal: acknowledge passive hook capture after private durable admission without waiting for the main experience database.
+
+Deliverables:
+
+- private SQLite spool with full-synchronous WAL admission, capacity limits and owner-only permissions;
+- detached bounded drain with one leased worker, retry, replay-safe sink writes and bounded quarantine;
+- asynchronous readiness assertions using the project-configurable `.ael/settings.json` delivery deadline;
+- aggregate capture status with timestamped delayed-delivery diagnostics and no payload fields;
+- recovery coverage for locked storage, failed worker startup, expired claims and reordered lifecycle delivery;
+- local disabled, enabled and locked-main-store admission benchmark evidence.
+
 ## Release and distribution backlog
 
 Status: Deferred. The package remains private and is currently distributed through a local `pnpm pack` tarball.
