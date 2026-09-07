@@ -29,6 +29,7 @@ export async function readBoundedLines(options: BoundedLineReaderOptions): Promi
     let totalBytes = 0;
     let unfinished = Buffer.alloc(0);
     let overflow: OverflowRecordSink | undefined;
+    let overflowTail = Buffer.alloc(0);
     let sourceOrdinal = 0;
 
     const beginOverflow = async (): Promise<void> => {
@@ -39,7 +40,10 @@ export async function readBoundedLines(options: BoundedLineReaderOptions): Promi
     };
     const writeFragment = async (fragment: Buffer): Promise<void> => {
       if (overflow) {
-        await overflow.write(fragment);
+        const combined = Buffer.concat([overflowTail, fragment]);
+        overflowTail = combined.subarray(Math.max(0, combined.length - 1));
+        const body = combined.subarray(0, combined.length - overflowTail.length);
+        if (body.length > 0) await overflow.write(body);
         return;
       }
       if (unfinished.length + fragment.length > MAX_SESSION_ARTIFACT_LINE_BYTES) {
@@ -50,11 +54,19 @@ export async function readBoundedLines(options: BoundedLineReaderOptions): Promi
       unfinished = Buffer.concat([unfinished, fragment]);
     };
     const finishLine = async (fragment: Buffer): Promise<void> => {
-      const endsWithCarriageReturn = (fragment.length > 0 ? fragment[fragment.length - 1] : unfinished[unfinished.length - 1]) === 0x0d;
+      const lastByte = fragment.length > 0
+        ? fragment[fragment.length - 1]
+        : overflow ? overflowTail[overflowTail.length - 1] : unfinished[unfinished.length - 1];
+      const endsWithCarriageReturn = lastByte === 0x0d;
       const finalFragment = endsWithCarriageReturn && fragment.length > 0 ? fragment.subarray(0, -1) : fragment;
       if (endsWithCarriageReturn && fragment.length === 0 && !overflow) unfinished = unfinished.subarray(0, -1);
       if (overflow) {
-        if (finalFragment.length > 0) await overflow.write(finalFragment);
+        const combined = Buffer.concat([overflowTail, finalFragment]);
+        overflowTail = Buffer.alloc(0);
+        const content = endsWithCarriageReturn && combined.length > 0
+          ? combined.subarray(0, -1)
+          : combined;
+        if (content.length > 0) await overflow.write(content);
         await overflow.finish();
         overflow = undefined;
         sourceOrdinal += 1;
@@ -87,7 +99,10 @@ export async function readBoundedLines(options: BoundedLineReaderOptions): Promi
       }
     }
 
-    if (overflow) await overflow.finish();
+    if (overflow) {
+      if (overflowTail.length > 0) await overflow.write(overflowTail);
+      await overflow.finish();
+    }
     else if (unfinished.length > 0 || !options.skipEmptyLines) await options.onLine(unfinished.toString('utf8'));
   } catch {
     throw new Error(options.errorMessage);
