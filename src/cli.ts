@@ -447,8 +447,12 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
     return `Exported ${countLabel(knowledge.length, 'knowledge entry')}.${knowledge.length ? `\n${formatKnowledgeList(knowledge)}` : ''}`;
   }
   if (command === 'review' && subcommand === 'session') {
-    const review = value as { findings: readonly unknown[]; candidates: readonly unknown[]; proposals: readonly unknown[]; skippedReviewerIds: readonly string[] };
-    return `Review completed: ${review.findings.length} finding groups, ${review.candidates.length} candidates, ${review.proposals.length} proposals.${review.skippedReviewerIds.length ? ` Skipped reviewers: ${review.skippedReviewerIds.join(', ')}.` : ''}`;
+    const review = value as { findings: readonly unknown[]; candidates: readonly unknown[]; proposals: readonly unknown[]; skippedReviewerIds: readonly string[]; ingestionCoverage?: { skippedTechnicalRecords: number; unsupportedRecords: number; truncatedTextFields: number; omittedStructuredOutputs: number } };
+    const coverage = review.ingestionCoverage;
+    const omissions = coverage && (coverage.skippedTechnicalRecords + coverage.unsupportedRecords + coverage.truncatedTextFields + coverage.omittedStructuredOutputs > 0)
+      ? ` Ingestion: ${coverage.skippedTechnicalRecords} technical skipped, ${coverage.unsupportedRecords} unsupported, ${coverage.truncatedTextFields} text fields truncated, ${coverage.omittedStructuredOutputs} structured outputs omitted.`
+      : '';
+    return `Review completed: ${review.findings.length} finding groups, ${review.candidates.length} candidates, ${review.proposals.length} proposals.${review.skippedReviewerIds.length ? ` Skipped reviewers: ${review.skippedReviewerIds.join(', ')}.` : ''}${omissions}`;
   }
   if (command === 'review' && subcommand === 'sessions') return (value as readonly { id: string }[]).map(({ id }) => id).join('\n') || 'No sessions found.';
   if (command === 'runtime' && subcommand === 'evaluate') {
@@ -553,5 +557,15 @@ function toDiagnostic(error: unknown, fallbackCode: string): { code: string; mes
 }
 
 if (process.argv[1] && basename(process.argv[1]) === basename(fileURLToPath(import.meta.url))) {
-  const result = await runCliAsync(process.argv.slice(2)); process.stdout.write(result.stdout); process.stderr.write(result.stderr); process.exitCode = result.exitCode;
+  const result = await runCliAsync(process.argv.slice(2), { ingestionDiagnosticWrite: writeProcessStderr }); process.stdout.write(result.stdout); process.stderr.write(result.stderr); process.exitCode = result.exitCode;
+}
+
+function writeProcessStderr(line: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    try {
+      process.stderr.write(line, (error) => error ? reject(error) : resolve());
+    } catch (error) {
+      reject(error);
+    }
+  });
 }
