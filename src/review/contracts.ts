@@ -1,4 +1,5 @@
 import type { AgentSource } from '../domain/types.js';
+import { freezeIngestionCoverage, type SessionIngestionCoverage } from './ingestion.js';
 
 export type SessionArtifactFormat = 'observed-jsonl' | 'jsonl' | 'markdown-export';
 
@@ -46,6 +47,7 @@ export interface NormalizedSession {
   readonly startedAt: string;
   readonly endedAt: string;
   readonly events: readonly NormalizedSessionEvent[];
+  readonly ingestionCoverage: SessionIngestionCoverage;
 }
 
 export interface NormalizeSessionInput {
@@ -54,6 +56,7 @@ export interface NormalizeSessionInput {
   readonly records: readonly LocalSessionRecord[];
   readonly startedAt?: string;
   readonly endedAt?: string;
+  readonly ingestionCoverage?: SessionIngestionCoverage;
 }
 
 export function normalizeSession(input: NormalizeSessionInput): NormalizedSession {
@@ -76,13 +79,27 @@ export function normalizeSession(input: NormalizeSessionInput): NormalizedSessio
   const suppliedBounds = hasStartedAt && hasEndedAt
     ? validateSessionBounds(input.startedAt!, input.endedAt!, events)
     : undefined;
+  const ingestionCoverage = freezeIngestionCoverage(input.ingestionCoverage ?? completeIngestionCoverage(input.records.length));
   return {
     source: input.source,
     sessionId: input.artifact.id,
     ...(input.artifact.repositoryHint ? { repositoryHint: input.artifact.repositoryHint } : {}),
     startedAt: suppliedBounds?.startedAt ?? events[0].occurredAt,
     endedAt: suppliedBounds?.endedAt ?? events[events.length - 1].occurredAt,
-    events
+    events,
+    ingestionCoverage
+  };
+}
+
+function completeIngestionCoverage(recordCount: number): SessionIngestionCoverage {
+  return {
+    totalRecords: recordCount,
+    normalizedRecords: recordCount,
+    skippedTechnicalRecords: 0,
+    unsupportedRecords: 0,
+    truncatedTextFields: 0,
+    omittedStructuredOutputs: 0,
+    usedStreamingProjection: false
   };
 }
 

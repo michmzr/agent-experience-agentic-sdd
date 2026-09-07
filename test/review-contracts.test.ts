@@ -18,7 +18,16 @@ test('normalizes a selected local artifact without retaining its raw payload', (
     events: [
       { id: 'session-1:0', kind: 'tool', occurredAt: '2026-08-24T10:00:00.000Z', tool: 'pnpm', exitStatus: 0, outcome: 'passed' },
       { id: 'session-1:1', kind: 'message', occurredAt: '2026-08-24T10:01:00.000Z', outcome: 'unknown' }
-    ]
+    ],
+    ingestionCoverage: {
+      totalRecords: 2,
+      normalizedRecords: 2,
+      skippedTechnicalRecords: 0,
+      unsupportedRecords: 0,
+      truncatedTextFields: 0,
+      omittedStructuredOutputs: 0,
+      usedStreamingProjection: false
+    }
   });
   assert.equal(JSON.stringify(session).includes('top-secret'), false);
   assert.equal(JSON.stringify(session).includes('private prompt'), false);
