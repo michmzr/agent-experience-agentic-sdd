@@ -8,17 +8,31 @@ import {
   type NormalizedSession,
   type SessionArtifact
 } from '../contracts.js';
+import { formatSafeRecordType, type SessionIngestionDiagnosticSink } from '../ingestion.js';
 import { readBoundedJsonl } from './bounded-jsonl.js';
 import { createBoundedSessionAccumulator } from '../bounded-session.js';
 import { isWithinRepository, resolveRepositoryIdentity } from '../repository-identity.js';
+import {
+  createCodexIngestionCoverageCounter,
+  finalizeCodexIngestionCoverage,
+  incrementCodexIngestionCoverage,
+  type CodexRecordDisposition
+} from './codex-records.js';
 
 /**
  * Reads the explicitly supplied, locally observed Codex JSONL artifact format.
  * There is intentionally no default user-home location: the observed storage
  * layout is not a compatibility contract of Codex.
  */
+export interface CodexSessionAdapterOptions {
+  readonly diagnosticSink?: SessionIngestionDiagnosticSink;
+}
+
 export class CodexSessionAdapter {
-  public constructor(private readonly artifactRoot: string) {}
+  public constructor(
+    private readonly artifactRoot: string,
+    private readonly options: CodexSessionAdapterOptions = {}
+  ) {}
 
   public async discover(): Promise<readonly SessionArtifact[]> {
     const root = await this.resolveRoot();
@@ -47,13 +61,23 @@ export class CodexSessionAdapter {
     const artifactPath = await this.resolveArtifact(root, artifactId);
     assertSessionArtifactSize((await lstat(artifactPath)).size);
     const accumulator = createBoundedSessionAccumulator();
+    const coverage = createCodexIngestionCoverageCounter();
+    let sourceOrdinal = 0;
     let parseError: unknown;
     await readBoundedJsonl({
       path: artifactPath,
-      onLine: (line) => {
+      onLine: async (line) => {
         if (parseError !== undefined) return;
         try {
-          accumulator.add(this.parseRecord(line));
+          const currentSourceOrdinal = sourceOrdinal;
+          sourceOrdinal = nextSourceOrdinal(sourceOrdinal);
+          const disposition = this.parseRecord(line, currentSourceOrdinal);
+          incrementCodexIngestionCoverage(coverage, disposition);
+          if (disposition.state === 'normalized') {
+            accumulator.add({ ...disposition.record, sourceOrdinal: currentSourceOrdinal });
+          } else if (disposition.state === 'unsupported') {
+            await this.options.diagnosticSink?.(disposition.diagnostic);
+          }
         } catch (error) {
           parseError = error;
         }
@@ -66,7 +90,8 @@ export class CodexSessionAdapter {
       artifact: { source: 'codex', id: artifactId, location: artifactPath, format: 'observed-jsonl' },
       records: window.records,
       startedAt: window.startedAt,
-      endedAt: window.endedAt
+      endedAt: window.endedAt,
+      ingestionCoverage: finalizeCodexIngestionCoverage(coverage, false)
     });
   }
 
@@ -114,7 +139,7 @@ export class CodexSessionAdapter {
     return pathFromRoot === '' || (!pathFromRoot.startsWith(`..${sep}`) && pathFromRoot !== '..' && !isAbsolute(pathFromRoot));
   }
 
-  private parseRecord(line: string): LocalSessionRecord {
+  private parseRecord(line: string, sourceOrdinal: number): CodexRecordDisposition {
     let value: unknown;
     try {
       value = JSON.parse(line);
@@ -122,8 +147,8 @@ export class CodexSessionAdapter {
       throw new Error('Codex session record is invalid JSON.');
     }
     if (!isRecord(value)) throw new Error('Unsupported session record.');
-    if ('kind' in value || 'occurredAt' in value) return this.parseSyntheticRecord(value);
-    return this.parseObservedRecord(value);
+    if ('kind' in value || 'occurredAt' in value) return normalized(this.parseSyntheticRecord(value));
+    return this.parseObservedRecord(value, sourceOrdinal);
   }
 
   private parseSyntheticRecord(value: Record<string, unknown>): LocalSessionRecord {
@@ -142,42 +167,75 @@ export class CodexSessionAdapter {
     };
   }
 
-  private parseObservedRecord(value: Record<string, unknown>): LocalSessionRecord {
-    if (typeof value.timestamp !== 'string' || !isObservedEnvelopeType(value.type) || !isRecord(value.payload)) {
+  private parseObservedRecord(value: Record<string, unknown>, sourceOrdinal: number): CodexRecordDisposition {
+    if (typeof value.timestamp !== 'string' || typeof value.type !== 'string' || !isRecord(value.payload)) {
       throw new Error('Unsupported session record.');
     }
+    if (value.type === 'token_usage_record') return { state: 'technical-skip' };
+    if (!isObservedEnvelopeType(value.type)) return {
+      state: 'unsupported',
+      diagnostic: {
+        code: 'UNSUPPORTED_CODEX_RECORD',
+        level: 'envelope',
+        recordType: formatSafeRecordType(value.type),
+        sourceOrdinal
+      }
+    };
     if (value.type === 'session_meta' || value.type === 'turn_context' || value.type === 'compacted' || value.type === 'inter_agent_communication_metadata' || value.type === 'world_state') {
-      return { kind: 'metadata', occurredAt: value.timestamp };
+      return normalized({ kind: 'metadata', occurredAt: value.timestamp });
     }
     if (value.type === 'event_msg') {
       const text = ['user_message', 'agent_message'].includes(String(value.payload.type))
         ? stringValue(value.payload.message)
         : undefined;
-      return {
+      return normalized({
         kind: 'message',
         occurredAt: value.timestamp,
         ...(text ? { text } : {})
-      };
+      });
     }
-    return this.parseObservedResponseItem(value.timestamp, value.payload);
+    return this.parseObservedResponseItem(value.timestamp, value.payload, sourceOrdinal);
   }
 
-  private parseObservedResponseItem(timestamp: string, payload: Record<string, unknown>): LocalSessionRecord {
-    if (!isObservedResponseItemType(payload.type)) throw new Error('Unsupported session record.');
+  private parseObservedResponseItem(timestamp: string, payload: Record<string, unknown>, sourceOrdinal: number): CodexRecordDisposition {
+    if (typeof payload.type !== 'string') throw new Error('Unsupported session record.');
+    if (!isObservedResponseItemType(payload.type)) return {
+      state: 'unsupported',
+      diagnostic: {
+        code: 'UNSUPPORTED_CODEX_RECORD',
+        level: 'response-item',
+        recordType: formatSafeRecordType(payload.type),
+        sourceOrdinal
+      }
+    };
     if (payload.type === 'function_call' || payload.type === 'custom_tool_call') {
       if (!isSafeToolName(payload.name)) throw new Error('Unsupported session record.');
       const text = payload.type === 'function_call'
         ? stringValue(payload.arguments)
         : stringValue(payload.input);
-      return { kind: 'tool', occurredAt: timestamp, tool: payload.name, ...(text ? { text } : {}) };
+      return normalized({ kind: 'tool', occurredAt: timestamp, tool: payload.name, ...(text ? { text } : {}) });
     }
     if (payload.type === 'function_call_output' || payload.type === 'custom_tool_call_output') {
       const text = stringValue(payload.output);
-      return { kind: 'tool', occurredAt: timestamp, ...(text ? { text } : {}) };
+      return normalized(
+        { kind: 'tool', occurredAt: timestamp, ...(text ? { text } : {}) },
+        isStructuredValue(payload.output) ? 1 : 0
+      );
     }
     const text = payload.type === 'message' ? messageText(payload.content) : undefined;
-    return { kind: 'message', occurredAt: timestamp, ...(text ? { text } : {}) };
+    return normalized({ kind: 'message', occurredAt: timestamp, ...(text ? { text } : {}) });
   }
+}
+
+function normalized(record: LocalSessionRecord, omittedStructuredOutputs = 0): CodexRecordDisposition {
+  return { state: 'normalized', record, truncatedTextFields: 0, omittedStructuredOutputs };
+}
+
+function nextSourceOrdinal(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value >= Number.MAX_SAFE_INTEGER) {
+    throw new Error('Session record ordinal is invalid.');
+  }
+  return value + 1;
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -220,4 +278,8 @@ function isObservedResponseItemType(
 
 function isSafeToolName(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9_.:/-]{1,128}$/.test(value);
+}
+
+function isStructuredValue(value: unknown): boolean {
+  return Array.isArray(value) || isRecord(value);
 }
