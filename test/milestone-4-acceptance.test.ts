@@ -8,6 +8,8 @@ import { performance } from 'node:perf_hooks';
 
 import { drainCaptureSpool } from '../src/capture/spool-drain.js';
 import { ingestPassiveHook } from '../src/capture/hook-ingress.js';
+import { normalizeMappedCapture } from '../src/capture/normalization.js';
+import { CaptureSpool } from '../src/capture/spool.js';
 import { runCli } from '../src/cli.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 
@@ -76,6 +78,34 @@ test('fails open within the hook deadline when the durable spool is busy', () =>
   } finally {
     blocker.exec('ROLLBACK');
     blocker.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('retries reordered lifecycle dependencies and accepts an in-bound late event', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-m4-reordered-'));
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  try {
+    spool.admit({ kind: 'session-end', source: 'codex', sessionId: 'reordered-session' as never, endedAt: '2026-09-07T08:03:00.000Z' }, '2026-09-07T08:00:00.000Z');
+    spool.admit({ kind: 'technical', event: normalizeMappedCapture({
+      source: 'codex', sourceEventId: 'reordered-tool:pre', sessionId: 'reordered-session' as never,
+      phase: 'pre-action', occurredAt: '2026-09-07T08:02:00.000Z', tool: 'git', action: 'status', summary: 'Run git status.'
+    }) }, '2026-09-07T08:00:01.000Z');
+    spool.admit({ kind: 'session-start', session: {
+      id: 'reordered-session' as never, source: 'codex', startedAt: '2026-09-07T08:01:00.000Z'
+    } }, '2026-09-07T08:00:02.000Z');
+  } finally { spool.close(); }
+
+  try {
+    assert.equal(drainCaptureSpool({ databasePath, now: () => '2026-09-07T08:00:10.000Z' }).pending, 2);
+    assert.equal(drainCaptureSpool({ databasePath, now: () => '2026-09-07T08:00:11.000Z' }).committed, 3);
+    const store = new ExperienceStore(databasePath);
+    try {
+      assert.equal(store.loadSession('reordered-session' as never)?.endedAt, '2026-09-07T08:03:00.000Z');
+      assert.equal(store.listCapturedEventsPage().entries.length, 1);
+    } finally { store.close(); }
+  } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
