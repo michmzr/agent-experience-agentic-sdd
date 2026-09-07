@@ -20,4 +20,4 @@ The artifact used streaming projection. The two unsupported records produced bou
 
 ## Acceptance decision
 
-M5.1 remains incomplete. Criterion M5.1-A1 specifies 43 skipped technical records for this session, while direct verification produced 87. The implementation's generated coverage, privacy and release-gate tests pass, but the accepted real-artifact count must be reconciled before changing the design or roadmap status to Complete.
+M5.1-A1 now uses the direct current-artifact baseline recorded above. The generated 43-record fixture remains M5.1-A2, which verifies the deterministic technical-skip classification independently of the mutable local session artifact. The M5.1 design status is Complete.
