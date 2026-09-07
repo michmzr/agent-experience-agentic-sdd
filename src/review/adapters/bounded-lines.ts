@@ -48,7 +48,7 @@ export async function readBoundedLines(options: BoundedLineReaderOptions): Promi
       }
       if (unfinished.length + fragment.length > MAX_SESSION_ARTIFACT_LINE_BYTES) {
         await beginOverflow();
-        if (fragment.length > 0) await overflow!.write(fragment);
+        if (fragment.length > 0) await writeFragment(fragment);
         return;
       }
       unfinished = Buffer.concat([unfinished, fragment]);
@@ -60,6 +60,12 @@ export async function readBoundedLines(options: BoundedLineReaderOptions): Promi
       const endsWithCarriageReturn = lastByte === 0x0d;
       const finalFragment = endsWithCarriageReturn && fragment.length > 0 ? fragment.subarray(0, -1) : fragment;
       if (endsWithCarriageReturn && fragment.length === 0 && !overflow) unfinished = unfinished.subarray(0, -1);
+      if (!overflow && unfinished.length + finalFragment.length > MAX_SESSION_ARTIFACT_LINE_BYTES) {
+        await beginOverflow();
+        await writeFragment(finalFragment);
+        await finishLine(Buffer.alloc(0));
+        return;
+      }
       if (overflow) {
         const combined = Buffer.concat([overflowTail, finalFragment]);
         overflowTail = Buffer.alloc(0);
