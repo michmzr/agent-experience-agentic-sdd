@@ -41,7 +41,8 @@ test('durably admits a sanitized record once and reports pending status', () => 
       claimed: 0,
       committed: 0,
       quarantined: 0,
-      failedAdmission: 0
+      failedAdmission: 0,
+      delayedDelivery: { count: 0 }
     });
   } finally {
     spool.close();
@@ -66,7 +67,8 @@ test('reclaims expired claims and acknowledges a committed delivery once', () =>
       claimed: 0,
       committed: 1,
       quarantined: 0,
-      failedAdmission: 0
+      failedAdmission: 0,
+      delayedDelivery: { count: 0 }
     });
   } finally {
     spool.close();
@@ -97,8 +99,27 @@ test('rejects admission at configured capacity without evicting pending work', (
     assert.equal(spool.admit(sessionStart()).status, 'admitted');
     assert.throws(() => spool.admit(differentSessionStart()), /capacity/i);
     assert.equal(spool.status().pending, 1);
+    assert.equal(spool.status().failedAdmission, 1);
   } finally {
     spool.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('allows only one bounded drain owner and recovers an expired owner', () => {
+  const dataDir = dataDirectory();
+  const path = join(dataDir, 'capture-spool.sqlite');
+  const first = new CaptureSpool(path);
+  const second = new CaptureSpool(path);
+  try {
+    assert.equal(first.tryAcquireDrainLock('worker-1', '2026-09-07T08:00:00.000Z', 2_000), true);
+    assert.equal(second.tryAcquireDrainLock('worker-2', '2026-09-07T08:00:01.000Z', 2_000), false);
+    assert.equal(second.tryAcquireDrainLock('worker-2', '2026-09-07T08:00:02.000Z', 2_000), true);
+    second.releaseDrainLock('worker-2');
+    assert.equal(first.tryAcquireDrainLock('worker-1', '2026-09-07T08:00:02.001Z', 2_000), true);
+  } finally {
+    first.close();
+    second.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
@@ -116,6 +137,29 @@ test('quarantines a corrupt stored record without blocking later records', () =>
     const [claimed] = spool.claim('2026-09-07T08:00:01.000Z', 10);
     assert.equal(claimed?.record.kind, 'session-start');
     assert.equal(spool.status().quarantined, 1);
+  } finally {
+    spool.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('logs bounded delayed-delivery timestamps and the eventual commit', () => {
+  const dataDir = dataDirectory();
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  try {
+    spool.admit(sessionStart(), '2026-09-07T08:00:00.000Z');
+    const [claimed] = spool.claim('2026-09-07T08:00:03.000Z', 1);
+    spool.recordDelayedDelivery(claimed!.deliveryId, '2026-09-07T08:00:02.000Z', '2026-09-07T08:00:03.000Z');
+    spool.acknowledge(claimed!.deliveryId, '2026-09-07T08:00:04.000Z');
+    assert.deepEqual(spool.status().delayedDelivery, {
+      count: 1,
+      latest: {
+        admittedAt: '2026-09-07T08:00:00.000Z',
+        deadlineAt: '2026-09-07T08:00:02.000Z',
+        detectedAt: '2026-09-07T08:00:03.000Z',
+        committedAt: '2026-09-07T08:00:04.000Z'
+      }
+    });
   } finally {
     spool.close();
     rmSync(dataDir, { recursive: true, force: true });

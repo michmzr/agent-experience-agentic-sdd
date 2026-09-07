@@ -5,16 +5,16 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { verifyHookReadiness } from '../src/cli/hook-readiness.js';
-import { runCli } from '../src/cli.js';
+import { runCliAsync } from '../src/cli.js';
 
 function temporaryRoot(): string {
   return mkdtempSync(join(tmpdir(), 'ael-hook-readiness-test-'));
 }
 
-test('verifies both project hook sources without using the default database', () => {
+test('verifies both project hook sources without using the default database', async () => {
   const root = temporaryRoot();
   try {
-    const result = verifyHookReadiness({ worktreePath: process.cwd(), temporaryRoot: root });
+    const result = await verifyHookReadiness({ worktreePath: process.cwd(), temporaryRoot: root });
     assert.deepEqual(result, {
       status: 'ready',
       sources: [
@@ -29,10 +29,10 @@ test('verifies both project hook sources without using the default database', ()
   }
 });
 
-test('exposes worktree readiness through the CLI', () => {
+test('exposes worktree readiness through the CLI', async () => {
   const root = temporaryRoot();
   try {
-    assert.deepEqual(runCli(['hooks', 'verify', '--worktree', process.cwd()]), {
+    assert.deepEqual(await runCliAsync(['hooks', 'verify', '--worktree', process.cwd()]), {
       exitCode: 0,
       stdout: 'Hook readiness passed for codex, cursor.\n',
       stderr: ''

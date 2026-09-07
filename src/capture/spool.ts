@@ -27,12 +27,17 @@ export interface CaptureSpoolStatus {
   readonly committed: number;
   readonly quarantined: number;
   readonly failedAdmission: number;
+  readonly delayedDelivery: {
+    readonly count: number;
+    readonly latest?: { readonly admittedAt: string; readonly deadlineAt: string; readonly detectedAt: string; readonly committedAt?: string };
+  };
 }
 
 export interface ClaimedSpoolRecord {
   readonly deliveryId: string;
   readonly record: PassiveCaptureRecord;
   readonly attempts: number;
+  readonly admittedAt: string;
 }
 
 export type SpoolQuarantineCode = 'CORRUPT' | 'UNSUPPORTED';
@@ -59,14 +64,22 @@ export class CaptureSpool {
         admitted_at TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 0,
         next_retry_at TEXT NOT NULL,
-        lease_until TEXT
+        lease_until TEXT,
+        delayed_at TEXT,
+        deadline_at TEXT
       ) STRICT;
       CREATE TABLE IF NOT EXISTS counters (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         admitted INTEGER NOT NULL,
         committed INTEGER NOT NULL,
         quarantined INTEGER NOT NULL,
-        failed_admission INTEGER NOT NULL
+        failed_admission INTEGER NOT NULL,
+        delayed_delivery INTEGER NOT NULL DEFAULT 0,
+        latest_delivery_id TEXT,
+        latest_admitted_at TEXT,
+        latest_deadline_at TEXT,
+        latest_detected_at TEXT,
+        latest_committed_at TEXT
       ) STRICT;
       CREATE TABLE IF NOT EXISTS quarantined_records (
         delivery_id TEXT PRIMARY KEY,
@@ -74,12 +87,18 @@ export class CaptureSpool {
         code TEXT NOT NULL CHECK (code IN ('CORRUPT', 'UNSUPPORTED')),
         quarantined_at TEXT NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS drain_lock (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        owner TEXT NOT NULL,
+        lease_until TEXT NOT NULL
+      ) STRICT;
       INSERT OR IGNORE INTO counters (id, admitted, committed, quarantined, failed_admission) VALUES (1, 0, 0, 0, 0);
     `);
+    ensureDiagnosticColumns(this.#database);
   }
 
   admit(record: PassiveCaptureRecord, admittedAt = new Date().toISOString()): SpoolAdmission {
-    const payload = canonicalJson(record);
+    const payload = JSON.stringify(record);
     const deliveryId = createHash('sha256').update(`ael:capture-spool:v${SPOOL_VERSION}\0`).update(payload).digest('hex');
     const payloadBytes = Buffer.byteLength(payload, 'utf8');
     this.#database.exec('BEGIN IMMEDIATE');
@@ -100,13 +119,17 @@ export class CaptureSpool {
       return Object.freeze({ status: 'admitted', deliveryId });
     } catch (error) {
       rollback(this.#database);
+      if (error instanceof CaptureSpoolCapacityError) {
+        this.#database.prepare('UPDATE counters SET failed_admission = failed_admission + 1 WHERE id = 1').run();
+      }
       throw error;
     }
   }
 
   status(): CaptureSpoolStatus {
-    const counters = this.#database.prepare('SELECT admitted, committed, quarantined, failed_admission FROM counters WHERE id = 1').get() as {
-      admitted: number; committed: number; quarantined: number; failed_admission: number;
+    const counters = this.#database.prepare('SELECT * FROM counters WHERE id = 1').get() as {
+      admitted: number; committed: number; quarantined: number; failed_admission: number; delayed_delivery: number;
+      latest_admitted_at: string | null; latest_deadline_at: string | null; latest_detected_at: string | null; latest_committed_at: string | null;
     };
     const states = this.#database.prepare(`
       SELECT
@@ -121,7 +144,16 @@ export class CaptureSpool {
       claimed: states.claimed ?? 0,
       committed: counters.committed,
       quarantined: counters.quarantined,
-      failedAdmission: counters.failed_admission
+      failedAdmission: counters.failed_admission,
+      delayedDelivery: Object.freeze({
+        count: counters.delayed_delivery,
+        ...(counters.latest_admitted_at === null ? {} : { latest: Object.freeze({
+          admittedAt: counters.latest_admitted_at,
+          deadlineAt: counters.latest_deadline_at!,
+          detectedAt: counters.latest_detected_at!,
+          ...(counters.latest_committed_at === null ? {} : { committedAt: counters.latest_committed_at })
+        }) })
+      })
     });
   }
 
@@ -135,10 +167,10 @@ export class CaptureSpool {
         WHERE state = 'claimed' AND lease_until <= ?
       `).run(now);
       const rows = this.#database.prepare(`
-        SELECT delivery_id, version, payload, attempts
+        SELECT delivery_id, version, payload, attempts, admitted_at
         FROM records WHERE state = 'pending' AND next_retry_at <= ?
         ORDER BY admitted_at, delivery_id LIMIT ?
-      `).all(now, limit) as Array<{ delivery_id: string; version: number; payload: string; attempts: number }>;
+      `).all(now, limit) as Array<{ delivery_id: string; version: number; payload: string; attempts: number; admitted_at: string }>;
       const claimed: ClaimedSpoolRecord[] = [];
       for (const row of rows) {
         const record = parseRecord(row);
@@ -150,7 +182,7 @@ export class CaptureSpool {
           UPDATE records SET state = 'claimed', attempts = attempts + 1, lease_until = ?
           WHERE delivery_id = ? AND state = 'pending'
         `).run(leaseUntil, row.delivery_id);
-        claimed.push(Object.freeze({ deliveryId: row.delivery_id, record, attempts: row.attempts + 1 }));
+        claimed.push(Object.freeze({ deliveryId: row.delivery_id, record, attempts: row.attempts + 1, admittedAt: row.admitted_at }));
       }
       this.#database.exec('COMMIT');
       return Object.freeze(claimed);
@@ -160,16 +192,32 @@ export class CaptureSpool {
     }
   }
 
-  acknowledge(deliveryId: string): void {
+  acknowledge(deliveryId: string, committedAt = new Date().toISOString()): void {
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       const result = this.#database.prepare("DELETE FROM records WHERE delivery_id = ? AND state = 'claimed'").run(deliveryId);
-      if (result.changes === 1) this.#database.prepare('UPDATE counters SET committed = committed + 1 WHERE id = 1').run();
+      if (result.changes === 1) {
+        this.#database.prepare('UPDATE counters SET committed = committed + 1, latest_committed_at = CASE WHEN latest_delivery_id = ? THEN ? ELSE latest_committed_at END WHERE id = 1').run(deliveryId, committedAt);
+      }
       this.#database.exec('COMMIT');
     } catch (error) {
       rollback(this.#database);
       throw error;
     }
+  }
+
+  recordDelayedDelivery(deliveryId: string, deadlineAt: string, detectedAt: string): void {
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.#database.prepare('SELECT admitted_at, delayed_at FROM records WHERE delivery_id = ?').get(deliveryId) as { admitted_at: string; delayed_at: string | null } | undefined;
+      if (row !== undefined && row.delayed_at === null) {
+        this.#database.prepare('UPDATE records SET delayed_at = ?, deadline_at = ? WHERE delivery_id = ?').run(detectedAt, deadlineAt, deliveryId);
+        this.#database.prepare(`UPDATE counters SET delayed_delivery = delayed_delivery + 1,
+          latest_delivery_id = ?, latest_admitted_at = ?, latest_deadline_at = ?, latest_detected_at = ?, latest_committed_at = NULL WHERE id = 1`)
+          .run(deliveryId, row.admitted_at, deadlineAt, detectedAt);
+      }
+      this.#database.exec('COMMIT');
+    } catch (error) { rollback(this.#database); throw error; }
   }
 
   retry(deliveryId: string, now: string): void {
@@ -195,6 +243,27 @@ export class CaptureSpool {
     }
   }
 
+  tryAcquireDrainLock(owner: string, now: string, leaseMs: number): boolean {
+    if (owner.length === 0 || !Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 61_000) {
+      throw new TypeError('Capture drain lock input is invalid.');
+    }
+    const leaseUntil = new Date(Date.parse(now) + leaseMs).toISOString();
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      this.#database.prepare('DELETE FROM drain_lock WHERE id = 1 AND lease_until <= ?').run(now);
+      const result = this.#database.prepare('INSERT OR IGNORE INTO drain_lock (id, owner, lease_until) VALUES (1, ?, ?)').run(owner, leaseUntil);
+      this.#database.exec('COMMIT');
+      return result.changes === 1;
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
+  releaseDrainLock(owner: string): void {
+    this.#database.prepare('DELETE FROM drain_lock WHERE id = 1 AND owner = ?').run(owner);
+  }
+
   close(): void {
     this.#database.close();
   }
@@ -216,6 +285,17 @@ function boundedPositiveInteger(value: number | undefined, fallback: number, nam
   const result = value ?? fallback;
   if (!Number.isSafeInteger(result) || result < 1 || result > fallback) throw new TypeError(`${name} must be a positive integer no greater than ${fallback}.`);
   return result;
+}
+
+function ensureDiagnosticColumns(database: DatabaseSync): void {
+  const recordColumns = new Set((database.prepare("PRAGMA table_info('records')").all() as Array<{ name: string }>).map(({ name }) => name));
+  if (!recordColumns.has('delayed_at')) database.exec('ALTER TABLE records ADD COLUMN delayed_at TEXT');
+  if (!recordColumns.has('deadline_at')) database.exec('ALTER TABLE records ADD COLUMN deadline_at TEXT');
+  const counterColumns = new Set((database.prepare("PRAGMA table_info('counters')").all() as Array<{ name: string }>).map(({ name }) => name));
+  for (const [name, definition] of [
+    ['delayed_delivery', 'INTEGER NOT NULL DEFAULT 0'], ['latest_delivery_id', 'TEXT'], ['latest_admitted_at', 'TEXT'],
+    ['latest_deadline_at', 'TEXT'], ['latest_detected_at', 'TEXT'], ['latest_committed_at', 'TEXT']
+  ] as const) if (!counterColumns.has(name)) database.exec(`ALTER TABLE counters ADD COLUMN ${name} ${definition}`);
 }
 
 function rollback(database: DatabaseSync): void {
@@ -247,14 +327,4 @@ function isPassiveCaptureRecord(value: unknown): value is PassiveCaptureRecord {
   if (record.kind === 'session-start') return record.session !== null && typeof record.session === 'object';
   if (record.kind === 'session-end') return typeof record.source === 'string' && typeof record.sessionId === 'string' && typeof record.endedAt === 'string';
   return record.kind === 'technical' && record.event !== null && typeof record.event === 'object';
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (typeof value === 'object') {
-    const object = value as Record<string, unknown>;
-    return `{${Object.keys(object).filter((key) => object[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
-  }
-  throw new TypeError('Capture spool records must be JSON values.');
 }

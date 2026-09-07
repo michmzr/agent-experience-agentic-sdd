@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
 import { ExperienceStore } from '../storage/experience-store.js';
+import { loadProjectSettings } from '../config/project-settings.js';
 
 export type HookReadinessSource = 'codex' | 'cursor';
 export type HookReadinessResult =
@@ -16,7 +17,7 @@ export interface HookReadinessOptions {
 
 const sources: readonly HookReadinessSource[] = ['codex', 'cursor'];
 
-export function verifyHookReadiness(options: HookReadinessOptions): HookReadinessResult {
+export async function verifyHookReadiness(options: HookReadinessOptions): Promise<HookReadinessResult> {
   const root = resolveWorktree(options.worktreePath);
   if (root === undefined) return notReady('WORKTREE_INVALID');
   for (const [path, code] of [
@@ -28,7 +29,7 @@ export function verifyHookReadiness(options: HookReadinessOptions): HookReadines
   try {
     const ready: Array<{ source: HookReadinessSource; status: 'ready' }> = [];
     for (const source of sources) {
-      if (!verifySource(root, dataDir, source)) return notReady(`${source.toUpperCase()}_DELIVERY_FAILED`, ready);
+      if (!await verifySource(root, dataDir, source)) return notReady(`${source.toUpperCase()}_DELIVERY_TIMEOUT`, ready);
       ready.push({ source, status: 'ready' });
     }
     return { status: 'ready', sources: ready };
@@ -45,7 +46,7 @@ function resolveWorktree(path: string): string | undefined {
   } catch { return undefined; }
 }
 
-function verifySource(root: string, dataDir: string, source: HookReadinessSource): boolean {
+async function verifySource(root: string, dataDir: string, source: HookReadinessSource): Promise<boolean> {
   const sessionId = `readiness-${source}`;
   const toolId = `${sessionId}-tool`;
   const eventNames = source === 'codex'
@@ -58,15 +59,24 @@ function verifySource(root: string, dataDir: string, source: HookReadinessSource
     const result = spawnSync('/bin/sh', ['.agents/hooks/ael-passive-capture.sh', source], { cwd: root, env: { ...process.env, AEL_DATA_DIR: dataDir }, input: JSON.stringify(payload), encoding: 'utf8' });
     if (result.status !== 0 || result.stdout !== '' || result.stderr !== '') return false;
   }
-  const store = new ExperienceStore(join(dataDir, 'experience.sqlite'));
+  const deadline = Date.now() + loadProjectSettings(root).captureDeliveryDeadlineMs;
+  while (Date.now() <= deadline) {
+    if (hasCompleteDelivery(dataDir, source)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return false;
+}
+
+function hasCompleteDelivery(dataDir: string, source: HookReadinessSource): boolean {
+  let store: ExperienceStore | undefined;
   try {
+    store = new ExperienceStore(join(dataDir, 'experience.sqlite'));
     const events = store.listCapturedEventsPage().entries.filter((event) => event.source === source);
     const sessionId = events[0]?.sessionId;
-    return sessionId !== undefined
-      && events.length === 2
-      && events.every((event) => event.sessionId === sessionId)
+    return sessionId !== undefined && events.length === 2 && events.every((event) => event.sessionId === sessionId)
       && store.loadSession(sessionId)?.endedAt !== undefined;
-  } finally { store.close(); }
+  } catch { return false; }
+  finally { try { store?.close(); } catch { /* the next poll retries */ } }
 }
 
 function notReady(code: string, sources: readonly { readonly source: HookReadinessSource; readonly status: 'ready' }[] = []): HookReadinessResult {

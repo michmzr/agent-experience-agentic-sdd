@@ -55,6 +55,7 @@ export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workin
 
 export async function runCliAsync(args: string[], options: RunCliAsyncOptions = {}): Promise<CliResult> {
   if (isCaptureHookCommand(args)) return runCaptureHookCli(args, options);
+  if (args[0] === 'hooks' && args[1] === 'verify') return runHookReadinessCli(args);
   if (args[0] !== 'review') return runCli(args, options);
   try {
     const parsed = parseArguments(args); const json = parsed.options.has('json');
@@ -80,6 +81,18 @@ export async function runCliAsync(args: string[], options: RunCliAsyncOptions = 
     const syntax = error instanceof SyntaxError;
     const diagnostic = syntax ? toDiagnostic(error, 'INVALID_SYNTAX') : { code: 'REVIEW_ERROR', message: 'Review failed.' };
     return args.includes('--json') ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' } : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${diagnostic.code}: ${diagnostic.message}\n` };
+  }
+}
+
+async function runHookReadinessCli(args: string[]): Promise<CliResult> {
+  try {
+    const parsed = parseArguments(args);
+    assertNoUnknownOptions(parsed.options, ['worktree', 'json']);
+    if (parsed.positionals.length !== 2) throw new SyntaxError('Unknown command form for hooks.');
+    return success(await verifyHookReadiness({ worktreePath: requiredString(parsed.options, 'worktree') }), parsed.options.has('json'), parsed.positionals);
+  } catch (error) {
+    const diagnostic = toDiagnostic(error, error instanceof SyntaxError ? 'INVALID_SYNTAX' : 'STORAGE_ERROR');
+    return args.includes('--json') ? { exitCode: 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' } : { exitCode: 1, stdout: '', stderr: `${diagnostic.code}: ${diagnostic.message}\n` };
   }
 }
 
@@ -235,7 +248,7 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   }
   if (command === 'hooks' && subcommand === 'verify' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['worktree', 'json']);
-    return verifyHookReadiness({ worktreePath: requiredString(parsed.options, 'worktree') });
+    throw new SyntaxError('Hook verification requires asynchronous CLI execution.');
   }
   if (command === 'hooks' && subcommand === 'diagnostics' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository']);

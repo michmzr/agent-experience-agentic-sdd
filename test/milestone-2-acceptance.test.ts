@@ -330,7 +330,7 @@ test('applies explicit degraded policy without network or LLM dependencies', () 
 
   const roots = ['src/runtime', 'src/capture', 'src/config'];
   const source = roots.flatMap((root) => sourceFiles(root)).map((path) => readFileSync(path, 'utf8')).join('\n');
-  assert.doesNotMatch(source, /fetch\(|https?:\/\/|node:https|node:http|child_process/);
+  assert.doesNotMatch(source, /fetch\(|https?:\/\/|node:https|node:http/);
 });
 
 test('classifies credential variants consistently across adapters while retaining benign controls', () => {

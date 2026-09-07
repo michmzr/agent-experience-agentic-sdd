@@ -55,7 +55,15 @@ pnpm build
 
 The wrapper resolves the Git repository top level and invokes `dist/src/cli.js`. Capture data stays in the local SQLite database under `AEL_DATA_DIR` when it is set, or under the platform default described below. Hook capture stores normalized session and technical event records only. It excludes prompts, assistant or tool transcripts, raw hook payloads and credential-like values.
 
-Capture is fail-open. A missing build or capture failure writes only a generic diagnostic to standard error and exits successfully, so it cannot warn about, ask about, deny or block an agent action. Codex users must review and trust project hooks through `/hooks` after adding or changing the checked-in configuration. Remove the project hook entries to stop future capture; existing local records remain in the database.
+Capture is fail-open. Accepted normalized records are committed first to the private `capture-spool.sqlite` queue, then a detached local worker transfers them to the main experience database. A missing build or failed admission writes only a generic diagnostic to standard error and exits successfully, so it cannot warn about, ask about, deny or block an agent action. Codex users must review and trust project hooks through `/hooks` after adding or changing the checked-in configuration. Remove the project hook entries to stop future capture; existing queued and committed local records remain available.
+
+The delivery-readiness deadline defaults to 2000 milliseconds. A project may configure a value from 100 through 60000 milliseconds in `.ael/settings.json`:
+
+```json
+{"version":1,"captureDeliveryDeadlineMs":2000}
+```
+
+`ael capture status --json` reports aggregate pending, committed, quarantined, failed-admission and delayed-delivery counts. Its delayed-delivery entry includes the latest admission, deadline, detection and eventual-commit timestamps, without hook payload data. `ael capture drain` performs an explicit bounded drain.
 
 ## Commands
 
@@ -67,6 +75,8 @@ ael stats [--repository-id <id>|--repository <git-root>] [--json]
 ael status [--repository-id <id>|--repository <git-root>] [--json]
 ael status-global [--repository-id <id>|--repository <git-root>] [--json]
 ael experience add --input record.json
+ael capture drain [--json]
+ael capture status [--json]
 ael validate [--scope global|repo] [--json]
 ael inspect <id>
 ael lessons list [--scope global|repo] [--state <state>] [--tag <tag>]
