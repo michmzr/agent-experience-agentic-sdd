@@ -9,6 +9,7 @@ import { discoverClaudeCodeArtifacts, normalizeClaudeCodeArtifact } from '../src
 import {
   MAX_NORMALIZED_SESSION_EVENTS,
   MAX_SESSION_ARTIFACT_BYTES,
+  MAX_SESSION_ARTIFACT_LINE_BYTES,
   MAX_SESSION_EVENT_TEXT_LENGTH,
   MAX_SESSION_REVIEW_TEXT_LENGTH,
   normalizeSession,
@@ -83,6 +84,34 @@ test('Codex and Claude Code accept valid artifacts at the byte limit and reject 
     () => normalizeClaudeCodeArtifact(claudeArtifact!),
     (error: unknown) => genericLimitError(error, marker, claudeConfig)
   );
+});
+
+test('projects an oversized observed Codex structured output without retaining its payload', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-codex-streaming-'));
+  const marker = 'oversized-private-output-marker';
+  const line = JSON.stringify({
+    timestamp,
+    type: 'response_item',
+    payload: { type: 'custom_tool_call_output', output: [{ marker, output: 'x'.repeat(MAX_SESSION_ARTIFACT_LINE_BYTES) }] }
+  });
+  assert.ok(Buffer.byteLength(line, 'utf8') > MAX_SESSION_ARTIFACT_LINE_BYTES);
+  writeFileSync(join(root, 'oversized.jsonl'), `${line}\n`);
+
+  const session = await new CodexSessionAdapter(root).read('oversized.jsonl');
+
+  assert.deepEqual(session.events, [
+    { id: 'oversized.jsonl:0', kind: 'tool', occurredAt: timestamp, outcome: 'unknown' }
+  ]);
+  assert.deepEqual(session.ingestionCoverage, {
+    totalRecords: 1,
+    normalizedRecords: 1,
+    skippedTechnicalRecords: 0,
+    unsupportedRecords: 0,
+    truncatedTextFields: 0,
+    omittedStructuredOutputs: 1,
+    usedStreamingProjection: true
+  });
+  assert.equal(JSON.stringify(session).includes(marker), false);
 });
 
 function validJsonlAtByteLimit(source: 'codex' | 'claude-code'): string {
