@@ -56,7 +56,7 @@ test('creates a repository-scoped convention candidate from explicit project evi
   assert.equal(result.episodes[0]?.repositoryId, 'repo-1');
 });
 
-test('creates a repair candidate only after a changed command and later verification', () => {
+test('records a repaired command as outcome-observed without source-declared task verification', () => {
   const result = detectOperationalEpisodes({
     repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [
       event({ id: 'npm-request', phase: 'pre-action', action: 'npm', arguments: ['install'], second: 1 }),
@@ -68,9 +68,9 @@ test('creates a repair candidate only after a changed command and later verifica
     ]
   });
 
-  assert.equal(result.episodes[0]?.state, 'solution-supported');
-  assert.equal(result.candidates.length, 1);
-  assert.equal(result.candidates[0]?.kind, 'successful-workflow');
+  assert.equal(result.episodes[0]?.state, 'outcome-observed');
+  assert.equal(result.candidates.length, 0);
+  assert.equal(result.findings.some(({ kind }) => kind === 'ambiguous-repair'), true);
 });
 
 test('records ambiguity rather than a repair for unknown, unrelated or privilege-changing commands', () => {

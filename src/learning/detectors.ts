@@ -72,22 +72,8 @@ function repairEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' |
       findings.push(finding(episodeId, evidenceEventIds, 'The changed command modifies privilege or destructive effect.'));
       continue;
     }
-    const verification = operations.find((item) => item.request.occurredAt > replacement.request.occurredAt && isVerification(item.request) && item.result?.outcome === 'succeeded');
-    if (replacement.result?.outcome !== 'succeeded' || verification === undefined) {
-      episodes.push(createOperationalEpisode({ id: episodeId, repositoryId: input.repositoryId, sessionId: input.sessionId, detector: detectorVersion, state: 'outcome-observed', evidenceEventIds, attemptedOperation: command(failed.request), changedOperation: command(replacement.request), hypothesis: 'A task-relevant confirming result was not observed.' }));
-      findings.push(finding(episodeId, evidenceEventIds, 'The changed command has no task-relevant confirmation.'));
-      continue;
-    }
-    const completeEvidence = [...evidenceEventIds, verification.request.id, verification.result!.id];
-    const supportedEpisode = createOperationalEpisode({ id: episodeId, repositoryId: input.repositoryId, sessionId: input.sessionId, detector: detectorVersion, state: 'solution-supported', evidenceEventIds: completeEvidence, attemptedOperation: command(failed.request), changedOperation: command(replacement.request), confirmingEventId: verification.result!.id });
-    episodes.push(supportedEpisode);
-    candidates.push(createLearningCandidate({
-      id: stableId('candidate', episodeId, ...completeEvidence), episodeId, kind: 'successful-workflow', state: 'candidate',
-      statement: `After ${command(failed.request)} fails, use ${command(replacement.request)} and verify the task.`,
-      conditions: [`repository:${input.repositoryId}`, `when ${command(failed.request)} fails for the same operation`],
-      procedure: [`Run ${command(replacement.request)}.`, `Run ${command(verification.request)} to verify the task.`], evidenceEventIds: completeEvidence,
-      invalidationConditions: ['A later task verification contradicts the repair.', 'The target, privilege or destructive effect changes.']
-    }));
+    episodes.push(createOperationalEpisode({ id: episodeId, repositoryId: input.repositoryId, sessionId: input.sessionId, detector: detectorVersion, state: 'outcome-observed', evidenceEventIds, attemptedOperation: command(failed.request), changedOperation: command(replacement.request), hypothesis: 'A source-declared task verification was not observed.' }));
+    findings.push(finding(episodeId, evidenceEventIds, 'The changed command has no source-declared task verification.'));
   }
   return { episodes, findings, candidates };
 }
@@ -108,10 +94,6 @@ function changedCommand(left: CapturedEventRecord, right: CapturedEventRecord): 
 function unsafeChange(event: CapturedEventRecord): boolean {
   const commandParts = [event.signature.kind === 'action' ? event.signature.action : '', ...(event.signature.kind === 'action' ? event.signature.arguments ?? [] : [])];
   return commandParts.some((part) => ['sudo', 'doas', 'rm', '--force', '-f', '--delete'].includes(part));
-}
-
-function isVerification(event: CapturedEventRecord): boolean {
-  return event.signature.kind === 'action' && (event.signature.arguments ?? []).some((argument) => ['test', 'check', 'verify', 'pytest'].includes(argument));
 }
 
 function command(event: CapturedEventRecord): string {
