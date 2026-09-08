@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress, 2026-09-08. Approved on 2026-09-08. Tasks 1-3 of 7 are complete: contracts validate immutable records; deterministic detectors read bounded repository instructions and require a confirmed repair; additive SQLite records preserve jobs, candidates and contradictory evidence. Depends on [M5](2026-09-06-m5-session-evidence-design.md) and [M5.1](2026-09-07-m5-1-reliable-raw-session-ingestion-design.md). Extends specs 001/002/006. Guidance is deferred to M8.
+In progress, 2026-09-08. Approved on 2026-09-08. Tasks 1-3 of 7 are complete. Task 4 is in progress: a repository-scoped worker can claim and run a job, but bounded retries, time limits and partial-coverage reporting are not complete. Contracts validate immutable records; deterministic detectors read bounded repository instructions and require a confirmed repair; additive SQLite records preserve jobs, candidates and contradictory evidence. Depends on [M5](2026-09-06-m5-session-evidence-design.md) and [M5.1](2026-09-07-m5-1-reliable-raw-session-ingestion-design.md). Extends specs 001/002/006. Guidance is deferred to M8.
 
 ## Problem
 
