@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "scenarios": [
+    { "id": "M6-A1", "name": "repository convention is scoped" },
+    { "id": "M6-A2", "name": "repair remains outcome-observed without task verification" },
+    { "id": "M6-A3", "name": "explicit convention supports positive discovery" },
+    { "id": "M6-A4", "name": "replay retains candidate identity and contradiction" },
+    { "id": "M6-A5", "name": "report separates coverage and evidence categories" },
+    { "id": "M6-A6", "name": "analysis admission cannot delay capture" },
+    { "id": "M6-A7", "name": "stored candidate remains a convention candidate" }
+  ]
+}

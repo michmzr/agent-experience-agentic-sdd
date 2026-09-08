@@ -123,7 +123,7 @@ Out of scope:
 
 ## Milestones 4–9: operational memory pivot
 
-Status: M4, M5 and M5.1 are complete on 2026-09-07. M6–M9 specifications were prepared on 2026-09-06 and remain unapproved and unimplemented. Canonical scope, dependency graph, previous P0–P5 mapping and acceptance ownership are in the [operational memory milestone index](operational-memory-milestones.md).
+Status: M4, M5 and M5.1 are complete on 2026-09-07. M6 is complete on 2026-09-08. M7–M9 specifications were prepared on 2026-09-06 and remain unapproved and unimplemented. Canonical scope, dependency graph, previous P0–P5 mapping and acceptance ownership are in the [operational memory milestone index](operational-memory-milestones.md).
 
 The proposed delivery sequence first provides asynchronous passive observation and local learning. Guidance remains an explicitly enabled later milestone. Existing completed milestones retain their historical status. Deferred M3.3 incomplete-session reconciliation is carried into M4 transport ordering and M5 reconstruction.
 

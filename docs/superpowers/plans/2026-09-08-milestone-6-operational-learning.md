@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node.js 22.17+, TypeScript, `node:sqlite`, `node:test`, pnpm.
 
-**Execution status:** In progress. Current task: 7 of 7. Completed tasks: 1-6. Task 2 is complete under the accepted boundary: conventions create candidates; repaired commands remain outcome-observed episodes because supported passive sources lack task-verification evidence. Task 3 persists capped retry state. Task 4 enforces bounded event input and elapsed time, records detector coverage and returns a passive run state. Task 5 admits analysis after committed capture through an isolated best-effort call. Task 6 adds repository-scoped `analysis run` and `analysis report` commands. Reports expose coverage, findings, hypotheses, unverified repairs, candidates and verified knowledge without exposing repair commands as procedures. Verification: `pnpm build && node --test dist/test/milestone-6-acceptance.test.js` passed on 2026-09-08.
+**Execution status:** Complete. Tasks 1-7 completed on 2026-09-08. Tool conventions create candidates; repaired commands remain outcome-observed episodes because supported passive sources lack task-verification evidence. Jobs persist capped retries, the worker records bounded coverage, capture admission remains independent, and the CLI exposes repository-scoped run and report commands. Reports expose coverage, findings, hypotheses, unverified repairs, candidates and verified knowledge without exposing repair commands as procedures. Final verification: `pnpm check` passed with 667 tests on 2026-09-08. Evidence: [`docs/verification/2026-09-08-milestone-6-operational-learning.md`](../../verification/2026-09-08-milestone-6-operational-learning.md).
 
 ---
 
@@ -189,7 +189,7 @@ Run:
 
 Expected: limits, retries, partial coverage and passive-boundary tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
     git add src/learning/service.ts test/learning-service.test.ts
     git commit -m "feat: run bounded passive learning jobs"
@@ -227,7 +227,7 @@ Run:
 
 Expected: analysis admission is coalesced and capture remains independent of it.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
     git add src/capture/spool-drain.ts src/application/experience-service.ts src/config/project-settings.ts test/capture-spool.test.ts test/learning-service.test.ts
     git commit -m "feat: enqueue learning after passive capture"
@@ -269,7 +269,7 @@ Run:
 
 Expected: report compatibility and repository isolation tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
     git add src/application/experience-service.ts src/cli.ts test/milestone-6-acceptance.test.ts
     git commit -m "feat: report operational learning analysis"
@@ -283,11 +283,11 @@ Expected: report compatibility and repository isolation tests pass.
 - Create: `docs/verification/2026-09-08-milestone-6-operational-learning.md`
 - Modify: `docs/product/roadmap.md`
 
-- [ ] **Step 1: Write the acceptance fixture and assertions**
+- [x] **Step 1: Write the acceptance fixture and assertions**
 
 Add labeled fixture scenarios for M6-A1 through M6-A7. Include cross-repository and task-only scope isolation, a confirmed repair, unrelated success, transient outage, positive discovery, unknown outcome, replay/restart, contradiction, coverage with a failed detector and an interrupted worker. Add a credential-like marker to raw fixture input and assert it is absent from every persisted report and diagnostic.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -295,11 +295,11 @@ Run:
 
 Expected: one or more M6 acceptance requirements are not yet represented by the fixture.
 
-- [ ] **Step 3: Complete the fixture-driven behavior and verification record**
+- [x] **Step 3: Complete the fixture-driven behavior and verification record**
 
 Make only the minimal corrections required by the failed acceptance tests. Record exact commands, Node version, platform, test duration and observed report shape in the verification document. Change roadmap M6 status only after the full verification command succeeds.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress, 2026-09-08. Approved on 2026-09-08. Tasks 1-3 are complete under the corrected boundary: tool conventions create candidates, while repaired commands remain outcome-observed episodes because supported passive sources lack task-verification evidence. Analysis jobs retry at most three times and then enter `quarantined-input`. Task 4 is in progress. Contracts validate immutable records; deterministic detectors read bounded repository instructions; additive SQLite records preserve jobs, candidates and contradictory evidence. Depends on [M5](2026-09-06-m5-session-evidence-design.md) and [M5.1](2026-09-07-m5-1-reliable-raw-session-ingestion-design.md). Extends specs 001/002/006. Guidance is deferred to M8.
+Complete, 2026-09-08. Approved on 2026-09-08. Tool conventions create candidates, while repaired commands remain outcome-observed episodes because supported passive sources lack task-verification evidence. Analysis jobs retry at most three times and then enter `quarantined-input`. Contracts validate immutable records; deterministic detectors read bounded repository instructions; additive SQLite records preserve jobs, candidates, coverage and contradictory evidence. Capture admits analysis after commitment without being blocked by it. The CLI exposes bounded manual execution and a repository-scoped report. Depends on [M5](2026-09-06-m5-session-evidence-design.md) and [M5.1](2026-09-07-m5-1-reliable-raw-session-ingestion-design.md). Extends specs 001/002/006. Guidance is deferred to M8.
 
 ## Problem
 
