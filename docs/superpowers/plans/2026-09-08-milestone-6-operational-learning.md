@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node.js 22.17+, TypeScript, `node:sqlite`, `node:test`, pnpm.
 
-**Execution status:** In progress. Current task: 6 of 7. Completed tasks: 1-5. Task 2 is complete under the accepted boundary: conventions create candidates; repaired commands remain outcome-observed episodes because supported passive sources lack task-verification evidence. Task 3 persists capped retry state. Task 4 enforces bounded event input and elapsed time, records detector coverage and returns a passive run state. Task 5 admits analysis after committed capture through an isolated best-effort call. Project settings can disable that admission; absent settings retain enabled behavior. Verification: `pnpm build && node --test dist/test/project-settings.test.js dist/test/milestone-4-acceptance.test.js dist/test/learning-service.test.js` passed on 2026-09-08.
+**Execution status:** In progress. Current task: 7 of 7. Completed tasks: 1-6. Task 2 is complete under the accepted boundary: conventions create candidates; repaired commands remain outcome-observed episodes because supported passive sources lack task-verification evidence. Task 3 persists capped retry state. Task 4 enforces bounded event input and elapsed time, records detector coverage and returns a passive run state. Task 5 admits analysis after committed capture through an isolated best-effort call. Task 6 adds repository-scoped `analysis run` and `analysis report` commands. Reports expose coverage, findings, hypotheses, unverified repairs, candidates and verified knowledge without exposing repair commands as procedures. Verification: `pnpm build && node --test dist/test/milestone-6-acceptance.test.js` passed on 2026-09-08.
 
 ---
 
@@ -240,11 +240,11 @@ Expected: analysis admission is coalesced and capture remains independent of it.
 - Modify: `src/cli.ts`
 - Create: `test/milestone-6-acceptance.test.ts`
 
-- [ ] **Step 1: Write failing CLI tests**
+- [x] **Step 1: Write failing CLI tests**
 
 Seed a repository with a convention and a repair. Assert `analysis run --repository-id repo-1 --json` completes at most one job and `analysis report --repository-id repo-1 --json` returns separate `coverage`, `findings`, `hypotheses`, `unverifiedRepairs`, `candidates` and `verifiedKnowledge` arrays. Assert unverified repairs contain evidence and a missing-verification reason but no recommended procedure. Assert `analysis report` for another repository has no candidate. Assert unsupported options and a missing repository selection fail without leaking input text.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -252,7 +252,7 @@ Run:
 
 Expected: CLI rejects the `analysis` command.
 
-- [ ] **Step 3: Implement service and CLI surfaces**
+- [x] **Step 3: Implement service and CLI surfaces**
 
 Add `ExperienceService.runOperationalAnalysis(repositoryId)` and `ExperienceService.operationalAnalysisReport(repositoryId, sessionId?)`. Add parser branches for:
 
@@ -261,7 +261,7 @@ Add `ExperienceService.runOperationalAnalysis(repositoryId)` and `ExperienceServ
 
 Return report version `1`. The report must expose lifecycle state and evidence IDs, but never raw summaries, source text or executable strings beyond the already-sanitized candidate procedure. Keep `review session` output unchanged.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 

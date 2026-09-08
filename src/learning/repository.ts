@@ -46,10 +46,10 @@ export class OperationalLearningRepository {
     return this.job(this.database.prepare(`SELECT id, repository_id, session_id, input_high_water, state, attempts FROM operational_analysis_jobs WHERE repository_id = ? AND session_id = ? AND input_high_water = ?`).get(input.repositoryId, input.sessionId, input.inputHighWater));
   }
 
-  claim(): AnalysisJob | undefined {
+  claim(repositoryId?: string): AnalysisJob | undefined {
     this.database.exec('BEGIN IMMEDIATE');
     try {
-      const row = this.database.prepare(`SELECT id, repository_id, session_id, input_high_water, state, attempts FROM operational_analysis_jobs WHERE state IN ('pending', 'retryable-failure') ORDER BY created_at, id LIMIT 1`).get();
+      const row = this.database.prepare(`SELECT id, repository_id, session_id, input_high_water, state, attempts FROM operational_analysis_jobs WHERE state IN ('pending', 'retryable-failure') ${repositoryId === undefined ? '' : 'AND repository_id = ?'} ORDER BY created_at, id LIMIT 1`).get(...(repositoryId === undefined ? [] : [repositoryId]));
       if (!row) { this.database.exec('COMMIT'); return undefined; }
       this.database.prepare(`UPDATE operational_analysis_jobs SET state = 'running', attempts = attempts + 1, updated_at = ? WHERE id = ?`).run(this.now(), (row as { id: string }).id);
       const claimed = this.job(this.database.prepare(`SELECT id, repository_id, session_id, input_high_water, state, attempts FROM operational_analysis_jobs WHERE id = ?`).get((row as { id: string }).id));

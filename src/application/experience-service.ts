@@ -193,13 +193,23 @@ export class ExperienceService {
 
   runOperationalAnalysis(repositoryId: string) {
     const service = new OperationalLearningService(this.databasePath);
-    return service.runNext();
+    return service.runNext({ repositoryId });
   }
 
   operationalAnalysisReport(repositoryId: string, sessionId?: string) {
     const service = new OperationalLearningService(this.databasePath);
     const report = service.report(repositoryId);
-    return sessionId === undefined ? report : Object.freeze({ ...report, episodes: Object.freeze(report.episodes.filter((episode) => episode.sessionId === sessionId)) });
+    const scopedEpisodes = sessionId === undefined ? report.episodes : report.episodes.filter((episode) => episode.sessionId === sessionId);
+    const episodeIds = new Set(scopedEpisodes.map(({ id }) => id));
+    return Object.freeze({
+      version: 1 as const,
+      coverage: report.coverage,
+      findings: Object.freeze(report.findings.filter((finding) => episodeIds.has(finding.episodeId)).map(({ id, episodeId, kind, evidenceEventIds, statement }) => Object.freeze({ id, episodeId, kind, evidenceEventIds, statement }))),
+      hypotheses: Object.freeze(scopedEpisodes.filter(({ hypothesis }) => hypothesis !== undefined).map(({ id, state, evidenceEventIds, hypothesis }) => Object.freeze({ id, state, evidenceEventIds, hypothesis }))),
+      unverifiedRepairs: Object.freeze(scopedEpisodes.filter(({ state }) => state === 'outcome-observed').map(({ id, evidenceEventIds, hypothesis }) => Object.freeze({ id, evidenceEventIds, missingVerification: hypothesis ?? 'A source-declared task verification was not observed.' }))),
+      candidates: Object.freeze(report.candidates.filter((candidate) => episodeIds.has(candidate.episodeId))),
+      verifiedKnowledge: Object.freeze(this.list({ repositoryId, state: 'verified' }))
+    });
   }
 
   captureStatus() {

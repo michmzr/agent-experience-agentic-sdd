@@ -26,12 +26,12 @@ export class OperationalLearningService {
     } finally { store.close(); }
   }
 
-  runNext(options: { readonly maxEvents?: number; readonly deadlineMs?: number } = {}): LearningRunResult {
+  runNext(options: { readonly maxEvents?: number; readonly deadlineMs?: number; readonly repositoryId?: string } = {}): LearningRunResult {
     const maxEvents = validateLimit(options.maxEvents, DEFAULT_MAX_EVENTS, 'Event limit');
     const deadlineMs = validateLimit(options.deadlineMs, DEFAULT_DEADLINE_MS, 'Deadline');
     const repository = new OperationalLearningRepository(this.databasePath);
     try {
-      const job = repository.claim();
+      const job = repository.claim(options.repositoryId);
       if (!job) return Object.freeze({ status: 'idle' });
       const store = new ExperienceStore(this.databasePath);
       try {
