@@ -8,7 +8,7 @@ Executed command:
 
     pnpm check
 
-Result: passed. The compiled suite ran 669 tests with 669 passing in 14.131 seconds after the final integration check.
+Result: passed. After the fast-forward merge to `main`, the compiled suite ran 669 tests with 669 passing in 15.747 seconds.
 
 Focused M6 verification also passed:
 
