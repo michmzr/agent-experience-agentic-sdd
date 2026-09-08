@@ -68,3 +68,12 @@ test('quarantines invalid input without retrying it', () => {
   assert.equal(repository.jobById(job.id)?.attempts, 1);
   repository.close();
 });
+
+test('retries a timed-out job as an execution failure', () => {
+  const repository = new OperationalLearningRepository(path());
+  const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-3', inputHighWater: 1 });
+  const claimed = repository.claim();
+  repository.retry(claimed!.id, 'timeout');
+  assert.equal(repository.jobById(job.id)?.state, 'retryable-failure');
+  repository.close();
+});
