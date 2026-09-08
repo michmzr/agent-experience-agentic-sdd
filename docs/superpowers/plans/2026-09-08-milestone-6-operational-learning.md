@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node.js 22.17+, TypeScript, `node:sqlite`, `node:test`, pnpm.
 
-**Execution status:** In progress. Current task: 4 of 7. Completed tasks: 1-3. Task 2 is complete under the accepted boundary: conventions create candidates; repaired commands remain outcome-observed episodes because supported passive sources lack task-verification evidence. Task 1 verification: `pnpm build && node --test dist/test/learning-contracts.test.js` passed. Task 2 verification: `pnpm build && node --test dist/test/learning-detectors.test.js` passed. Task 3 verification: `pnpm build && node --test dist/test/learning-repository.test.js` passed. Task 4 partial verification: `pnpm build && node --test dist/test/learning-service.test.js` passed on 2026-09-08.
+**Execution status:** In progress. Current task: 4 of 7. Completed tasks: 1-3. Task 2 is complete under the accepted boundary: conventions create candidates; repaired commands remain outcome-observed episodes because supported passive sources lack task-verification evidence. Task 3 retry verification: `pnpm build && node --test dist/test/learning-repository.test.js` passed, including quarantine after the fourth failed attempt. Task 4 partial verification: `pnpm build && node --test dist/test/learning-service.test.js` passed on 2026-09-08.
 
 ---
 

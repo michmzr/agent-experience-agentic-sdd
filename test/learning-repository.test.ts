@@ -42,3 +42,19 @@ test('retains contradictory evidence and marks the candidate disputed', () => {
   assert.deepEqual(report.candidates[0]?.evidenceEventIds, ['event-1', 'event-2']);
   repository.close();
 });
+
+test('retries a bounded failed job and quarantines it after the fourth failure', () => {
+  const repository = new OperationalLearningRepository(path());
+  const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 1 });
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const claimed = repository.claim();
+    assert.equal(claimed?.state, 'running');
+    repository.retry(claimed!.id);
+  }
+  const fourth = repository.claim();
+  assert.equal(fourth?.attempts, 4);
+  repository.retry(fourth!.id);
+  assert.equal(repository.jobById(job.id)?.state, 'quarantined-input');
+  assert.equal(repository.claim(), undefined);
+  repository.close();
+});

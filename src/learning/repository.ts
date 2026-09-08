@@ -26,7 +26,7 @@ const schema = `
   );
 `;
 
-export interface AnalysisJob { readonly id: string; readonly repositoryId: string; readonly sessionId: string; readonly inputHighWater: number; readonly state: 'pending' | 'running' | 'completed'; readonly attempts: number; }
+export interface AnalysisJob { readonly id: string; readonly repositoryId: string; readonly sessionId: string; readonly inputHighWater: number; readonly state: 'pending' | 'running' | 'completed' | 'retryable-failure' | 'quarantined-input'; readonly attempts: number; }
 export interface LearningResult { readonly episodes: readonly OperationalEpisode[]; readonly findings: readonly OperationalFinding[]; readonly candidates: readonly LearningCandidate[]; }
 export interface OperationalLearningReport { readonly candidates: readonly (Omit<LearningCandidate, 'state'> & { readonly state: 'candidate' | 'disputed' })[]; readonly findings: readonly OperationalFinding[]; readonly episodes: readonly OperationalEpisode[]; }
 
@@ -45,12 +45,24 @@ export class OperationalLearningRepository {
   claim(): AnalysisJob | undefined {
     this.database.exec('BEGIN IMMEDIATE');
     try {
-      const row = this.database.prepare(`SELECT id, repository_id, session_id, input_high_water, state, attempts FROM operational_analysis_jobs WHERE state = 'pending' ORDER BY created_at, id LIMIT 1`).get();
+      const row = this.database.prepare(`SELECT id, repository_id, session_id, input_high_water, state, attempts FROM operational_analysis_jobs WHERE state IN ('pending', 'retryable-failure') ORDER BY created_at, id LIMIT 1`).get();
       if (!row) { this.database.exec('COMMIT'); return undefined; }
       this.database.prepare(`UPDATE operational_analysis_jobs SET state = 'running', attempts = attempts + 1, updated_at = ? WHERE id = ?`).run(this.now(), (row as { id: string }).id);
       const claimed = this.job(this.database.prepare(`SELECT id, repository_id, session_id, input_high_water, state, attempts FROM operational_analysis_jobs WHERE id = ?`).get((row as { id: string }).id));
       this.database.exec('COMMIT'); return claimed;
     } catch (error) { this.database.exec('ROLLBACK'); throw error; }
+  }
+
+  retry(jobId: string): void {
+    const job = this.jobById(jobId);
+    if (!job || job.state !== 'running') throw new TypeError('Analysis job is not running.');
+    const state = job.attempts >= 4 ? 'quarantined-input' : 'retryable-failure';
+    this.database.prepare(`UPDATE operational_analysis_jobs SET state = ?, updated_at = ? WHERE id = ?`).run(state, this.now(), jobId);
+  }
+
+  jobById(id: string): AnalysisJob | undefined {
+    const row = this.database.prepare(`SELECT id, repository_id, session_id, input_high_water, state, attempts FROM operational_analysis_jobs WHERE id = ?`).get(id);
+    return row === undefined ? undefined : this.job(row);
   }
 
   saveResult(jobId: string, result: LearningResult): void {
