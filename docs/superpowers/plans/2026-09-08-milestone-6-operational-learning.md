@@ -307,7 +307,7 @@ Run:
 
 Expected: build and every compiled test pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
     git add test/fixtures/milestone-6/scenarios.json test/milestone-6-acceptance.test.ts docs/verification/2026-09-08-milestone-6-operational-learning.md docs/product/roadmap.md
     git commit -m "test: verify milestone 6 operational learning"
