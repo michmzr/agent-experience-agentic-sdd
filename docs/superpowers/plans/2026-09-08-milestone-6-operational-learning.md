@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node.js 22.17+, TypeScript, `node:sqlite`, `node:test`, pnpm.
 
-**Execution status:** In progress. Current task: 4 of 7. Completed tasks: 1-3. Task 2 is complete under the accepted boundary: conventions create candidates; repaired commands remain outcome-observed episodes because supported passive sources lack task-verification evidence. Task 3 retry verification: `pnpm build && node --test dist/test/learning-repository.test.js` passed, including quarantine after the fourth failed attempt. Task 4 partial verification: `pnpm build && node --test dist/test/learning-service.test.js` passed on 2026-09-08.
+**Execution status:** In progress. Current task: 5 of 7. Completed tasks: 1-4. Task 2 is complete under the accepted boundary: conventions create candidates; repaired commands remain outcome-observed episodes because supported passive sources lack task-verification evidence. Task 3 persists capped retry state. Task 4 now enforces bounded event input and elapsed time, records detector coverage and returns a passive run state. Verification: `pnpm build && node --test dist/test/learning-service.test.js dist/test/learning-repository.test.js` passed on 2026-09-08.
 
 ---
 
@@ -157,11 +157,11 @@ Expected: deduplication, restart, contradiction and quarantine tests pass.
 - Create: `src/learning/service.ts`
 - Create: `test/learning-service.test.ts`
 
-- [ ] **Step 1: Write failing worker tests**
+- [x] **Step 1: Write failing worker tests**
 
 Inject a fake clock and a repository containing 101 events with a limit of 100. Assert the job reports incomplete coverage without preventing a subsequent job from completing. Inject a detector failure and assert state `retryable-failure`, then assert the fourth attempt becomes `quarantined-input`. Assert a completed job stores candidates and an automatic job produces no process output or advice.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -169,7 +169,7 @@ Run:
 
 Expected: TypeScript cannot resolve the learning service.
 
-- [ ] **Step 3: Implement the bounded runner**
+- [x] **Step 3: Implement the bounded runner**
 
 Export:
 
@@ -181,7 +181,7 @@ Export:
 
 Read only committed capture records in the selected repository. Use defaults of 1,024 events and 250 ms per claimed job. Record one coverage entry per detector. Catch detector errors by detector ID, retain output from other detectors, and convert only bounded errors to retryable/quarantined job state. Never call runtime evaluation, subprocess APIs or hook adapters.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 

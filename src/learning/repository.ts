@@ -1,7 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 
 import { openExperienceDatabase } from '../storage/database.js';
-import { createLearningCandidate, createOperationalEpisode, type LearningCandidate, type OperationalEpisode, type OperationalFinding } from './contracts.js';
+import { createLearningCandidate, createOperationalEpisode, type AnalysisCoverage, type LearningCandidate, type OperationalEpisode, type OperationalFinding } from './contracts.js';
 
 const schema = `
   CREATE TABLE IF NOT EXISTS operational_analysis_jobs (
@@ -24,11 +24,15 @@ const schema = `
     candidate_id TEXT NOT NULL REFERENCES operational_candidates(id), event_id TEXT NOT NULL, polarity TEXT NOT NULL,
     PRIMARY KEY(candidate_id, event_id)
   );
+  CREATE TABLE IF NOT EXISTS operational_analysis_coverage (
+    job_id TEXT NOT NULL REFERENCES operational_analysis_jobs(id), detector TEXT NOT NULL, status TEXT NOT NULL,
+    examined_events INTEGER NOT NULL, findings INTEGER NOT NULL, PRIMARY KEY(job_id, detector)
+  );
 `;
 
 export interface AnalysisJob { readonly id: string; readonly repositoryId: string; readonly sessionId: string; readonly inputHighWater: number; readonly state: 'pending' | 'running' | 'completed' | 'retryable-failure' | 'quarantined-input'; readonly attempts: number; }
-export interface LearningResult { readonly episodes: readonly OperationalEpisode[]; readonly findings: readonly OperationalFinding[]; readonly candidates: readonly LearningCandidate[]; }
-export interface OperationalLearningReport { readonly candidates: readonly (Omit<LearningCandidate, 'state'> & { readonly state: 'candidate' | 'disputed' })[]; readonly findings: readonly OperationalFinding[]; readonly episodes: readonly OperationalEpisode[]; }
+export interface LearningResult { readonly episodes: readonly OperationalEpisode[]; readonly findings: readonly OperationalFinding[]; readonly candidates: readonly LearningCandidate[]; readonly coverage?: readonly AnalysisCoverage[]; }
+export interface OperationalLearningReport { readonly candidates: readonly (Omit<LearningCandidate, 'state'> & { readonly state: 'candidate' | 'disputed' })[]; readonly findings: readonly OperationalFinding[]; readonly episodes: readonly OperationalEpisode[]; readonly coverage: readonly AnalysisCoverage[]; }
 
 export class OperationalLearningRepository {
   private readonly database: DatabaseSync;
@@ -81,6 +85,9 @@ export class OperationalLearningRepository {
         this.database.prepare(`INSERT INTO operational_candidates (id, episode_id, kind, state, statement, conditions_json, procedure_json, invalidation_json) VALUES (?, ?, ?, 'candidate', ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`).run(candidate.id, candidate.episodeId, candidate.kind, candidate.statement, JSON.stringify(candidate.conditions), JSON.stringify(candidate.procedure), JSON.stringify(candidate.invalidationConditions));
         for (const eventId of candidate.evidenceEventIds) this.database.prepare(`INSERT OR IGNORE INTO operational_candidate_evidence (candidate_id, event_id, polarity) VALUES (?, ?, 'confirms')`).run(candidate.id, eventId);
       }
+      for (const coverage of result.coverage ?? []) {
+        this.database.prepare(`INSERT INTO operational_analysis_coverage (job_id, detector, status, examined_events, findings) VALUES (?, ?, ?, ?, ?) ON CONFLICT(job_id, detector) DO UPDATE SET status = excluded.status, examined_events = excluded.examined_events, findings = excluded.findings`).run(jobId, coverage.detector, coverage.status, coverage.examinedEvents, coverage.findings);
+      }
       this.database.prepare(`UPDATE operational_analysis_jobs SET state = 'completed', updated_at = ? WHERE id = ?`).run(this.now(), jobId);
       this.database.exec('COMMIT');
     } catch (error) { this.database.exec('ROLLBACK'); throw error; }
@@ -92,7 +99,8 @@ export class OperationalLearningRepository {
     const episodes = (this.database.prepare(`SELECT payload_json FROM operational_episodes WHERE repository_id = ? ORDER BY id`).all(repositoryId) as Array<{ payload_json: string }>).map(({ payload_json }) => JSON.parse(payload_json) as OperationalEpisode);
     const findings = (this.database.prepare(`SELECT f.id, f.episode_id, f.kind, f.evidence_json, f.statement FROM operational_findings f JOIN operational_episodes e ON e.id = f.episode_id WHERE e.repository_id = ? ORDER BY f.id`).all(repositoryId) as Array<{ id: string; episode_id: string; kind: OperationalFinding['kind']; evidence_json: string; statement: string }>).map((row) => Object.freeze({ id: row.id, episodeId: row.episode_id, kind: row.kind, evidenceEventIds: Object.freeze(JSON.parse(row.evidence_json) as string[]), statement: row.statement }));
     const candidates = (this.database.prepare(`SELECT c.id, c.episode_id, c.kind, c.state, c.statement, c.conditions_json, c.procedure_json, c.invalidation_json FROM operational_candidates c JOIN operational_episodes e ON e.id = c.episode_id WHERE e.repository_id = ? ORDER BY c.id`).all(repositoryId) as Array<{ id: string; episode_id: string; kind: LearningCandidate['kind']; state: 'candidate' | 'disputed'; statement: string; conditions_json: string; procedure_json: string; invalidation_json: string }>).map((row) => Object.freeze({ id: row.id, episodeId: row.episode_id, kind: row.kind, state: row.state, statement: row.statement, conditions: Object.freeze(JSON.parse(row.conditions_json) as string[]), procedure: Object.freeze(JSON.parse(row.procedure_json) as string[]), evidenceEventIds: Object.freeze((this.database.prepare(`SELECT event_id FROM operational_candidate_evidence WHERE candidate_id = ? ORDER BY event_id`).all(row.id) as Array<{ event_id: string }>).map(({ event_id }) => event_id)), invalidationConditions: Object.freeze(JSON.parse(row.invalidation_json) as string[]) }));
-    return Object.freeze({ episodes: Object.freeze(episodes), findings: Object.freeze(findings), candidates: Object.freeze(candidates) });
+    const coverage = (this.database.prepare(`SELECT c.detector, c.status, c.examined_events, c.findings FROM operational_analysis_coverage c JOIN operational_analysis_jobs j ON j.id = c.job_id WHERE j.repository_id = ? ORDER BY c.detector, j.id`).all(repositoryId) as Array<{ detector: string; status: AnalysisCoverage['status']; examined_events: number; findings: number }>).map((row) => Object.freeze({ detector: row.detector, status: row.status, examinedEvents: row.examined_events, findings: row.findings }));
+    return Object.freeze({ episodes: Object.freeze(episodes), findings: Object.freeze(findings), candidates: Object.freeze(candidates), coverage: Object.freeze(coverage) });
   }
 
   private job(row: unknown): AnalysisJob { if (!row) throw new TypeError('Analysis job was not found.'); const value = row as { id: string; repository_id: string; session_id: string; input_high_water: number; state: AnalysisJob['state']; attempts: number }; return Object.freeze({ id: value.id, repositoryId: value.repository_id, sessionId: value.session_id, inputHighWater: value.input_high_water, state: value.state, attempts: value.attempts }); }

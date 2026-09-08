@@ -9,5 +9,5 @@ import { OperationalLearningService } from '../src/learning/service.js';
 test('returns false when no committed analysis job is pending', () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-learning-service-'));
   const service = new OperationalLearningService(join(dataDir, 'experience.sqlite'));
-  assert.equal(service.runNext(), false);
+  assert.deepEqual(service.runNext(), { status: 'idle' });
 });
