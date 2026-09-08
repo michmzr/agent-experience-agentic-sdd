@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft, 2026-09-06. Depends on [M5](2026-09-06-m5-session-evidence-design.md). Extends specs 001/002/006. Guidance is deferred to M8.
+Approved, 2026-09-08. Depends on [M5](2026-09-06-m5-session-evidence-design.md) and [M5.1](2026-09-07-m5-1-reliable-raw-session-ingestion-design.md). Extends specs 001/002/006. Guidance is deferred to M8.
 
 ## Problem
 
@@ -24,13 +24,29 @@ Injecting advice, executing corrections, modifying repository instructions, auto
 
 On request, show the goal when observable, applicable context, attempted operations, errors, changed approach, confirming result and candidate lesson. Missing intent remains unknown. A lesson provides when-to-use conditions, recommended procedure, evidence, last verification and invalidation conditions. A hypothetical cause is labeled and cannot become confirmed guidance.
 
-Initial scenarios are tool selection (`npm` versus project-required `pnpm`, environment setup versus project-required `uv`) and a command corrected after a confirmed error. Existing project instructions may directly establish a convention; deliberately executing a wrong tool is never required to learn it.
+Initial scenarios are tool selection (`npm` versus project-required `pnpm`, environment setup versus project-required `uv`) and a command corrected after a confirmed error. Existing project instructions may directly establish a convention; deliberately executing a wrong tool is never required to learn it. Broader tool-preference inference from ambiguous sessions is outside M6.
 
 ## Architecture and boundaries
 
-A separate bounded analysis job consumes committed M5 evidence. Deterministic detectors select candidate episodes; keyword matches are leads, not proof. Version analysis input/evidence ranges and detector version. Persist episodes, findings and candidates through validated transactions with stable identities. An interrupted job resumes without duplicate candidates.
+A separate bounded analysis job consumes committed M5 evidence. Deterministic detectors select candidate episodes; keyword matches are leads, not proof. M6 ships two detectors: repository tool conventions and confirmed command repairs. Version the analysis input range, detector and detector configuration. Persist jobs, episodes, findings, evidence and candidates through validated transactions with stable identities. An interrupted job resumes without duplicate candidates.
 
-If automatic local analysis is enabled, ingestion completion can enqueue one coalesced bounded job; starting/stopping analysis does not hold the capture consumer. Manual deep review remains separately invoked. External reviewer backends require explicit configuration and budget; this milestone does not require one for its initial deterministic scenarios.
+Committed ingestion enqueues local analysis by default. Admission coalesces pending work by repository and session, records the highest committed evidence ordinal and returns without waiting for analysis. A configuration switch can disable automatic admission without disabling capture or manual analysis. The worker claims one bounded job, checkpoints detector progress and applies configured limits for events, elapsed time and retry attempts. Starting, stopping or retrying analysis does not hold the capture consumer. Manual deep review remains separately invoked. External reviewer backends require explicit configuration and budget; this milestone does not require one for its initial deterministic scenarios.
+
+## Records and identity
+
+An analysis job records repository, session, input range, detector-set version, state, attempts, checkpoint, coverage and timestamps. Job states are `pending`, `running`, `completed`, `retryable-failure` and `quarantined-input`.
+
+An episode records its detector, repository and session scope, ordered evidence event IDs, state, intended operation when observable, attempted operation, changed approach, confirming result and optional hypothesis. Episode states are `unresolved`, `outcome-observed` and `solution-supported`. Missing fields remain absent rather than inferred.
+
+A finding records a typed detector conclusion and its supporting event IDs. A candidate lesson records its lesson kind, statement, applicability conditions, recommended procedure, supporting evidence, last verification and invalidation conditions. Candidates enter the existing knowledge lifecycle in `candidate` state. Reports read verified knowledge from the existing knowledge store instead of treating episode completion as verification.
+
+Stable identities are hashes over record type, repository scope, session, canonical evidence range and detector version. Reprocessing the same range updates provenance and coverage in one transaction. A later conflicting result creates contradictory evidence linked to the same logical candidate and allows the lifecycle to mark it `disputed`; it does not replace earlier evidence.
+
+## Detector requirements
+
+The tool-convention detector requires repository-scoped instruction evidence that explicitly selects a supported tool. Task-only instructions remain session-scoped and cannot create reusable repository knowledge. The initial detector recognizes explicit `pnpm` and `uv` conventions. It can emit a positive candidate without observing a deliberately wrong command.
+
+The command-repair detector requires a failed command, a later materially changed command for the same intended operation and a confirming task-relevant result. It compares parsed executable and argument structure rather than text similarity alone. A plain zero exit status confirms command execution but does not establish resource access. Unrelated later successes, unknown outcomes and transient external outages cannot produce a durable repair candidate. Changes to target, privilege or destructive effect remain findings or hypotheses and cannot become transparent repair recommendations.
 
 ## State and lifecycle
 
@@ -40,7 +56,7 @@ One failure does not establish a permanent invalid-command rule. A successful co
 
 ## Failure behavior
 
-Resource exhaustion, detector failure and ambiguous causality yield incomplete analysis or a hypothesis. Capture continues. Repeated analysis failures are bounded and visible on demand. Failure of one detector does not falsely mark the whole session fully reviewed.
+Resource exhaustion, detector failure and ambiguous causality yield incomplete analysis or a hypothesis. Capture continues. Retryable failures use a bounded attempt count; exhausted retries and invalid input become visible quarantined jobs. Coverage is recorded per detector, so failure of one detector does not falsely mark the whole session fully reviewed.
 
 ## Privacy and security
 
@@ -48,7 +64,7 @@ Use sanitized evidence only. Distinguish source text from executable instruction
 
 ## Compatibility and rollout
 
-Store new records additively with provenance and detector versions. Existing `review session` JSON behavior must retain compatibility through a declared version strategy; optional persistence must be explicit. Legacy mistyped candidates are not silently rewritten into verified lessons. Disable new analysis without losing capture or existing knowledge.
+Store new records additively with provenance and detector versions. Existing `review session` JSON fields retain their meaning; M6 adds a versioned `analysis` object containing coverage, findings, hypotheses, candidate lessons and verified knowledge. Persisting deterministic M6 analysis is explicit in the review request or occurs through the automatic post-ingestion job. Legacy mistyped candidates are not silently rewritten into verified lessons. Disabling new analysis does not remove capture or existing knowledge.
 
 ## Acceptance criteria
 
@@ -62,8 +78,8 @@ Store new records additively with provenance and detector versions. Existing `re
 
 Verify positive/negative episode fixtures, lifecycle, replay, privacy and report compatibility, followed by `pnpm check`. Include human labeling of candidate usefulness rather than accepting fluent recommendation wording as evidence.
 
-## Open decisions
+## Chosen rollout boundary
 
-Before approval: finalize episode schema, causal-evidence requirements per detector, local analysis trigger/coalescing/resource limits and persistence CLI/version contract. Resolve which records are observations versus candidates without weakening the existing lifecycle.
+M6 proves the local passive learning loop for explicit `pnpm` and `uv` conventions plus confirmed command repairs. It does not infer general tool preferences, deliver advice to an agent, execute candidate commands or promote candidates automatically. Those boundaries preserve the evidence, privacy and non-intervention requirements while leaving broader reuse to M7 and M8.
 
 [^1]: [Default reviewers](../../../src/review/default-reviewers.ts), [review service](../../../src/review/review-service.ts), [workflow reviewer instructions](../../../.agents/reviewers/workflow-tools.md).
