@@ -6,10 +6,15 @@ import { loadProjectSettings } from '../config/project-settings.js';
 import { persistPassiveCapture } from './passive-service.js';
 import { CaptureSpool, type CaptureSpoolStatus } from './spool.js';
 
+export interface LearningAdmission {
+  enqueueCommittedSession(repositoryId: string, sessionId: string): void;
+}
+
 export interface DrainCaptureSpoolInput {
   readonly databasePath: string;
   readonly now: () => string;
   readonly projectRoot?: string;
+  readonly learningAdmission?: LearningAdmission;
 }
 
 export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolStatus {
@@ -30,6 +35,7 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
         if (Date.parse(observedAt) > Date.parse(deadlineAt)) spool.recordDelayedDelivery(claimed.deliveryId, deadlineAt, observedAt);
         try {
           persistPassiveCapture(store, claimed.record);
+          admitCommittedSession(store, claimed.record, settings.automaticOperationalLearning !== false ? input.learningAdmission : undefined);
           spool.acknowledge(claimed.deliveryId, input.now());
         } catch (error) {
           if (isRetryableCaptureError(error)) spool.retry(claimed.deliveryId, input.now());
@@ -47,6 +53,14 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
       try { spool.releaseDrainLock(lockOwner); } finally { spool.close(); }
     }
   }
+}
+
+function admitCommittedSession(store: ExperienceStore, record: Parameters<typeof persistPassiveCapture>[1], learningAdmission: LearningAdmission | undefined): void {
+  if (!learningAdmission) return;
+  const sessionId = record.kind === 'session-start' ? record.session.id : record.kind === 'session-end' ? record.sessionId : record.event.sessionId;
+  const session = store.loadSession(sessionId);
+  if (!session?.repositoryId) return;
+  try { learningAdmission.enqueueCommittedSession(session.repositoryId, session.id); } catch { /* Analysis admission never affects capture delivery. */ }
 }
 
 function isRetryableCaptureError(error: unknown): boolean {

@@ -18,6 +18,7 @@ import { ExperienceStore, type KnowledgeScope, type RetrievalFilter, type Retrie
 import { projectCapturedSessionEvidence } from '../evidence/capture-projection.js';
 import { sourceEvidenceCapabilities } from '../evidence/capabilities.js';
 import { SessionEvidenceRepository } from '../evidence/repository.js';
+import { OperationalLearningService } from '../learning/service.js';
 import type { SessionId } from '../domain/types.js';
 import {
   RuntimeService,
@@ -187,7 +188,18 @@ export class ExperienceService {
   }
 
   captureDrain(now: () => string = () => new Date().toISOString()) {
-    return drainCaptureSpool({ databasePath: this.databasePath, now });
+    return drainCaptureSpool({ databasePath: this.databasePath, now, learningAdmission: new OperationalLearningService(this.databasePath) });
+  }
+
+  runOperationalAnalysis(repositoryId: string) {
+    const service = new OperationalLearningService(this.databasePath);
+    return service.runNext();
+  }
+
+  operationalAnalysisReport(repositoryId: string, sessionId?: string) {
+    const service = new OperationalLearningService(this.databasePath);
+    const report = service.report(repositoryId);
+    return sessionId === undefined ? report : Object.freeze({ ...report, episodes: Object.freeze(report.episodes.filter((episode) => episode.sessionId === sessionId)) });
   }
 
   captureStatus() {

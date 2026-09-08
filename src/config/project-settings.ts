@@ -8,6 +8,7 @@ const MAX_CAPTURE_DELIVERY_DEADLINE_MS = 60_000;
 export interface ProjectSettings {
   readonly version: 1;
   readonly captureDeliveryDeadlineMs: number;
+  readonly automaticOperationalLearning?: boolean;
 }
 
 export function loadProjectSettings(projectRoot: string): ProjectSettings {
@@ -19,14 +20,16 @@ export function loadProjectSettings(projectRoot: string): ProjectSettings {
   catch { throw new TypeError('Project settings are invalid.'); }
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Project settings are invalid.');
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).sort().join(',') !== 'captureDeliveryDeadlineMs,version' || record.version !== 1) {
+  const keys = Object.keys(record).sort().join(',');
+  if ((keys !== 'captureDeliveryDeadlineMs,version' && keys !== 'automaticOperationalLearning,captureDeliveryDeadlineMs,version') || record.version !== 1) {
     throw new TypeError('Project settings are invalid.');
   }
   const deadline = record.captureDeliveryDeadlineMs;
   if (!Number.isSafeInteger(deadline) || (deadline as number) < MIN_CAPTURE_DELIVERY_DEADLINE_MS || (deadline as number) > MAX_CAPTURE_DELIVERY_DEADLINE_MS) {
     throw new TypeError('Capture delivery deadline must be between 100 and 60000 milliseconds.');
   }
-  return Object.freeze({ version: 1, captureDeliveryDeadlineMs: deadline as number });
+  if (record.automaticOperationalLearning !== undefined && typeof record.automaticOperationalLearning !== 'boolean') throw new TypeError('Automatic operational learning must be boolean.');
+  return Object.freeze({ version: 1, captureDeliveryDeadlineMs: deadline as number, ...(record.automaticOperationalLearning === undefined ? {} : { automaticOperationalLearning: record.automaticOperationalLearning }) });
 }
 
 function defaults(): ProjectSettings {

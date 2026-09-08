@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node.js 22.17+, TypeScript, `node:sqlite`, `node:test`, pnpm.
 
-**Execution status:** In progress. Current task: 5 of 7. Completed tasks: 1-4. Task 2 is complete under the accepted boundary: conventions create candidates; repaired commands remain outcome-observed episodes because supported passive sources lack task-verification evidence. Task 3 persists capped retry state. Task 4 now enforces bounded event input and elapsed time, records detector coverage and returns a passive run state. Verification: `pnpm build && node --test dist/test/learning-service.test.js dist/test/learning-repository.test.js` passed on 2026-09-08.
+**Execution status:** In progress. Current task: 6 of 7. Completed tasks: 1-5. Task 2 is complete under the accepted boundary: conventions create candidates; repaired commands remain outcome-observed episodes because supported passive sources lack task-verification evidence. Task 3 persists capped retry state. Task 4 enforces bounded event input and elapsed time, records detector coverage and returns a passive run state. Task 5 admits analysis after committed capture through an isolated best-effort call. Project settings can disable that admission; absent settings retain enabled behavior. Verification: `pnpm build && node --test dist/test/project-settings.test.js dist/test/milestone-4-acceptance.test.js dist/test/learning-service.test.js` passed on 2026-09-08.
 
 ---
 
@@ -203,11 +203,11 @@ Expected: limits, retries, partial coverage and passive-boundary tests pass.
 - Modify: `test/capture-spool.test.ts`
 - Modify: `test/learning-service.test.ts`
 
-- [ ] **Step 1: Write failing integration tests**
+- [x] **Step 1: Write failing integration tests**
 
 Add a drain test that commits a repository-bound session and asserts one analysis job is pending after acknowledgement. Make the learning enqueue dependency throw and assert the capture record is still acknowledged and the drain returns normally. Disable automatic analysis in injected settings and assert no job is created.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -215,11 +215,11 @@ Run:
 
 Expected: the drain has no post-commit learning admission path.
 
-- [ ] **Step 3: Wire the non-blocking enqueue**
+- [x] **Step 3: Wire the non-blocking enqueue**
 
 Extend `DrainCaptureSpoolInput` with optional `learningAdmission`. Immediately after `persistPassiveCapture` succeeds and before `acknowledge`, derive the repository ID from the committed session. Call `enqueueCommittedSession` inside a separate `try/catch`; never retry or quarantine the capture delivery because analysis admission fails. Add `automaticOperationalLearning?: boolean` to project settings with a default of `true`, preserving strict settings validation and backward-compatible defaults.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
