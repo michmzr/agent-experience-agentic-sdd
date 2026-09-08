@@ -242,7 +242,7 @@ Expected: analysis admission is coalesced and capture remains independent of it.
 
 - [ ] **Step 1: Write failing CLI tests**
 
-Seed a repository with a convention and a repair. Assert `analysis run --repository-id repo-1 --json` completes at most one job and `analysis report --repository-id repo-1 --json` returns separate `coverage`, `findings`, `hypotheses`, `candidates` and `verifiedKnowledge` arrays. Assert `analysis report` for another repository has no candidate. Assert unsupported options and a missing repository selection fail without leaking input text.
+Seed a repository with a convention and a repair. Assert `analysis run --repository-id repo-1 --json` completes at most one job and `analysis report --repository-id repo-1 --json` returns separate `coverage`, `findings`, `hypotheses`, `unverifiedRepairs`, `candidates` and `verifiedKnowledge` arrays. Assert unverified repairs contain evidence and a missing-verification reason but no recommended procedure. Assert `analysis report` for another repository has no candidate. Assert unsupported options and a missing repository selection fail without leaking input text.
 
 - [ ] **Step 2: Verify RED**
 
