@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node.js 22.17+, TypeScript, `node:sqlite`, `node:test`, pnpm.
 
-**Execution status:** In progress. Current task: 3 of 7. Completed tasks: 1-2. Task 1 verification: `pnpm build && node --test dist/test/learning-contracts.test.js` passed. Task 2 verification: `pnpm build && node --test dist/test/learning-detectors.test.js` passed on 2026-09-08.
+**Execution status:** In progress. Current task: 4 of 7. Completed tasks: 1-3. Task 1 verification: `pnpm build && node --test dist/test/learning-contracts.test.js` passed. Task 2 verification: `pnpm build && node --test dist/test/learning-detectors.test.js` passed. Task 3 verification: `pnpm build && node --test dist/test/learning-repository.test.js` passed on 2026-09-08.
 
 ---
 
@@ -19,7 +19,6 @@
 - Create: `src/learning/detectors.ts`. Deterministic convention and command-repair episode detection.
 - Create: `src/learning/repository.ts`. Transactional SQLite persistence, coalescing and stable identities.
 - Create: `src/learning/service.ts`. Bounded job runner that reads captured records and persists detector output.
-- Modify: `src/storage/experience-store.ts`. Additive M6 schema migration and repository-scoped capture reads.
 - Modify: `src/capture/spool-drain.ts`. Enqueue analysis only after a record has committed.
 - Modify: `src/application/experience-service.ts` and `src/cli.ts`. Manual analysis and report commands.
 - Create: `test/learning-contracts.test.ts`, `test/learning-detectors.test.ts`, `test/learning-repository.test.ts`, `test/learning-service.test.ts` and `test/milestone-6-acceptance.test.ts`.
@@ -120,11 +119,11 @@ Expected: convention, repair, ambiguity and scope-isolation tests pass.
 - Modify: `src/storage/experience-store.ts`
 - Create: `test/learning-repository.test.ts`
 
-- [ ] **Step 1: Write failing persistence tests**
+- [x] **Step 1: Write failing persistence tests**
 
 Use one temporary SQLite database. Enqueue the same repository/session/range twice and assert one pending job. Persist a detector result, reopen the repository and assert the same episode and candidate IDs remain. Persist contradicting evidence for the candidate and assert prior evidence is retained and candidate state becomes `disputed`. Assert an invalid JSON record is quarantined and that a later valid job still runs.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -132,13 +131,13 @@ Run:
 
 Expected: TypeScript cannot resolve the learning repository.
 
-- [ ] **Step 3: Add the additive schema and repository**
+- [x] **Step 3: Add the additive schema and repository**
 
-Add schema migration 14 to `ExperienceStore` for `analysis_jobs`, `operational_episodes`, `operational_findings`, `operational_candidates` and `operational_candidate_evidence`. Enforce unique `(repository_id, session_id, input_high_water, detector_version)` for jobs and unique stable IDs for all detector records. Add `listCapturedRepositoryRecords(repositoryId)` so analysis cannot read another repository's sessions.
+`OperationalLearningRepository` creates additive `operational_*` tables in the existing local SQLite database. It enforces unique `(repository_id, session_id, input_high_water)` jobs and stable IDs for detector records. Existing `ExperienceStore.listRepositoryRecords(repositoryId)` remains the repository-scoped capture reader for the next task.
 
 In `OperationalLearningRepository`, implement `enqueue`, `claim`, `complete`, `retry`, `quarantine`, `saveResult` and `report`. Wrap `saveResult` in `BEGIN IMMEDIATE`; use `INSERT ... ON CONFLICT` only to update provenance and coverage, never to overwrite conflicting evidence. Cap retries at three and sanitize all stored diagnostic text to fixed codes.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -146,7 +145,7 @@ Run:
 
 Expected: deduplication, restart, contradiction and quarantine tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
     git add src/storage/experience-store.ts src/learning/repository.ts test/learning-repository.test.ts
     git commit -m "feat: persist operational learning analysis"
