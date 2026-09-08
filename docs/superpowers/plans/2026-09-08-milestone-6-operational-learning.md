@@ -4,7 +4,7 @@
 
 **Goal:** Persist evidence-backed, repository-scoped operational episodes and local candidate lessons without delaying passive capture or advising agents.
 
-**Architecture:** New `learning` modules derive deterministic episodes from captured, sanitized events. A SQLite-backed repository stores coalesced jobs, episodes, findings and candidate knowledge with stable identities; the capture drain only admits jobs. The CLI exposes an explicit analysis report and manual run, while the automatic worker remains bounded and passive.
+**Architecture:** New `learning` modules derive deterministic episodes from captured, sanitized events and narrowly scoped repository instructions. A SQLite-backed repository stores coalesced jobs, episodes, findings and candidate knowledge with stable identities; the capture drain only admits jobs. The CLI exposes an explicit analysis report and manual run, while the automatic worker remains bounded and passive.
 
 **Tech Stack:** Node.js 22.17+, TypeScript, `node:sqlite`, `node:test`, pnpm.
 
@@ -13,6 +13,7 @@
 ## File structure
 
 - Create: `src/learning/contracts.ts`. Public analysis states, records, bounded report and options.
+- Create: `src/learning/project-conventions.ts`. Bounded, root-only extraction of explicit `pnpm` and `uv` directives.
 - Create: `src/learning/detectors.ts`. Deterministic convention and command-repair episode detection.
 - Create: `src/learning/repository.ts`. Transactional SQLite persistence, coalescing and stable identities.
 - Create: `src/learning/service.ts`. Bounded job runner that reads captured records and persists detector output.
@@ -76,7 +77,7 @@ Expected: contract validation tests pass.
 
 - [ ] **Step 1: Write failing behavior tests**
 
-Add a `pnpm` convention test using repository-scoped instruction metadata and a separate repository ID with no matching candidate. Add a task-scoped instruction test that returns only a finding. Add repair tests for `npm install` failing followed by `pnpm install` and a confirming task-verification event. Assert a later unrelated success, a transient failed network operation, and a zero-only result do not produce a repair candidate.
+Add a `pnpm` convention test using an explicit repository-scoped instruction record and a separate repository ID with no matching candidate. Add a task-scoped instruction test that returns only a finding. Add repair tests for `npm install` failing followed by `pnpm install` and a confirming task-verification event. Assert a later unrelated success, a transient failed network operation, and a zero-only result do not produce a repair candidate.
 
 - [ ] **Step 2: Verify RED**
 
@@ -86,7 +87,9 @@ Run:
 
 Expected: detector exports do not exist.
 
-- [ ] **Step 3: Implement pure detection**
+- [ ] **Step 3: Implement root-only instruction extraction and pure detection**
+
+Create `readProjectToolConventions(repositoryRoot)` in `src/learning/project-conventions.ts`. It must inspect only root-level regular files `AGENTS.md`, `CLAUDE.md` and `.ael/instructions.md`; reject symlinks, files larger than 128 KiB and unreadable inputs without echoing their contents. Match only complete, case-insensitive directives `Use pnpm instead of npm` and `Use uv instead of pip`, and return basename, SHA-256 digest, line number and normalized tool pair.
 
 Export:
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved, 2026-09-08. Depends on [M5](2026-09-06-m5-session-evidence-design.md) and [M5.1](2026-09-07-m5-1-reliable-raw-session-ingestion-design.md). Extends specs 001/002/006. Guidance is deferred to M8.
+In progress, 2026-09-08. Approved on 2026-09-08. Depends on [M5](2026-09-06-m5-session-evidence-design.md) and [M5.1](2026-09-07-m5-1-reliable-raw-session-ingestion-design.md). Extends specs 001/002/006. Guidance is deferred to M8.
 
 ## Problem
 
@@ -44,7 +44,7 @@ Stable identities are hashes over record type, repository scope, session, canoni
 
 ## Detector requirements
 
-The tool-convention detector requires repository-scoped instruction evidence that explicitly selects a supported tool. Task-only instructions remain session-scoped and cannot create reusable repository knowledge. The initial detector recognizes explicit `pnpm` and `uv` conventions. It can emit a positive candidate without observing a deliberately wrong command.
+The tool-convention detector reads only regular, non-symlinked `AGENTS.md`, `CLAUDE.md` and `.ael/instructions.md` files at the repository root, each capped at 128 KiB. It records the basename, SHA-256 digest and matching line number, not the full instruction text. The detector requires an explicit supported-tool directive such as `Use pnpm instead of npm` or `Use uv instead of pip`. Task-only instructions remain session-scoped and cannot create reusable repository knowledge. The initial detector recognizes explicit `pnpm` and `uv` conventions. It can emit a positive candidate without observing a deliberately wrong command.
 
 The command-repair detector requires a failed command, a later materially changed command for the same intended operation and a confirming task-relevant result. It compares parsed executable and argument structure rather than text similarity alone. A plain zero exit status confirms command execution but does not establish resource access. Unrelated later successes, unknown outcomes and transient external outages cannot produce a durable repair candidate. Changes to target, privilege or destructive effect remain findings or hypotheses and cannot become transparent repair recommendations.
 
