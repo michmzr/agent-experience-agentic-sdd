@@ -10,6 +10,7 @@ import { runCli, runCliAsync, type CliResult } from '../src/cli.js';
 import { loadProjectSettings } from '../src/config/project-settings.js';
 import type { SessionId } from '../src/domain/types.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
+import { CaptureSpool } from '../src/capture/spool.js';
 
 const startTime = '2026-08-26T08:00:00.000Z';
 const eventTime = '2026-08-26T08:01:00.000Z';
@@ -32,7 +33,7 @@ async function waitForExperience(dataDir: string, predicate: (store: ExperienceS
     try {
       const store = new ExperienceStore(databasePath(dataDir));
       try {
-        if (predicate(store)) return;
+        if (predicate(store) && captureDrainIsIdle(dataDir)) return;
       } finally {
         store.close();
       }
@@ -42,6 +43,14 @@ async function waitForExperience(dataDir: string, predicate: (store: ExperienceS
     await new Promise((resolve) => setTimeout(resolve, 25));
   } while (Date.now() <= deadline);
   assert.fail(`Capture was not delivered before the configured deadline${lastError instanceof Error ? `: ${lastError.message}` : ''}.`);
+}
+
+function captureDrainIsIdle(dataDir: string): boolean {
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  try {
+    const status = spool.status();
+    return status.pending === 0 && status.claimed === 0;
+  } finally { spool.close(); }
 }
 
 async function waitForQuarantine(dataDir: string): Promise<void> {

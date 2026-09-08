@@ -8,7 +8,7 @@ Executed command:
 
     pnpm check
 
-Result: passed. The compiled suite ran 669 tests with 669 passing in 17.493 seconds.
+Result: passed. The compiled suite ran 669 tests with 669 passing in 14.131 seconds after the final integration check.
 
 Focused M6 verification also passed:
 
@@ -22,3 +22,4 @@ Decisions recorded in the implementation:
 - Command repairs create outcome-observed episodes only. Codex and Cursor passive hooks do not provide a task-verification relation that would justify a durable repair procedure.
 - Automatic learning admission runs after capture persistence, is best effort and can be disabled through `.ael/settings.json` with `automaticOperationalLearning: false`.
 - The worker processes at most 1,024 events and 250 ms per claimed job by default. Timeouts and execution failures retry three times; invalid input is quarantined immediately.
+- Asynchronous capture tests wait for the terminal spool state before deleting their data directories. A persisted session can become visible before post-commit learning admission and spool acknowledgement finish.

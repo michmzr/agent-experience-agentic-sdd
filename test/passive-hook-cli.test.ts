@@ -9,6 +9,7 @@ import { runCliAsync } from '../src/cli.js';
 import { loadProjectSettings } from '../src/config/project-settings.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 import { resolveRepository } from '../src/repository/local-repository.js';
+import { CaptureSpool } from '../src/capture/spool.js';
 
 const now = () => '2026-08-26T08:00:00.000Z';
 
@@ -34,18 +35,26 @@ function storedSessionSource(dataDir: string): string | undefined {
   }
 }
 
-async function waitFor<T>(read: () => T | undefined): Promise<T> {
+async function waitFor<T>(dataDir: string, read: () => T | undefined): Promise<T> {
   const deadline = Date.now() + loadProjectSettings(process.cwd()).captureDeliveryDeadlineMs;
   do {
     try {
       const value = read();
-      if (value !== undefined) return value;
+      if (value !== undefined && captureDrainIsIdle(dataDir)) return value;
     } catch {
       // A detached drain may briefly hold the primary database migration lock.
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   } while (Date.now() <= deadline);
   assert.fail('Capture was not delivered before the configured deadline.');
+}
+
+function captureDrainIsIdle(dataDir: string): boolean {
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  try {
+    const status = spool.status();
+    return status.pending === 0 && status.claimed === 0;
+  } finally { spool.close(); }
 }
 
 test('captures a Codex hook with empty stdout and exit zero', async () => {
@@ -62,7 +71,7 @@ test('captures a Codex hook with empty stdout and exit zero', async () => {
     );
 
     assert.deepEqual(result, { exitCode: 0, stdout: '', stderr: '' });
-    const session = await waitFor(() => readSession(dataDir, 'session-1'));
+    const session = await waitFor(dataDir, () => readSession(dataDir, 'session-1'));
     assert.equal(session.source, 'codex');
     assert.equal(session.repositoryId, resolveRepository(process.cwd())?.id);
   } finally {
@@ -84,7 +93,7 @@ test('dispatches Cursor hooks and ignores nontechnical events', async () => {
       { hookInput: JSON.stringify({ conversation_id: 'session-1', hook_event_name: 'sessionStart' }), now }
     );
     assert.deepEqual(captured, { exitCode: 0, stdout: '', stderr: '' });
-    assert.equal(await waitFor(() => storedSessionSource(dataDir)), 'cursor');
+    assert.equal(await waitFor(dataDir, () => storedSessionSource(dataDir)), 'cursor');
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
