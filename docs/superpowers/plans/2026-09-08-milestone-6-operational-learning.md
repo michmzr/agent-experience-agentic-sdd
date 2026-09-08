@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node.js 22.17+, TypeScript, `node:sqlite`, `node:test`, pnpm.
 
-**Execution status:** In progress. Current task: 4 of 7. Completed tasks: 1-3. Task 4 partial state: repository-scoped job claim and execution exist; retry, time-limit and partial-coverage behavior remain unchecked. Task 1 verification: `pnpm build && node --test dist/test/learning-contracts.test.js` passed. Task 2 verification: `pnpm build && node --test dist/test/learning-detectors.test.js` passed. Task 3 verification: `pnpm build && node --test dist/test/learning-repository.test.js` passed. Task 4 partial verification: `pnpm build && node --test dist/test/learning-service.test.js` passed on 2026-09-08.
+**Execution status:** In progress. Current task: 4 of 7. Completed tasks: 1-3. Task 2 is complete under the accepted boundary: conventions create candidates; repaired commands remain outcome-observed episodes because supported passive sources lack task-verification evidence. Task 1 verification: `pnpm build && node --test dist/test/learning-contracts.test.js` passed. Task 2 verification: `pnpm build && node --test dist/test/learning-detectors.test.js` passed. Task 3 verification: `pnpm build && node --test dist/test/learning-repository.test.js` passed. Task 4 partial verification: `pnpm build && node --test dist/test/learning-service.test.js` passed on 2026-09-08.
 
 ---
 
@@ -33,7 +33,7 @@
 
 - [x] **Step 1: Write failing detector-contract tests**
 
-Add tests that construct a repository-scoped instruction observation and assert a candidate of kind `convention`. Construct a failed action, changed later action, and task verification result and assert an episode in `solution-supported` state. Assert an unknown outcome produces no candidate and that changing the command target or adding a privilege-changing argument produces a hypothesis only.
+Add tests that construct a repository-scoped instruction observation and assert a candidate of kind `convention`. Construct a failed action and changed later action and assert an `outcome-observed` episode without a candidate. Assert an unknown outcome produces no candidate and that changing the command target or adding a privilege-changing argument produces a hypothesis only.
 
 - [x] **Step 2: Verify RED**
 
@@ -52,7 +52,7 @@ Create these public types and constructors:
     export type FindingKind = 'repository-tool-convention' | 'command-repair' | 'ambiguous-repair';
     export interface AnalysisCoverage { readonly detector: string; readonly status: 'completed' | 'incomplete' | 'failed'; readonly examinedEvents: number; readonly findings: number; }
     export interface OperationalEpisode { readonly id: string; readonly repositoryId?: string; readonly sessionId: string; readonly detector: string; readonly state: EpisodeState; readonly evidenceEventIds: readonly string[]; readonly attemptedOperation?: string; readonly changedOperation?: string; readonly confirmingEventId?: string; readonly hypothesis?: string; }
-    export interface LearningCandidate { readonly id: string; readonly episodeId: string; readonly kind: 'convention' | 'successful-workflow'; readonly state: 'candidate'; readonly statement: string; readonly conditions: readonly string[]; readonly procedure: readonly string[]; readonly evidenceEventIds: readonly string[]; readonly invalidationConditions: readonly string[]; }
+    export interface LearningCandidate { readonly id: string; readonly episodeId: string; readonly kind: 'convention'; readonly state: 'candidate'; readonly statement: string; readonly conditions: readonly string[]; readonly procedure: readonly string[]; readonly evidenceEventIds: readonly string[]; readonly invalidationConditions: readonly string[]; }
 
 Reject empty identifiers, duplicate evidence IDs, noncanonical timestamps and unsupported lesson kinds. Keep source commands as structured capture signatures; do not add raw-session text to these contracts.
 
@@ -78,7 +78,7 @@ Expected: contract validation tests pass.
 
 - [x] **Step 1: Write failing behavior tests**
 
-Add a `pnpm` convention test using an explicit repository-scoped instruction record and a separate repository ID with no matching candidate. Add a task-scoped instruction test that returns only a finding. Add repair tests for `npm install` failing followed by `pnpm install` and a confirming task-verification event. Assert a later unrelated success, a transient failed network operation, and a zero-only result do not produce a repair candidate.
+Add a `pnpm` convention test using an explicit repository-scoped instruction record and a separate repository ID with no matching candidate. Add a task-scoped instruction test that returns only a finding. Add repair tests for `npm install` failing followed by `pnpm install`; assert an outcome-observed episode and no repair candidate. Assert a later unrelated success, a transient failed network operation, a zero-only result and a command merely named `test` do not produce a repair candidate.
 
 - [x] **Step 2: Verify RED**
 
@@ -96,7 +96,7 @@ Export:
 
     export function detectOperationalEpisodes(input: DetectorInput): DetectorResult;
 
-Map explicit, repository-scoped `pnpm` and `uv` instruction evidence to a `convention` candidate. For repairs, require a captured `post-result` failure linked to a pre-action, a later same-tool-intent action with a different executable or argument set, and a linked task verification with `succeeded`. Treat a target change, `sudo`, `--force`, deletion arguments and unknown result as `ambiguous-repair` findings. Derive IDs with SHA-256 from record type, repository ID, session ID, ordered evidence IDs and detector version. Sort all output by ID before freezing it.
+Map explicit, repository-scoped `pnpm` and `uv` instruction evidence to a `convention` candidate. For repairs, require a captured `post-result` failure linked to a pre-action and a later same-tool-intent action with a different executable or argument set. Emit an outcome-observed episode and an ambiguity finding, never a repair candidate, because Codex and Cursor passive hooks have no task-verification relation. Do not infer confirmation from the executable or its arguments. Treat a target change, `sudo`, `--force`, deletion arguments and unknown result as `ambiguous-repair` findings. Derive IDs with SHA-256 from record type, repository ID, session ID, ordered evidence IDs and detector version. Sort all output by ID before freezing it.
 
 - [x] **Step 4: Verify GREEN**
 
