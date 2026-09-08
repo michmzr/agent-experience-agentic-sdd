@@ -22,7 +22,7 @@ Injecting advice, executing corrections, modifying repository instructions, auto
 
 ## User-visible behavior
 
-On request, show the goal when observable, applicable context, attempted operations, errors, changed approach, confirming result and candidate lesson. Reports show outcome-observed repairs separately as `unverified-repairs`; they include their evidence and the missing verification condition, but no recommended procedure. Missing intent remains unknown. A lesson provides when-to-use conditions, recommended procedure, evidence, last verification and invalidation conditions. A hypothetical cause is labeled and cannot become confirmed guidance.
+On request, show the goal when observable, applicable context, attempted operations, errors, changed approach, confirming result and candidate lesson. Reports show outcome-observed repairs separately as `unverified-repairs` by default; they include their evidence and the missing verification condition, but no recommended procedure. Missing intent remains unknown. A lesson provides when-to-use conditions, recommended procedure, evidence, last verification and invalidation conditions. A hypothetical cause is labeled and cannot become confirmed guidance.
 
 Initial scenarios are tool selection (`npm` versus project-required `pnpm`, environment setup versus project-required `uv`) and a command corrected after a confirmed error. Existing project instructions may directly establish a convention; deliberately executing a wrong tool is never required to learn it. Broader tool-preference inference from ambiguous sessions is outside M6.
 
