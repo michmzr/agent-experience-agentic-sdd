@@ -8,6 +8,8 @@
 
 **Tech Stack:** Node.js 22.17+, TypeScript, `node:sqlite`, `node:test`, pnpm.
 
+**Execution status:** In progress. Current task: 2 of 7. Completed tasks: 1. Task 1 verification: `pnpm build && node --test dist/test/learning-contracts.test.js` passed on 2026-09-08.
+
 ---
 
 ## File structure
@@ -20,7 +22,7 @@
 - Modify: `src/storage/experience-store.ts`. Additive M6 schema migration and repository-scoped capture reads.
 - Modify: `src/capture/spool-drain.ts`. Enqueue analysis only after a record has committed.
 - Modify: `src/application/experience-service.ts` and `src/cli.ts`. Manual analysis and report commands.
-- Create: `test/learning-detectors.test.ts`, `test/learning-repository.test.ts`, `test/learning-service.test.ts` and `test/milestone-6-acceptance.test.ts`.
+- Create: `test/learning-contracts.test.ts`, `test/learning-detectors.test.ts`, `test/learning-repository.test.ts`, `test/learning-service.test.ts` and `test/milestone-6-acceptance.test.ts`.
 - Create: `test/fixtures/milestone-6/scenarios.json` and `docs/verification/2026-09-08-milestone-6-operational-learning.md`.
 
 ### Task 1: Define M6 contracts and detector inputs
@@ -28,13 +30,13 @@
 **Files:**
 
 - Create: `src/learning/contracts.ts`
-- Create: `test/learning-detectors.test.ts`
+- Create: `test/learning-contracts.test.ts`
 
-- [ ] **Step 1: Write failing detector-contract tests**
+- [x] **Step 1: Write failing detector-contract tests**
 
 Add tests that construct a repository-scoped instruction observation and assert a candidate of kind `convention`. Construct a failed action, changed later action, and task verification result and assert an episode in `solution-supported` state. Assert an unknown outcome produces no candidate and that changing the command target or adding a privilege-changing argument produces a hypothesis only.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -42,7 +44,7 @@ Run:
 
 Expected: TypeScript cannot resolve `src/learning/contracts.js` or `src/learning/detectors.js`.
 
-- [ ] **Step 3: Define validated immutable contracts**
+- [x] **Step 3: Define validated immutable contracts**
 
 Create these public types and constructors:
 
@@ -55,7 +57,7 @@ Create these public types and constructors:
 
 Reject empty identifiers, duplicate evidence IDs, noncanonical timestamps and unsupported lesson kinds. Keep source commands as structured capture signatures; do not add raw-session text to these contracts.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -63,9 +65,9 @@ Run:
 
 Expected: contract validation tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
-    git add src/learning/contracts.ts test/learning-detectors.test.ts
+    git add src/learning/contracts.ts test/learning-contracts.test.ts
     git commit -m "feat: define operational learning contracts"
 
 ### Task 2: Implement deterministic detectors
