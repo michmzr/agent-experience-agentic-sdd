@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node.js 22.17+, TypeScript, `node:sqlite`, `node:test`, pnpm.
 
-**Execution status:** In progress. Current task: 2 of 7. Completed tasks: 1. Task 1 verification: `pnpm build && node --test dist/test/learning-contracts.test.js` passed on 2026-09-08.
+**Execution status:** In progress. Current task: 3 of 7. Completed tasks: 1-2. Task 1 verification: `pnpm build && node --test dist/test/learning-contracts.test.js` passed. Task 2 verification: `pnpm build && node --test dist/test/learning-detectors.test.js` passed on 2026-09-08.
 
 ---
 
@@ -77,11 +77,11 @@ Expected: contract validation tests pass.
 - Create: `src/learning/detectors.ts`
 - Modify: `test/learning-detectors.test.ts`
 
-- [ ] **Step 1: Write failing behavior tests**
+- [x] **Step 1: Write failing behavior tests**
 
 Add a `pnpm` convention test using an explicit repository-scoped instruction record and a separate repository ID with no matching candidate. Add a task-scoped instruction test that returns only a finding. Add repair tests for `npm install` failing followed by `pnpm install` and a confirming task-verification event. Assert a later unrelated success, a transient failed network operation, and a zero-only result do not produce a repair candidate.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -89,7 +89,7 @@ Run:
 
 Expected: detector exports do not exist.
 
-- [ ] **Step 3: Implement root-only instruction extraction and pure detection**
+- [x] **Step 3: Implement root-only instruction extraction and pure detection**
 
 Create `readProjectToolConventions(repositoryRoot)` in `src/learning/project-conventions.ts`. It must inspect only root-level regular files `AGENTS.md`, `CLAUDE.md` and `.ael/instructions.md`; reject symlinks, files larger than 128 KiB and unreadable inputs without echoing their contents. Match only complete, case-insensitive directives `Use pnpm instead of npm` and `Use uv instead of pip`, and return basename, SHA-256 digest, line number and normalized tool pair.
 
@@ -99,7 +99,7 @@ Export:
 
 Map explicit, repository-scoped `pnpm` and `uv` instruction evidence to a `convention` candidate. For repairs, require a captured `post-result` failure linked to a pre-action, a later same-tool-intent action with a different executable or argument set, and a linked task verification with `succeeded`. Treat a target change, `sudo`, `--force`, deletion arguments and unknown result as `ambiguous-repair` findings. Derive IDs with SHA-256 from record type, repository ID, session ID, ordered evidence IDs and detector version. Sort all output by ID before freezing it.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -107,7 +107,7 @@ Run:
 
 Expected: convention, repair, ambiguity and scope-isolation tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
     git add src/learning/detectors.ts test/learning-detectors.test.ts
     git commit -m "feat: detect local operational episodes"
