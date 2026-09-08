@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node.js 22.17+, TypeScript, `node:sqlite`, `node:test`, pnpm.
 
-**Execution status:** Complete. Tasks 1-7 completed on 2026-09-08. Tool conventions create candidates; repaired commands remain outcome-observed episodes because supported passive sources lack task-verification evidence. Jobs persist capped retries, the worker records bounded coverage, capture admission remains independent, and the CLI exposes repository-scoped run and report commands. Reports expose coverage, findings, hypotheses, unverified repairs, candidates and verified knowledge without exposing repair commands as procedures. Final verification: `pnpm check` passed with 667 tests on 2026-09-08. Evidence: [`docs/verification/2026-09-08-milestone-6-operational-learning.md`](../../verification/2026-09-08-milestone-6-operational-learning.md).
+**Execution status:** Complete. Tasks 1-7 completed on 2026-09-08. Tool conventions create candidates; repaired commands remain outcome-observed episodes because supported passive sources lack task-verification evidence. Jobs persist capped retries, the worker records bounded coverage, capture admission remains independent, and the CLI exposes repository-scoped run and report commands. Reports expose coverage, findings, hypotheses, unverified repairs, candidates and verified knowledge without exposing repair commands as procedures. Final verification: `pnpm check` passed with 669 tests on 2026-09-08. Evidence: [`docs/verification/2026-09-08-milestone-6-operational-learning.md`](../../verification/2026-09-08-milestone-6-operational-learning.md).
 
 ---
 

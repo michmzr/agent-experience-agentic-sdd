@@ -8,11 +8,11 @@ Executed command:
 
     pnpm check
 
-Result: passed. The compiled suite ran 667 tests with 667 passing in 15.723 seconds.
+Result: passed. The compiled suite ran 669 tests with 669 passing in 17.493 seconds.
 
 Focused M6 verification also passed:
 
-    pnpm build && node --test dist/test/milestone-6-acceptance.test.js
+    pnpm build && node --test dist/test/capture-spool.test.js dist/test/milestone-6-acceptance.test.js
 
 Observed report shape is version `1` with `coverage`, `findings`, `hypotheses`, `unverifiedRepairs`, `candidates` and `verifiedKnowledge`. The acceptance test checks repository isolation and verifies that a credential-like marker from repository instructions is absent from serialized report output.
 

@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { CaptureSpool } from '../src/capture/spool.js';
+import { drainCaptureSpool } from '../src/capture/spool-drain.js';
 import type { PassiveCaptureRecord } from '../src/capture/passive-service.js';
 
 function dataDirectory(): string {
@@ -163,5 +164,42 @@ test('logs bounded delayed-delivery timestamps and the eventual commit', () => {
   } finally {
     spool.close();
     rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('admits repository-bound committed capture for analysis without making capture depend on admission', () => {
+  const dataDir = dataDirectory();
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  const received: Array<{ repositoryId: string; sessionId: string }> = [];
+  try {
+    spool.admit({ kind: 'session-start', session: { ...sessionStart().session, repositoryId: 'repo-1' as never } }, '2026-09-07T08:00:00.000Z');
+    assert.equal(drainCaptureSpool({ databasePath, now: () => '2026-09-07T08:00:01.000Z', learningAdmission: { enqueueCommittedSession(repositoryId, sessionId) { received.push({ repositoryId, sessionId }); } } }).committed, 1);
+    assert.deepEqual(received, [{ repositoryId: 'repo-1', sessionId: 'session-1' }]);
+
+    spool.admit({ kind: 'session-start', session: { ...sessionStart().session, id: 'session-2' as never, repositoryId: 'repo-1' as never } }, '2026-09-07T08:00:01.000Z');
+    assert.equal(drainCaptureSpool({ databasePath, now: () => '2026-09-07T08:00:02.000Z', learningAdmission: { enqueueCommittedSession() { throw new Error('analysis unavailable'); } } }).committed, 2);
+  } finally {
+    spool.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('can disable automatic operational learning without disabling capture', () => {
+  const dataDir = dataDirectory();
+  const root = dataDirectory();
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  let admitted = false;
+  try {
+    mkdirSync(join(root, '.ael'));
+    writeFileSync(join(root, '.ael', 'settings.json'), '{"version":1,"captureDeliveryDeadlineMs":2000,"automaticOperationalLearning":false}\n');
+    spool.admit({ kind: 'session-start', session: { ...sessionStart().session, repositoryId: 'repo-1' as never } }, '2026-09-07T08:00:00.000Z');
+    assert.equal(drainCaptureSpool({ databasePath, projectRoot: root, now: () => '2026-09-07T08:00:01.000Z', learningAdmission: { enqueueCommittedSession() { admitted = true; } } }).committed, 1);
+    assert.equal(admitted, false);
+  } finally {
+    spool.close();
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
   }
 });
