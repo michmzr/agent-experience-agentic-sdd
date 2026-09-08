@@ -58,3 +58,13 @@ test('retries a bounded failed job and quarantines it after the fourth failure',
   assert.equal(repository.claim(), undefined);
   repository.close();
 });
+
+test('quarantines invalid input without retrying it', () => {
+  const repository = new OperationalLearningRepository(path());
+  const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-2', inputHighWater: 1 });
+  const claimed = repository.claim();
+  repository.retry(claimed!.id, 'invalid-input');
+  assert.equal(repository.jobById(job.id)?.state, 'quarantined-input');
+  assert.equal(repository.jobById(job.id)?.attempts, 1);
+  repository.close();
+});

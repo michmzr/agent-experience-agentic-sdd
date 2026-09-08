@@ -56,7 +56,7 @@ One failure does not establish a permanent invalid-command rule. A successful co
 
 ## Failure behavior
 
-Resource exhaustion, detector failure and ambiguous causality yield incomplete analysis or a hypothesis. Capture continues. Retryable failures use a bounded attempt count; exhausted retries and invalid input become visible quarantined jobs. Coverage is recorded per detector, so failure of one detector does not falsely mark the whole session fully reviewed.
+Resource exhaustion, detector failure and ambiguous causality yield incomplete analysis or a hypothesis. Capture continues. Execution failures have three retries and become quarantined on the fourth failed attempt. Invalid input becomes a visible quarantined job immediately. Coverage is recorded per detector, so failure of one detector does not falsely mark the whole session fully reviewed.
 
 ## Privacy and security
 

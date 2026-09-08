@@ -53,10 +53,10 @@ export class OperationalLearningRepository {
     } catch (error) { this.database.exec('ROLLBACK'); throw error; }
   }
 
-  retry(jobId: string): void {
+  retry(jobId: string, reason: 'execution-failure' | 'invalid-input' = 'execution-failure'): void {
     const job = this.jobById(jobId);
     if (!job || job.state !== 'running') throw new TypeError('Analysis job is not running.');
-    const state = job.attempts >= 4 ? 'quarantined-input' : 'retryable-failure';
+    const state = reason === 'invalid-input' || job.attempts >= 4 ? 'quarantined-input' : 'retryable-failure';
     this.database.prepare(`UPDATE operational_analysis_jobs SET state = ?, updated_at = ? WHERE id = ?`).run(state, this.now(), jobId);
   }
 
