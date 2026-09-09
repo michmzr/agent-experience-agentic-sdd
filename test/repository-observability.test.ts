@@ -59,6 +59,31 @@ test('upserts registered repositories with deterministic ordering', () => {
   }
 });
 
+test('unregisters only repository metadata and retains captured records', () => {
+  const dataDirectory = temporaryDirectory('ael-repository-unregister-');
+  const databasePath = join(dataDirectory, 'experience.sqlite');
+  const store = new ExperienceStore(databasePath);
+  const repositoryId = 'repo-retained';
+  try {
+    store.registerRepository({ id: repositoryId, root: dataDirectory, observedAt: '2026-08-31T10:00:00.000Z' });
+    store.appendIncremental({
+      session: {
+        id: 'session-retained' as never,
+        source: 'codex',
+        startedAt: '2026-08-31T10:00:00.000Z',
+        repositoryId: repositoryId as never
+      }
+    });
+
+    assert.equal(store.unregisterRepository(repositoryId), true);
+    assert.deepEqual(store.listRepositories(), []);
+    assert.equal(store.listRepositoryRecords(repositoryId).length, 1);
+  } finally {
+    store.close();
+    rmSync(dataDirectory, { recursive: true, force: true });
+  }
+});
+
 test('lists only raw capture records and statistics for the requested repository', () => {
   const dataDirectory = temporaryDirectory('ael-repository-records-');
   const first = join(dataDirectory, 'first');

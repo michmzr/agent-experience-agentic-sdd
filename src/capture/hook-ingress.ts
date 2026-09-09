@@ -6,7 +6,7 @@ import type { CursorCaptureDiagnosticCategory } from './hook-diagnostics.js';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import type { SessionId } from '../domain/types.js';
+import type { RepositoryId, SessionId } from '../domain/types.js';
 import type { PassiveCaptureRecord } from './passive-service.js';
 import { CaptureDiagnosticStore } from '../storage/capture-diagnostic-store.js';
 import { resolveRepository } from '../repository/local-repository.js';
@@ -20,6 +20,7 @@ export interface HookIngressOptions {
   readonly databasePath: string;
   readonly now: () => string;
   readonly workingDirectory?: string;
+  readonly repositoryId?: RepositoryId;
   readonly diagnosticStoreFactory?: (databasePath: string) => CaptureDiagnosticStore;
   readonly scheduleDrain?: (dataDirectory: string) => void;
 }
@@ -49,9 +50,10 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
       ? resolveDiagnosticScope(workingDirectory, { dataDirectory: dirname(options.databasePath) })
       : undefined;
     const repository = resolveRepository(workingDirectory);
+    const repositoryId = options.repositoryId ?? repository?.id as RepositoryId | undefined;
     const record = options.source === 'cursor'
-      ? cursorRecord(options, payload, repository?.id as never, scope!)
-      : adaptPassiveHook(options.source, payload, options.now(), repository?.id as never);
+      ? cursorRecord(options, payload, repositoryId, scope!)
+      : adaptPassiveHook(options.source, payload, options.now(), repositoryId);
     if (record === undefined) return { status: 'ignored' };
 
     spool = new CaptureSpool(join(dirname(options.databasePath), 'capture-spool.sqlite'));
@@ -77,7 +79,7 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
 function cursorRecord(
   options: HookIngressOptions,
   payload: unknown,
-  repositoryId: never,
+  repositoryId: RepositoryId | undefined,
   scope: DiagnosticScope
 ) {
   const adaptation = adaptCursorPassiveHook(payload, options.now(), repositoryId);

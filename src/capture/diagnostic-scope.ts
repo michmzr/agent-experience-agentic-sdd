@@ -20,6 +20,11 @@ export interface DiagnosticScopeResolutionOptions {
   readonly dataDirectory?: string;
 }
 
+export interface ConfiguredWorkspace {
+  readonly id: string;
+  readonly root: string;
+}
+
 const WORKSPACE_DIRECTORY_MODE = 0o755;
 const WORKSPACE_CONFIGURATION_MODE = 0o644;
 const WORKSPACE_CLAIM_DIRECTORY_MODE = 0o700;
@@ -75,6 +80,17 @@ export function initializeDiagnosticWorkspace(
     return workspaceScope(configuration.workspaceId);
   }
   return workspaceScope(id);
+}
+
+export function resolveConfiguredWorkspaceRoot(directory: string): ConfiguredWorkspace | undefined {
+  try {
+    const root = normalizeRealDirectory(directory);
+    const configuration = readWorkspaceConfiguration(root);
+    return configuration === undefined ? undefined : Object.freeze({ id: configuration.workspaceId, root });
+  } catch (error) {
+    if (isMissingPath(error)) return undefined;
+    throw error;
+  }
 }
 
 export function isResolvedDiagnosticScope(scope: unknown): scope is DiagnosticScope {

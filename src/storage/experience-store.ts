@@ -355,6 +355,11 @@ export class ExperienceStore {
     }));
   }
 
+  unregisterRepository(repositoryId: string): boolean {
+    if (typeof repositoryId !== 'string' || !repositoryId.trim()) throw new TypeError('Repository identifier is required.');
+    return Number(this.database.prepare('DELETE FROM repositories WHERE repository_id = ?').run(repositoryId).changes) > 0;
+  }
+
   listRepositoryRecords(repositoryId: string): readonly RepositoryRecord[] {
     const sessions = this.database.prepare(`SELECT id, source, started_at, ended_at, repository_id, workspace_id, user_id FROM sessions WHERE repository_id = ? ORDER BY started_at, id`).all(repositoryId) as unknown as SessionRow[];
     return sessions.map((row) => {

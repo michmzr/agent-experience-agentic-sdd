@@ -6,7 +6,7 @@ import { DomainError, errorMessage, ExperienceService } from './application/expe
 import { MAX_HOOK_INPUT_BYTES, type PassiveHookSource } from './capture/hook-adapters/contracts.js';
 import type { HookIngressResult } from './capture/hook-ingress.js';
 import { isBuiltInRuntimeProfileId, RuntimeServiceError, type BuiltInRuntimeProfileId } from './application/runtime-service.js';
-import type { KnowledgeState } from './domain/types.js';
+import type { KnowledgeState, RepositoryId } from './domain/types.js';
 import type { KnowledgeScope } from './storage/experience-store.js';
 import { discoverReviewSessions, runManualReview, runManualReviewExecution, type ManualReviewDependencies } from './review/review-service.js';
 import type { SessionIngestionDiagnostic } from './review/ingestion.js';
@@ -14,6 +14,7 @@ import { createProcessDebriefTerminalHost, runSessionDebrief, type DebriefTermin
 import { createProcessTerminalHost, TerminalReviewSelectionPrompt, type TerminalHost } from './review/terminal-prompt.js';
 import { verifyHookReadiness } from './cli/hook-readiness.js';
 import { resolveRepository, resolveRepositoryRoot } from './repository/local-repository.js';
+import { resolveConfiguredWorkspaceRoot } from './capture/diagnostic-scope.js';
 import { installHooks, parseHookSelection, type HookSelectionPrompt, verifyInstalledHooks } from './cli/hook-installation.js';
 import { AelSkillError, inspectAelSkill, installAelSkill, uninstallAelSkill, updateAelSkill, validateAelSkill, type AelSkillLocation, type AelSkillScope } from './skill/ael-skill.js';
 
@@ -35,9 +36,10 @@ export interface RunCliAsyncOptions {
 interface ParsedArguments { readonly positionals: string[]; readonly options: Map<string, string | true>; }
 
 const scopes = new Set(['global', 'repo'] as const);
+const initScopes = new Set(['global', 'repo', 'workspace'] as const);
 const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired']);
 const reviewSources = new Set(['codex', 'claude-code', 'cursor'] as const);
-const knownCommands = new Set(['init', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence', 'capture', 'analysis']);
+const knownCommands = new Set(['init', 'unregister', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence', 'capture', 'analysis']);
 
 export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory'> = {}): CliResult {
   if (args.length === 1 && args[0] === '--help') return { exitCode: 0, stdout: `${usage()}\n`, stderr: '' };
@@ -115,13 +117,13 @@ async function runCaptureHookCli(args: string[], options: RunCliAsyncOptions): P
   try {
     const parsed = parseArguments(args);
     if (parsed.positionals.length !== 2) throw new SyntaxError('Unknown command form for capture.');
-    assertNoUnknownOptions(parsed.options, ['source', 'data-dir']);
+    assertNoUnknownOptions(parsed.options, ['source', 'data-dir', 'repository-id']);
     const source = requiredString(parsed.options, 'source');
     if (source !== 'codex' && source !== 'cursor') throw new SyntaxError('Unsupported passive hook source.');
     const input = options.hookInput === undefined ? await readBoundedStdin() : { input: options.hookInput, oversized: false };
     if (input.oversized) return hookCliResult({ status: 'degraded', code: 'INVALID_INPUT' });
     const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
-    return hookCliResult(service.captureHook(source as PassiveHookSource, input.input, options.now, options.workingDirectory));
+    return hookCliResult(service.captureHook(source as PassiveHookSource, input.input, options.now, options.workingDirectory, optionalCaptureRepositoryId(parsed.options)));
   } catch (error) {
     return hookCliResult({ status: 'degraded', code: hookErrorCode(error) });
   }
@@ -165,24 +167,35 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   const [command, subcommand, ...rest] = parsed.positionals;
   if (command === 'init' && subcommand === undefined && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'scope', 'hooks', 'workspace-id']);
-    const scope = optionalScope(parsed.options);
+    const scope = optionalInitScope(parsed.options);
     if (scope === undefined) {
       if (parsed.options.has('hooks')) throw new SyntaxError('--hooks requires --scope repo.');
       return service.initWorkspace(options.workingDirectory ?? process.cwd(), optionalString(parsed.options, 'workspace-id'));
     }
-    if (parsed.options.has('workspace-id')) throw new SyntaxError('--workspace-id may not be used with --scope.');
     if (scope === 'global') {
-      if (parsed.options.has('hooks')) throw new SyntaxError('--hooks may be used only with --scope repo.');
+      if (parsed.options.has('hooks')) throw new SyntaxError('--hooks may be used only with --scope repo or workspace.');
+      if (parsed.options.has('workspace-id')) throw new SyntaxError('--workspace-id may be used only with --scope workspace.');
       return service.init();
     }
     const sources = parseHookSelection(requiredString(parsed.options, 'hooks'));
-    const repository = resolveRepositoryRoot(options.workingDirectory ?? process.cwd());
+    const directory = options.workingDirectory ?? process.cwd();
+    const repository = scope === 'repo'
+      ? resolveRepositoryRoot(directory)
+      : (() => {
+          service.initWorkspace(directory, optionalString(parsed.options, 'workspace-id'));
+          return resolveConfiguredWorkspaceRoot(directory);
+        })();
     if (!repository) throw new DomainError('REPOSITORY_ROOT_REQUIRED', 'Repository initialization requires a Git top-level directory.');
+    if (scope === 'repo' && parsed.options.has('workspace-id')) throw new SyntaxError('--workspace-id may be used only with --scope workspace.');
     const entrypoint = options.cliEntrypoint ?? fileURLToPath(import.meta.url);
-    installHooks({ repositoryRoot: repository.root, sources, cliEntrypoint: entrypoint });
+    installHooks({ repositoryRoot: repository.root, sources, cliEntrypoint: entrypoint, repositoryId: repository.id });
     const verified = verifyInstalledHooks({ repositoryRoot: repository.root, sources, cliEntrypoint: entrypoint });
     if (verified.status !== 'ready') throw new DomainError('HOOKS_NOT_READY', 'Selected hooks could not be verified.');
     return service.initRepository({ id: repository.id, root: repository.root, sources, observedAt: new Date().toISOString() });
+  }
+  if (command === 'unregister' && subcommand === undefined && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id']);
+    return service.unregisterRepository(requiredString(parsed.options, 'repository-id'));
   }
   if (command === 'experience' && subcommand === 'add' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'input']); return service.add(requiredString(parsed.options, 'input'));
@@ -391,6 +404,20 @@ function optionalRuntimeProfile(options: Map<string, string | true>): BuiltInRun
 function optionalScope(options: Map<string, string | true>): KnowledgeScope | undefined {
   const scope = optionalString(options, 'scope'); if (scope === undefined) return undefined; if (!scopes.has(scope as typeof scopes extends Set<infer Value> ? Value : never)) throw new SyntaxError('Scope must be global or repo.'); return scope === 'repo' ? 'repository' : 'global';
 }
+function optionalInitScope(options: Map<string, string | true>): 'global' | 'repo' | 'workspace' | undefined {
+  const scope = optionalString(options, 'scope');
+  if (scope === undefined) return undefined;
+  if (!initScopes.has(scope as 'global' | 'repo' | 'workspace')) throw new SyntaxError('Scope must be global, repo, or workspace.');
+  return scope as 'global' | 'repo' | 'workspace';
+}
+function optionalCaptureRepositoryId(options: Map<string, string | true>): RepositoryId | undefined {
+  const repositoryId = optionalString(options, 'repository-id');
+  if (repositoryId === undefined) return undefined;
+  if (repositoryId.length > 64 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(repositoryId)) {
+    throw new SyntaxError('Capture repository identifier is invalid.');
+  }
+  return repositoryId as RepositoryId;
+}
 function optionalState(options: Map<string, string | true>): KnowledgeState | undefined {
   const state = optionalString(options, 'state'); if (state === undefined) return undefined; if (!states.has(state as KnowledgeState)) throw new SyntaxError('Knowledge state is unsupported.'); return state as KnowledgeState;
 }
@@ -426,6 +453,10 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
   if (command === 'init') {
     const workspace = value as { kind?: string; id?: string; databasePath?: string };
     return workspace.kind === 'workspace' ? `Initialized workspace ${workspace.id}.` : `Initialized local experience store at ${workspace.databasePath}.`;
+  }
+  if (command === 'unregister') {
+    const result = value as { repositoryId: string; removed: boolean };
+    return result.removed ? `Unregistered ${result.repositoryId}.` : `Repository ${result.repositoryId} was not registered.`;
   }
   if ((command === 'hooks' && subcommand === 'diagnostics') || (command === 'experience' && subcommand === 'inspect')) {
     return formatCaptureDiagnostics(value as { scope: { kind: string; id: string }; counts: Record<string, number> });
@@ -555,7 +586,7 @@ function invalidCommand(command: string | undefined): SyntaxError {
     ? `Unknown command form for ${command}.`
     : 'Unknown command.');
 }
-function usage(): string { return 'Usage: ael <init [--workspace-id slug]|init --scope global|repo [--hooks codex,cursor]|list records|stats|status|status-global|experience add|experience inspect|validate|inspect|lessons list|retrieve|export|evidence session <id>|capture hook --source codex|cursor|capture drain|capture status|analysis run --repository-id id|analysis report --repository-id id|hooks verify --worktree path|hooks diagnostics|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote|skill install|update|status|validate|uninstall> [options]'; }
+function usage(): string { return 'Usage: ael <init [--workspace-id slug]|init --scope global|repo|workspace [--hooks codex,cursor]|unregister --repository-id id|list records|stats|status|status-global|experience add|experience inspect|validate|inspect|lessons list|retrieve|export|evidence session <id>|capture hook --source codex|cursor|capture drain|capture status|analysis run --repository-id id|analysis report --repository-id id|hooks verify --worktree path|hooks diagnostics|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote|skill install|update|status|validate|uninstall> [options]'; }
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } {
   return error instanceof DomainError || error instanceof RuntimeServiceError
     ? { code: error.code, message: error.message }

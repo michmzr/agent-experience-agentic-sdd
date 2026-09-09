@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -82,6 +82,59 @@ test('initializes a repository when its hook scope is explicit', async () => {
     const report = JSON.parse(global.stdout) as { repositories: Array<{ selectedSources: string[]; status: string }> };
     assert.deepEqual(report.repositories.map((repository) => repository.selectedSources), [['codex', 'cursor']]);
     assert.deepEqual(report.repositories.map((repository) => repository.status), ['ready']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('initializes a non-Git workspace with hooks and reports it as ready', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-init-workspace-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-init-workspace-data-'));
+  try {
+    const initialized = runCli(
+      ['init', '--scope', 'workspace', '--hooks', 'codex,cursor', '--data-dir', dataDir, '--json'],
+      { workingDirectory: root, cliEntrypoint: join(process.cwd(), 'dist', 'src', 'cli.js') }
+    );
+    assert.equal(initialized.exitCode, 0, initialized.stderr);
+
+    const report = JSON.parse(runCli(['status-global', '--data-dir', dataDir, '--json']).stdout) as {
+      repositories: Array<{ repository: { id: string; root: string }; selectedSources: string[]; status: string }>;
+    };
+    assert.equal(report.repositories.length, 1);
+    assert.equal(report.repositories[0]?.repository.root, realpathSync(root));
+    assert.match(report.repositories[0]?.repository.id ?? '', /^ael-init-workspace-[a-z0-9]+$/);
+    assert.deepEqual(report.repositories[0]?.selectedSources, ['codex', 'cursor']);
+    assert.equal(report.repositories[0]?.status, 'ready');
+    const wrapper = readFileSync(join(root, '.agents', 'hooks', 'ael-passive-capture.sh'), 'utf8');
+    assert.equal(wrapper.includes(`--repository-id "${report.repositories[0]?.repository.id}"`), true);
+    assert.equal(wrapper.includes('git rev-parse'), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('unregisters a stale repository from the global status report', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-unregister-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-unregister-data-'));
+  try {
+    initializeGitRepository(root);
+    const initialized = runCli(
+      ['init', '--scope', 'repo', '--hooks', 'cursor', '--data-dir', dataDir, '--json'],
+      { workingDirectory: root, cliEntrypoint: join(process.cwd(), 'dist', 'src', 'cli.js') }
+    );
+    assert.equal(initialized.exitCode, 0, initialized.stderr);
+    const before = JSON.parse(runCli(['status-global', '--data-dir', dataDir, '--json']).stdout) as {
+      repositories: Array<{ repository: { id: string } }>;
+    };
+    const repositoryId = before.repositories[0]!.repository.id;
+
+    const removed = runCli(['unregister', '--repository-id', repositoryId, '--data-dir', dataDir, '--json']);
+    assert.equal(removed.exitCode, 0, removed.stderr);
+    assert.deepEqual(JSON.parse(removed.stdout), { repositoryId, removed: true });
+    const after = JSON.parse(runCli(['status-global', '--data-dir', dataDir, '--json']).stdout) as { repositories: unknown[] };
+    assert.deepEqual(after.repositories, []);
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(dataDir, { recursive: true, force: true });

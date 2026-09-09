@@ -55,3 +55,50 @@ test('does not mutate files when an existing hook configuration is malformed', (
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('updates an existing AEL command without removing its matcher or timeout', () => {
+  const root = temporaryRepository();
+  const cliEntrypoint = join(process.cwd(), 'dist', 'src', 'cli.js');
+  const codexPath = join(root, '.codex', 'hooks.json');
+  try {
+    mkdirSync(join(root, '.codex'), { recursive: true });
+    writeFileSync(codexPath, JSON.stringify({
+      hooks: {
+        SessionStart: [{ matcher: 'startup', hooks: [{ type: 'command', command: '"$(git rev-parse --show-toplevel)/.agents/hooks/ael-passive-capture.sh" codex' }] }],
+        SessionEnd: [{ hooks: [{ type: 'command', command: '"$(git rev-parse --show-toplevel)/.agents/hooks/ael-passive-capture.sh" codex', timeout: 3 }] }]
+      }
+    }));
+
+    installHooks({ repositoryRoot: root, sources: ['codex'], cliEntrypoint, repositoryId: 'repo-id' });
+
+    const codex = JSON.parse(readFileSync(codexPath, 'utf8')) as {
+      hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout?: number }> }>>;
+    };
+    assert.equal(codex.hooks.SessionStart?.[0]?.matcher, 'startup');
+    assert.equal(codex.hooks.SessionEnd?.[0]?.hooks[0]?.timeout, 3);
+    assert.equal(codex.hooks.SessionStart?.[0]?.hooks[0]?.command, `"${join(root, '.agents/hooks/ael-passive-capture.sh')}" codex`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('accepts the canonical Git-root AEL command used by a development checkout', () => {
+  const root = temporaryRepository();
+  const cliEntrypoint = join(process.cwd(), 'dist', 'src', 'cli.js');
+  try {
+    installHooks({ repositoryRoot: root, sources: ['codex'], cliEntrypoint });
+    const codexPath = join(root, '.codex', 'hooks.json');
+    const codex = JSON.parse(readFileSync(codexPath, 'utf8')) as { hooks: Record<string, unknown> };
+    const serialized = JSON.stringify(codex).replaceAll(
+      `\\"${join(root, '.agents/hooks/ael-passive-capture.sh')}\\" codex`,
+      '\\"$(git rev-parse --show-toplevel)/.agents/hooks/ael-passive-capture.sh\\" codex'
+    );
+    writeFileSync(codexPath, serialized);
+
+    assert.deepEqual(verifyInstalledHooks({ repositoryRoot: root, sources: ['codex'], cliEntrypoint }), {
+      status: 'ready', sources: [{ source: 'codex', status: 'ready' }]
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

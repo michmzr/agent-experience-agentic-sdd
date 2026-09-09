@@ -79,6 +79,30 @@ test('captures a Codex hook with empty stdout and exit zero', async () => {
   }
 });
 
+test('attributes a non-Git workspace hook to the identifier supplied by its wrapper', async () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'ael-hook-workspace-'));
+  const dataDir = temporaryDataDirectory();
+  try {
+    const result = await runCliAsync(
+      ['capture', 'hook', '--source', 'codex', '--repository-id', 'secondbrain', '--data-dir', dataDir],
+      {
+        workingDirectory: workspace,
+        hookInput: JSON.stringify({
+          session_id: 'workspace-session', cwd: workspace, hook_event_name: 'SessionStart', source: 'startup'
+        }),
+        now
+      }
+    );
+
+    assert.deepEqual(result, { exitCode: 0, stdout: '', stderr: '' });
+    const session = await waitFor(dataDir, () => readSession(dataDir, 'workspace-session'));
+    assert.equal(session.repositoryId, 'secondbrain');
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test('dispatches Cursor hooks and ignores nontechnical events', async () => {
   const dataDir = temporaryDataDirectory();
   try {

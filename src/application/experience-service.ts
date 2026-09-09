@@ -9,9 +9,9 @@ import { ingestPassiveHook, type HookIngressResult } from '../capture/hook-ingre
 import { drainCaptureSpool } from '../capture/spool-drain.js';
 import { CaptureSpool } from '../capture/spool.js';
 import type { PassiveHookSource } from '../capture/hook-adapters/contracts.js';
-import { initializeDiagnosticWorkspace, resolveDiagnosticScope, type DiagnosticScope } from '../capture/diagnostic-scope.js';
+import { initializeDiagnosticWorkspace, resolveConfiguredWorkspaceRoot, resolveDiagnosticScope, type DiagnosticScope } from '../capture/diagnostic-scope.js';
 import { CaptureDiagnosticStore, type CursorDiagnosticCounts } from '../storage/capture-diagnostic-store.js';
-import type { ExperienceImport, KnowledgeEntry, KnowledgeState } from '../domain/types.js';
+import type { ExperienceImport, KnowledgeEntry, KnowledgeState, RepositoryId } from '../domain/types.js';
 import { validateImport } from '../domain/validation.js';
 import { defaultDatabasePath } from '../storage/database.js';
 import { ExperienceStore, type KnowledgeScope, type RetrievalFilter, type RetrievedKnowledgeEntry } from '../storage/experience-store.js';
@@ -70,6 +70,11 @@ export class ExperienceService {
   }
   initRepository(input: { id: string; root: string; sources: readonly ('codex' | 'cursor')[]; observedAt: string }): { databasePath: string } {
     const store = this.openStore(); try { store.registerRepository({ id: input.id, root: input.root, selectedSources: input.sources, observedAt: input.observedAt }); return { databasePath: this.databasePath }; } finally { store.close(); }
+  }
+  unregisterRepository(repositoryId: string): { repositoryId: string; removed: boolean } {
+    const store = this.openStore();
+    try { return { repositoryId, removed: store.unregisterRepository(repositoryId) }; }
+    finally { store.close(); }
   }
 
   add(inputPath: string): { imported: number } {
@@ -151,7 +156,9 @@ export class ExperienceService {
     const selectedSources = repository.selectedSources ?? [];
     const cli = { entrypoint, available: existsSync(entrypoint) };
     const root = repository.root;
-    if (!root || !resolveRepositoryRoot(root) || !database.available || !selectedSources.length) {
+    const resolvedRepository = root ? resolveRepositoryRoot(root) : undefined;
+    const registeredRootAvailable = resolvedRepository?.id === repository.id || configuredWorkspaceMatches(root, repository.id);
+    if (!root || !registeredRootAvailable || !database.available || !selectedSources.length) {
       return {
         status: 'not-ready' as const, repository: { id: repository.id, ...(root === undefined ? {} : { root }) }, selectedSources,
         cli, database, sources: selectedSources.map((source) => ({ source, status: 'unavailable' as const, code: root ? 'HOOK_UNAVAILABLE' : 'REPOSITORY_UNAVAILABLE' }))
@@ -183,8 +190,8 @@ export class ExperienceService {
     return this.runtime.promoteKnowledge(repository, inputPath);
   }
 
-  captureHook(source: PassiveHookSource, input: string, now: () => string = () => new Date().toISOString(), workingDirectory?: string): HookIngressResult {
-    return ingestPassiveHook({ source, input, databasePath: this.databasePath, now, workingDirectory });
+  captureHook(source: PassiveHookSource, input: string, now: () => string = () => new Date().toISOString(), workingDirectory?: string, repositoryId?: RepositoryId): HookIngressResult {
+    return ingestPassiveHook({ source, input, databasePath: this.databasePath, now, workingDirectory, repositoryId });
   }
 
   captureDrain(now: () => string = () => new Date().toISOString()) {
@@ -269,6 +276,12 @@ export class ExperienceService {
       throw new DomainError('INVALID_JSON', 'Input file is not valid JSON.');
     }
   }
+}
+
+function configuredWorkspaceMatches(root: string | undefined, id: string): boolean {
+  if (root === undefined) return false;
+  try { return resolveConfiguredWorkspaceRoot(root)?.id === id; }
+  catch { return false; }
 }
 
 export class DomainError extends Error {

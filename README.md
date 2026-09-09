@@ -53,7 +53,7 @@ The checked-in `.cursor/hooks.json` and `.codex/hooks.json` files connect sessio
 pnpm build
 ```
 
-The wrapper resolves the Git repository top level and invokes `dist/src/cli.js`. Capture data stays in the local SQLite database under `AEL_DATA_DIR` when it is set, or under the platform default described below. Hook capture stores normalized session and technical event records only. It excludes prompts, assistant or tool transcripts, raw hook payloads and credential-like values.
+The wrapper invokes the installed AEL CLI with the identifier assigned during initialization. Repository scope requires a Git top level. Workspace scope supports an ordinary directory with a managed `.ael/workspace.json` identifier. Capture data stays in the local SQLite database under `AEL_DATA_DIR` when it is set, or under the platform default described below. Hook capture stores normalized session and technical event records only. It excludes prompts, assistant or tool transcripts, raw hook payloads and credential-like values.
 
 Capture is fail-open. Accepted normalized records are committed first to the private `capture-spool.sqlite` queue, then a detached local worker transfers them to the main experience database. A missing build or failed admission writes only a generic diagnostic to standard error and exits successfully, so it cannot warn about, ask about, deny or block an agent action. Codex users must review and trust project hooks through `/hooks` after adding or changing the checked-in configuration. Remove the project hook entries to stop future capture; existing queued and committed local records remain available.
 
@@ -70,6 +70,8 @@ The delivery-readiness deadline defaults to 2000 milliseconds. A project may con
 ```text
 ael init --scope global
 ael init --scope repo --hooks codex|cursor|codex,cursor
+ael init --scope workspace --hooks codex|cursor|codex,cursor [--workspace-id <slug>]
+ael unregister --repository-id <id>
 ael list records [--repository-id <id>|--repository <git-root>] [--json]
 ael stats [--repository-id <id>|--repository <git-root>] [--json]
 ael status [--repository-id <id>|--repository <git-root>] [--json]
@@ -103,7 +105,7 @@ ael skill uninstall --scope global --yes [--json]
 
 Pass `--data-dir <directory>` to every command to select a private local data directory. The default is `~/Library/Application Support/AgentExperience` on macOS and `$XDG_DATA_HOME/agent-experience` or `~/.local/share/agent-experience` on Linux. Use `--json` for deterministic structured results and diagnostics. Runtime ALLOW and WARN decisions return exit code 0. Runtime BLOCK decisions, domain failures, and storage failures return 1. Invalid command syntax returns 2.
 
-`ael init` launched in an interactive terminal presents a multi-select list for Codex and Cursor hooks. Repository initialization outside an interactive terminal requires `--scope repo --hooks`. A repeated repository initialization keeps previously required hook sources and adds the selected sources. `status` returns exit code 1 if a required hook is unavailable. `status-global` lists every registered repository and always returns a report. `--repository` must name the Git top-level directory; `--repository-id` and `--repository` cannot be combined.
+`ael init` without an explicit scope initializes diagnostic workspace identity only. Hook installation requires either `--scope repo --hooks` at a Git top level or `--scope workspace --hooks` in an ordinary directory. A repeated initialization keeps previously required hook sources and adds the selected sources. `ael unregister` removes the selected entry from the status registry while preserving captured records. `status` returns exit code 1 if a required hook is unavailable. `status-global` lists every registered repository and workspace and always returns a report. `--repository` must name the Git top-level directory; `--repository-id` and `--repository` cannot be combined.
 
 Explicit session IDs run without a prompt and may read an injected external artifact store. Interactive selection and `latest` require `--repository` to name a directory inside a Git repository. The command resolves its canonical Git top level and accepts only artifacts whose real paths resolve inside that same top level. The prompt exposes only session IDs and recency, then requires confirmation before reading the selected artifact. Non-Git stores and different or nested repositories cannot qualify for interactive selection.
 
