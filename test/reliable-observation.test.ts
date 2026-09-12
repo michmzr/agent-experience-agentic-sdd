@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import test from 'node:test';
+
+import { containsCredentialMaterial } from '../src/privacy/structured-arguments.js';
 
 type ReceiptDisposition = 'accepted' | 'privacy-redaction' | 'unsupported';
 type EvidenceGap = 'result-not-delivered' | 'privacy-redacted' | 'verification-not-observed';
@@ -70,9 +72,9 @@ test('contains the six synthetic reliable-observation scenarios and their determ
 test('rejects unsafe, incomplete, and duplicate synthetic corpus records', () => {
   const fixture = parseFixture(readFixture());
   const cases: ReadonlyArray<readonly [string, unknown, RegExp]> = [
-    ['raw transcript key', { ...fixture, rawTranscript: 'synthetic-only' }, /raw transcript key/i],
+    ['raw transcript key', { ...fixture, rawTranscript: 'synthetic-only' }, /raw transcript field/i],
     ['absolute private path', replaceFirstScenario(fixture, { id: '/private/synthetic' }), /absolute or private path/i],
-    ['credential-like value', replaceFirstScenario(fixture, { expectedEvidenceGaps: ['token=synthetic-value'] }), /credential-like value/i],
+    ['credential-like value', replaceFirstScenario(fixture, { expectedEvidenceGaps: ['token=synthetic-value'] }), /credential material/i],
     ['duplicate scenario id', { ...fixture, scenarios: [...fixture.scenarios, fixture.scenarios[0]] }, /duplicate scenario id/i],
     ['missing expected disposition', replaceFirstScenario(fixture, { expectedDisposition: undefined }), /expectedDisposition/i],
     ['missing expected evidence gaps', replaceFirstScenario(fixture, { expectedEvidenceGaps: undefined }), /expectedEvidenceGaps/i]
@@ -80,6 +82,33 @@ test('rejects unsafe, incomplete, and duplicate synthetic corpus records', () =>
 
   for (const [name, invalid, expectation] of cases) {
     assert.throws(() => parseFixture(invalid), expectation, name);
+  }
+});
+
+test('rejects every supported credential form without returning its value in the error', () => {
+  const fixture = parseFixture(readFixture());
+  const credentialForms = [
+    'AKIA1234567890ABCDEF',
+    'ghp_abcdefghijklmnopqrst',
+    '-----BEGIN PRIVATE KEY-----',
+    'https://user:pass@example.invalid'
+  ];
+
+  for (const material of credentialForms) {
+    assert.equal(containsCredentialMaterial(material), true);
+    const error = captureError(() => parseFixture(replaceFirstScenario(fixture, { id: material })));
+    assert.ok(error !== undefined, 'credential material must be rejected');
+    assert.ok(error instanceof Error && error.message === 'Fixture contains credential material.', 'credential rejection must be generic');
+  }
+});
+
+test('loads the fixture relative to the test module instead of the current directory', () => {
+  const originalWorkingDirectory = process.cwd();
+  process.chdir(tmpdir());
+  try {
+    assert.equal(parseFixture(readFixture()).synthetic, true);
+  } finally {
+    process.chdir(originalWorkingDirectory);
   }
 });
 
@@ -99,8 +128,8 @@ test('rejects cross-scenario ownership, unlinked results, and inconsistent expec
 });
 
 function readFixture(): unknown {
-  const path = join(process.cwd(), 'test', 'fixtures', 'reliable-observation', 'scenarios.json');
-  return JSON.parse(readFileSync(path, 'utf8'));
+  const fixtureUrl = new URL('../../test/fixtures/reliable-observation/scenarios.json', import.meta.url);
+  return JSON.parse(readFileSync(fixtureUrl, 'utf8'));
 }
 
 function replaceFirstScenario(fixture: Fixture, replacement: Record<string, unknown>): unknown {
@@ -113,6 +142,15 @@ function replaceFirstScenario(fixture: Fixture, replacement: Record<string, unkn
 function replaceRecord(fixture: Fixture, collection: 'receipts' | 'results', index: number, replacement: Record<string, unknown>): unknown {
   const records = fixture[collection];
   return { ...fixture, [collection]: [...records.slice(0, index), { ...records[index], ...replacement }, ...records.slice(index + 1)] };
+}
+
+function captureError(callback: () => void): unknown {
+  try {
+    callback();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
 }
 
 function parseFixture(value: unknown): Fixture {
@@ -134,7 +172,7 @@ function parseFixture(value: unknown): Fixture {
     assertObject(scenario, 'scenario');
     assertClosedKeys(scenario, ['id', 'expectedDisposition', 'expectedEvidenceGaps', 'expectedRelationships'], 'scenario');
     assertString(scenario.id, 'scenario.id');
-    assert.ok(!scenarioIds.has(scenario.id), `duplicate scenario id: ${scenario.id}`);
+    assert.ok(!scenarioIds.has(scenario.id), 'Fixture contains duplicate scenario IDs.');
     scenarioIds.add(scenario.id);
     assertString(scenario.expectedDisposition, 'scenario.expectedDisposition');
     assertOneOf(scenario.expectedDisposition, ['accepted', 'privacy-redaction', 'unsupported'], 'scenario.expectedDisposition');
@@ -200,8 +238,8 @@ function countBy<T extends Record<string, unknown>>(values: readonly T[], key: k
 
 function rejectUnsafeFixtureData(value: unknown): void {
   if (typeof value === 'string') {
-    assert.ok(!/(?:^\/|^~\/|^[A-Za-z]:\\|\/Users\/|\/private\/|\/home\/)/.test(value), `absolute or private path: ${value}`);
-    assert.ok(!/(?:api[_-]?key|password|secret|token|authorization|bearer|sk-[\w-]+)\s*(?:=|:|\S)/i.test(value), `credential-like value: ${value}`);
+    assert.ok(!/(?:^\/|^~\/|^[A-Za-z]:\\|\/Users\/|\/private\/|\/home\/)/.test(value), 'Fixture contains an absolute or private path.');
+    assert.ok(!containsCredentialMaterial(value), 'Fixture contains credential material.');
     return;
   }
   if (Array.isArray(value)) {
@@ -210,7 +248,7 @@ function rejectUnsafeFixtureData(value: unknown): void {
   }
   if (value !== null && typeof value === 'object') {
     for (const [nestedKey, nestedValue] of Object.entries(value)) {
-      assert.ok(!/^(?:raw(?:Transcript|Output|Command|Prompt)?|transcript|output|command|arguments|prompt|cwd|path|sourceEventId)$/i.test(nestedKey), `raw transcript key: ${nestedKey}`);
+      assert.ok(!/^(?:raw(?:Transcript|Output|Command|Prompt)?|transcript|output|command|arguments|prompt|cwd|path|sourceEventId)$/i.test(nestedKey), 'Fixture contains a raw transcript field.');
       rejectUnsafeFixtureData(nestedValue);
     }
   }
@@ -221,7 +259,7 @@ function assertObject(value: unknown, name: string): asserts value is Record<str
 }
 
 function assertClosedKeys(value: Record<string, unknown>, allowed: readonly string[], name: string): void {
-  for (const key of Object.keys(value)) assert.ok(allowed.includes(key), `${name} has unexpected key: ${key}`);
+  for (const key of Object.keys(value)) assert.ok(allowed.includes(key), `${name} has an unexpected field.`);
 }
 
 function assertString(value: unknown, name: string): asserts value is string {
@@ -244,7 +282,7 @@ function validateTransports(records: unknown[], scenarioIds: ReadonlySet<string>
     assertString(record.id, 'transport.id');
     assertScenarioReference(record.scenarioId, scenarioIds, 'transport.scenarioId');
     assertOneOf(record.kind, ['lifecycle', 'operation'], 'transport.kind');
-    assert.ok(!ids.has(record.id), `duplicate transport id: ${record.id}`);
+    assert.ok(!ids.has(record.id), 'Fixture contains duplicate transport IDs.');
     ids.set(record.id, record.scenarioId);
   }
   return ids;
@@ -261,8 +299,8 @@ function validateReceipts(records: unknown[], scenarioIds: ReadonlySet<string>):
     assertScenarioReference(record.scenarioId, scenarioIds, 'receipt.scenarioId');
     assertString(record.operationId, 'receipt.operationId');
     assertOneOf(record.disposition, ['accepted', 'privacy-redaction', 'unsupported'], 'receipt.disposition');
-    assert.ok(!ids.has(record.id), `duplicate receipt id: ${record.id}`);
-    assert.ok(!operationOwners.has(record.operationId), `duplicate operation id: ${record.operationId}`);
+    assert.ok(!ids.has(record.id), 'Fixture contains duplicate receipt IDs.');
+    assert.ok(!operationOwners.has(record.operationId), 'Fixture contains duplicate operation IDs.');
     ids.set(record.id, record.scenarioId);
     operationOwners.set(record.operationId, record.scenarioId);
     dispositions.set(record.scenarioId, [...(dispositions.get(record.scenarioId) ?? []), record.disposition as ReceiptDisposition]);
@@ -284,7 +322,7 @@ function validateResults(records: unknown[], scenarioIds: ReadonlySet<string>): 
       assertOneOf(record.unknownReason, ['result-not-delivered', 'privacy-redacted', 'verification-not-observed'], 'result.unknownReason');
       evidenceGaps.set(record.scenarioId, new Set([...(evidenceGaps.get(record.scenarioId) ?? []), record.unknownReason as EvidenceGap]));
     }
-    assert.ok(!ids.has(record.id), `duplicate result id: ${record.id}`);
+    assert.ok(!ids.has(record.id), 'Fixture contains duplicate result IDs.');
     ids.set(record.id, record.scenarioId);
     operationLinks.push({ id: record.id, scenarioId: record.scenarioId, relatedOperationId: record.relatedOperationId });
   }
@@ -331,9 +369,9 @@ function validateReferences(expected: ReadonlyMap<string, readonly string[]>, ac
   const expectedOwners = new Map<string, string>();
   for (const [scenarioId, ids] of expected) {
     for (const id of ids) {
-      assert.ok(!expectedOwners.has(id), `duplicate expected ${name} relationship: ${id}`);
+      assert.ok(!expectedOwners.has(id), `Duplicate expected ${name} relationship.`);
       expectedOwners.set(id, scenarioId);
-      assert.equal(actual.get(id), scenarioId, `${name} relationship ownership mismatch: ${id}`);
+      assert.equal(actual.get(id), scenarioId, `${name} relationship ownership mismatch.`);
     }
   }
   assert.equal(actual.size, expectedOwners.size, `unexpected ${name} relationship`);
@@ -342,22 +380,22 @@ function validateReferences(expected: ReadonlyMap<string, readonly string[]>, ac
 function validateExpectedDispositions(expected: ReadonlyMap<string, ReceiptDisposition>, actual: ReadonlyMap<string, readonly ReceiptDisposition[]>): void {
   for (const [scenarioId, expectedDisposition] of expected) {
     const dispositions = actual.get(scenarioId);
-    assert.ok(dispositions !== undefined && dispositions.length > 0 && dispositions.every((disposition) => disposition === expectedDisposition), `expected disposition mismatch: ${scenarioId}`);
+    assert.ok(dispositions !== undefined && dispositions.length > 0 && dispositions.every((disposition) => disposition === expectedDisposition), 'Expected disposition mismatch.');
   }
 }
 
 function validateResultOperationLinks(links: readonly { id: string; scenarioId: string; relatedOperationId: string }[], operationOwners: ReadonlyMap<string, string>): void {
   for (const link of links) {
     const operationOwner = operationOwners.get(link.relatedOperationId);
-    assert.ok(operationOwner !== undefined, `result operation linkage is missing: ${link.relatedOperationId}`);
-    assert.equal(operationOwner, link.scenarioId, `result operation linkage ownership mismatch: ${link.id}`);
+    assert.ok(operationOwner !== undefined, 'Result operation linkage is missing.');
+    assert.equal(operationOwner, link.scenarioId, 'Result operation linkage ownership mismatch.');
   }
 }
 
 function validateExpectedEvidenceGaps(expected: ReadonlyMap<string, readonly EvidenceGap[]>, resultGaps: ReadonlyMap<string, ReadonlySet<EvidenceGap>>, abstentionGaps: ReadonlyMap<string, ReadonlySet<EvidenceGap>>): void {
   for (const [scenarioId, expectedGaps] of expected) {
     const observed = new Set<EvidenceGap>([...(resultGaps.get(scenarioId) ?? []), ...(abstentionGaps.get(scenarioId) ?? [])]);
-    assert.deepEqual([...observed].sort(), [...expectedGaps].sort(), `expected evidence gaps mismatch: ${scenarioId}`);
+    assert.deepEqual([...observed].sort(), [...expectedGaps].sort(), 'Expected evidence gaps mismatch.');
   }
 }
 
