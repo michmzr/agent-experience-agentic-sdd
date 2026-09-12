@@ -11,7 +11,7 @@ export interface PassiveCaptureStore {
   appendIncremental(input: IncrementalCaptureAppend): IncrementalAppendResult;
   endSession(source: AgentSource, id: SessionId, endedAt: string): IncrementalAppendResult;
   recordLifecycleSignal?(signal: LifecycleSignal): IncrementalAppendResult;
-  reopenSession?(source: AgentSource, id: SessionId): IncrementalAppendResult;
+  appendLifecycleTechnical?(event: NormalizedCaptureEvent): IncrementalAppendResult;
 }
 
 export interface PassiveCaptureServiceOptions {
@@ -48,9 +48,9 @@ export function persistPassiveCapture(store: PassiveCaptureStore, record: Passiv
   switch (record.kind) {
     case 'session-start': {
       if (record.lifecycle === undefined || store.recordLifecycleSignal === undefined) return store.appendIncremental({ session: record.session });
-      const session = record.lifecycle.kind === 'start' && record.lifecycle.sourceEventId.includes(':startup:')
+      const session = record.lifecycle.kind === 'start' && /:startup(?::|$)/.test(record.lifecycle.sourceEventId)
         ? store.appendIncremental({ session: record.session })
-        : store.reopenSession?.(record.session.source, record.session.id) ?? { inserted: false };
+        : { inserted: false };
       const lifecycle = store.recordLifecycleSignal(record.lifecycle);
       return Object.freeze({ inserted: session.inserted || lifecycle.inserted });
     }
@@ -60,11 +60,19 @@ export function persistPassiveCapture(store: PassiveCaptureStore, record: Passiv
       const session = store.endSession(record.source, record.sessionId, record.endedAt);
       return Object.freeze({ inserted: lifecycle.inserted || session.inserted });
     }
-    case 'technical':
-      return store.appendIncremental({
-        ...(record.session === undefined ? {} : { session: record.session }),
-        event: record.event
-      });
+    case 'technical': {
+      try {
+        return store.appendIncremental({
+          ...(record.session === undefined ? {} : { session: record.session }),
+          event: record.event
+        });
+      } catch (error) {
+        if (error instanceof TypeError && /after its session end/i.test(error.message) && store.appendLifecycleTechnical !== undefined) {
+          return store.appendLifecycleTechnical(record.event);
+        }
+        throw error;
+      }
+    }
   }
 }
 

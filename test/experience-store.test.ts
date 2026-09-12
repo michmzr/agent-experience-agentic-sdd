@@ -8,6 +8,7 @@ import test from 'node:test';
 import type { ExperienceImport, EventId, KnowledgeEntry } from '../src/domain/types.js';
 import type { SessionId } from '../src/domain/types.js';
 import { normalizeMappedCapture } from '../src/capture/normalization.js';
+import { persistPassiveCapture } from '../src/capture/passive-service.js';
 import { ExperienceStore, ExperienceStoreInitializationError } from '../src/storage/experience-store.js';
 
 function validImport(): ExperienceImport {
@@ -157,5 +158,29 @@ test('does not fabricate conversation identity for legacy session rows', () => {
 
   assert.equal(store.loadSession('legacy-session' as SessionId)?.endedAt, legacyEnd);
   assert.equal(store.conversationForLegacySession('legacy-session' as SessionId), undefined);
+  store.close();
+});
+
+test('keeps the v1 session closed while storing resumed technical activity in the v2 run', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-store-immutable-resume-')), 'experience.sqlite');
+  const store = new ExperienceStore(databasePath);
+  const sessionId = 'conversation-immutable' as SessionId;
+  const startedAt = '2026-09-12T08:00:00.000Z';
+  const endedAt = '2026-09-12T08:01:00.000Z';
+  const resumedAt = '2026-09-12T08:02:00.000Z';
+  const lifecycle = (sourceEventId: string, kind: 'start' | 'end', receiptAt: string) => ({ sourceEventId, source: 'codex' as const, conversationId: sessionId, kind, receiptAt });
+
+  persistPassiveCapture(store, { kind: 'session-start', session: { id: sessionId, source: 'codex', startedAt }, lifecycle: lifecycle('immutable:startup', 'start', startedAt) });
+  persistPassiveCapture(store, { kind: 'session-end', source: 'codex', sessionId, endedAt, lifecycle: lifecycle('immutable:end', 'end', endedAt) });
+  persistPassiveCapture(store, { kind: 'session-start', session: { id: sessionId, source: 'codex', startedAt: resumedAt }, lifecycle: lifecycle('immutable:resume', 'start', resumedAt) });
+
+  const pre = normalizeMappedCapture({ source: 'codex', sourceEventId: 'immutable-tool:pre', sessionId, phase: 'pre-action', occurredAt: '2026-09-12T08:02:01.000Z', tool: 'shell', action: 'test', summary: 'Run a focused test.' });
+  const post = normalizeMappedCapture({ source: 'codex', sourceEventId: 'immutable-tool:post', sessionId, phase: 'post-result', occurredAt: '2026-09-12T08:02:02.000Z', tool: 'shell', action: 'test', summary: 'Focused test passed.', outcome: 'succeeded', exitStatus: 0, relatedEventId: 'immutable-tool:pre' });
+  persistPassiveCapture(store, { kind: 'technical', event: pre });
+  persistPassiveCapture(store, { kind: 'technical', event: post });
+
+  assert.equal(store.loadSession(sessionId)?.endedAt, endedAt);
+  assert.deepEqual(store.listConversationTechnicalEvents(sessionId).map(({ sourceEventId }) => sourceEventId), ['immutable-tool:pre', 'immutable-tool:post']);
+  assert.equal(store.loadCapturedSession(sessionId)?.events.length, 0);
   store.close();
 });
