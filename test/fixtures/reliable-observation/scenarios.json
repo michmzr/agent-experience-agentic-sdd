@@ -6,38 +6,48 @@
       "id": "resume-after-run-end",
       "expectedDisposition": "accepted",
       "expectedEvidenceGaps": [],
-      "expectedRelationships": { "receiptIds": ["receipt-resume-a", "receipt-resume-b"], "resultIds": ["result-resume-a", "result-resume-b"] }
+      "expectedRelationships": { "transportIds": ["transport-resume-end", "transport-resume-a", "transport-resume-b"], "receiptIds": ["receipt-resume-a", "receipt-resume-b"], "resultIds": ["result-resume-a", "result-resume-b"] }
     },
     {
       "id": "missing-result",
       "expectedDisposition": "accepted",
       "expectedEvidenceGaps": ["result-not-delivered"],
-      "expectedRelationships": { "receiptIds": ["receipt-missing"], "resultIds": ["result-missing"] }
+      "expectedRelationships": { "transportIds": ["transport-missing"], "receiptIds": ["receipt-missing"], "resultIds": ["result-missing"] }
     },
     {
       "id": "privacy-redaction",
       "expectedDisposition": "privacy-redaction",
       "expectedEvidenceGaps": ["privacy-redacted"],
-      "expectedRelationships": { "receiptIds": ["receipt-redaction"], "resultIds": ["result-redaction"] }
+      "expectedRelationships": { "transportIds": ["transport-redaction"], "receiptIds": ["receipt-redaction"], "resultIds": ["result-redaction"] }
     },
     {
       "id": "expected-red",
       "expectedDisposition": "accepted",
       "expectedEvidenceGaps": [],
-      "expectedRelationships": { "receiptIds": ["receipt-expected-red"], "resultIds": ["result-expected-red"] }
+      "expectedRelationships": { "transportIds": ["transport-expected-red"], "receiptIds": ["receipt-expected-red"], "resultIds": ["result-expected-red"] }
     },
     {
       "id": "liquibase-to-sql",
       "expectedDisposition": "accepted",
       "expectedEvidenceGaps": [],
-      "expectedRelationships": { "receiptIds": ["receipt-liquibase"], "resultIds": ["result-liquibase"] }
+      "expectedRelationships": { "transportIds": ["transport-liquibase"], "receiptIds": ["receipt-liquibase"], "resultIds": ["result-liquibase"] }
     },
     {
       "id": "closure-with-verification-gap",
       "expectedDisposition": "accepted",
       "expectedEvidenceGaps": ["verification-not-observed"],
-      "expectedRelationships": { "receiptIds": ["receipt-closure"], "resultIds": ["result-closure"] }
+      "expectedRelationships": { "transportIds": ["transport-closure"], "receiptIds": ["receipt-closure"], "resultIds": ["result-closure"] }
     }
+  ],
+  "transports": [
+    { "id": "transport-resume-end", "scenarioId": "resume-after-run-end", "kind": "lifecycle" },
+    { "id": "transport-resume-a", "scenarioId": "resume-after-run-end", "kind": "operation" },
+    { "id": "transport-resume-b", "scenarioId": "resume-after-run-end", "kind": "operation" },
+    { "id": "transport-missing", "scenarioId": "missing-result", "kind": "operation" },
+    { "id": "transport-redaction", "scenarioId": "privacy-redaction", "kind": "operation" },
+    { "id": "transport-expected-red", "scenarioId": "expected-red", "kind": "operation" },
+    { "id": "transport-liquibase", "scenarioId": "liquibase-to-sql", "kind": "operation" },
+    { "id": "transport-closure", "scenarioId": "closure-with-verification-gap", "kind": "operation" }
   ],
   "receipts": [
     { "id": "receipt-resume-a", "scenarioId": "resume-after-run-end", "operationId": "operation-resume-a", "disposition": "accepted" },
@@ -75,6 +85,7 @@
     { "id": "abstention-closure", "scenarioId": "closure-with-verification-gap", "evidenceGaps": ["verification-not-observed"] }
   ],
   "expectedQuality": {
+    "transportRecords": 8,
     "uniqueOperations": 7,
     "durableReceipts": 7,
     "linkedResults": 7,

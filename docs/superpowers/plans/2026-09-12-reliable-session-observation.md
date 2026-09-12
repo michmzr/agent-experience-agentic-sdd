@@ -76,6 +76,8 @@ Expected: all corpus tests pass.
 
 Run: `git add test/fixtures/reliable-observation/scenarios.json test/reliable-observation.test.ts test/milestone-5-acceptance.test.ts && git commit -m "test: add reliable observation regression corpus"`
 
+Recorded verification evidence: RED: `pnpm build && node --test dist/test/reliable-observation.test.js` failed with `ENOENT: no such file or directory` for `test/fixtures/reliable-observation/scenarios.json`. GREEN: the same command passed 2/2. Relevant acceptance tests passed 7/7. `pnpm check` passed 677/677.
+
 ### Task 2: Add conversation and run lifecycle records for issue #3
 
 **Files:**
