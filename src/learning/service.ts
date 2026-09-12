@@ -31,7 +31,7 @@ export class OperationalLearningService {
     const deadlineMs = validateLimit(options.deadlineMs, DEFAULT_DEADLINE_MS, 'Deadline');
     const repository = new OperationalLearningRepository(this.databasePath);
     try {
-      const job = repository.claim(options.repositoryId);
+      const job = repository.claim(options.repositoryId, maxEvents);
       if (!job) return Object.freeze({ status: 'idle' });
       const store = new ExperienceStore(this.databasePath);
       try {
@@ -43,15 +43,15 @@ export class OperationalLearningService {
           return Object.freeze({ status: 'quarantined-input', jobId: job.id });
         }
         const startedAt = performance.now();
-        const events = record.events.slice(0, maxEvents);
+        const events = record.events.slice(job.inputFrom - 1, job.inputThrough);
         try {
           const result = detectOperationalEpisodes({ repositoryId: job.repositoryId, sessionId: job.sessionId, events, conventions: readProjectToolConventions(registration.root) });
           if (performance.now() - startedAt > deadlineMs) {
             repository.retry(job.id, 'timeout');
             return Object.freeze({ status: retryState(repository, job.id), jobId: job.id });
           }
-          const coverage = Object.freeze([coverageFor(events.length, record.events.length, result.findings.length)]);
-          repository.saveResult(job.id, { ...result, coverage });
+          const coverage = Object.freeze([coverageFor(events.length, job.inputThrough - job.inputFrom + 1, result.findings.length)]);
+          repository.saveResult(job.id, { ...result, coverage, inputDigest: `${job.inputFrom}:${job.inputThrough}:${events.map(({ id }) => id).join(',')}`, cost: events.length });
           return Object.freeze({ status: 'completed', jobId: job.id });
         } catch {
           repository.retry(job.id, 'execution-failure');

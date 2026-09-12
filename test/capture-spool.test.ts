@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { CaptureSpool } from '../src/capture/spool.js';
-import { drainCaptureSpool } from '../src/capture/spool-drain.js';
+import { drainCaptureSpool, waitForWorkerCompletion } from '../src/capture/spool-drain.js';
 import type { PassiveCaptureRecord } from '../src/capture/passive-service.js';
 
 function dataDirectory(): string {
@@ -282,4 +282,17 @@ test('can disable automatic operational learning without disabling capture', () 
     rmSync(dataDir, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('publishes worker completion only after the drain releases its lock', () => {
+  const dataDir = dataDirectory();
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  try {
+    spool.admit(sessionStart(), '2026-09-12T10:00:00.000Z');
+    assert.equal(waitForWorkerCompletion(dataDir), false);
+    drainCaptureSpool({ databasePath, now: () => '2026-09-12T10:00:01.000Z' });
+    assert.equal(waitForWorkerCompletion(dataDir), true);
+    assert.equal(spool.tryAcquireDrainLock('post-completion', '2026-09-12T10:00:02.000Z', 1_000), true);
+  } finally { spool.close(); rmSync(dataDir, { recursive: true, force: true }); }
 });

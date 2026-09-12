@@ -31,8 +31,8 @@ test('coalesces an equivalent job and persists candidates across restart', () =>
 test('retains contradictory evidence and marks the candidate disputed', () => {
   const repository = new OperationalLearningRepository(path());
   const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 1 });
-  repository.claim();
-  repository.saveResult(job.id, {
+  const claimed = repository.claim();
+  repository.saveResult(claimed!.id, {
     episodes: [{ id: 'episode-1', repositoryId: 'repo-1', sessionId: 'session-1', detector: 'm6-deterministic@1', state: 'solution-supported', evidenceEventIds: ['event-1'] }],
     findings: [], candidates: [{ id: 'candidate-1', episodeId: 'episode-1', kind: 'convention', state: 'candidate', statement: 'Use pnpm.', conditions: ['repository:repo-1'], procedure: ['Use pnpm.'], evidenceEventIds: ['event-1'], invalidationConditions: ['Instruction changes.'] }]
   });
@@ -54,7 +54,7 @@ test('retries a bounded failed job and quarantines it after the fourth failure',
   const fourth = repository.claim();
   assert.equal(fourth?.attempts, 4);
   repository.retry(fourth!.id);
-  assert.equal(repository.jobById(job.id)?.state, 'quarantined-input');
+  assert.equal(repository.jobById(fourth!.id)?.state, 'quarantined-input');
   assert.equal(repository.claim(), undefined);
   repository.close();
 });
@@ -64,8 +64,8 @@ test('quarantines invalid input without retrying it', () => {
   const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-2', inputHighWater: 1 });
   const claimed = repository.claim();
   repository.retry(claimed!.id, 'invalid-input');
-  assert.equal(repository.jobById(job.id)?.state, 'quarantined-input');
-  assert.equal(repository.jobById(job.id)?.attempts, 1);
+  assert.equal(repository.jobById(claimed!.id)?.state, 'quarantined-input');
+  assert.equal(repository.jobById(claimed!.id)?.attempts, 1);
   repository.close();
 });
 
@@ -74,6 +74,6 @@ test('retries a timed-out job as an execution failure', () => {
   const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-3', inputHighWater: 1 });
   const claimed = repository.claim();
   repository.retry(claimed!.id, 'timeout');
-  assert.equal(repository.jobById(job.id)?.state, 'retryable-failure');
+  assert.equal(repository.jobById(claimed!.id)?.state, 'retryable-failure');
   repository.close();
 });

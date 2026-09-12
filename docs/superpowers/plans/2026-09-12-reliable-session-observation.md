@@ -222,7 +222,7 @@ Quality follow-up evidence: retry and receipt rollback, automatic corrupt-record
 - Modify: `test/capture-spool.test.ts`
 - Modify: `test/milestone-2-5-acceptance.test.ts`
 
-- [ ] **Step 1: Write failing stream, lease, and worker-completion tests**
+- [x] **Step 1: Write failing stream, lease, and worker-completion tests**
 
 Assert repeated admission raises one stream's desired high-water, a claimed run reads only its declared sequence range, new events remain pending after a run, stale leases recover, unchanged completed input does not rerun, and worker completion waits for the drain lock to release.
 
@@ -233,13 +233,13 @@ assert.equal(repository.streamsFor('repo-1')[0]?.state, 'pending');
 assert.equal(await waitForWorkerCompletion(dataDir), true);
 ```
 
-- [ ] **Step 2: Run focused tests and confirm RED**
+- [x] **Step 2: Run focused tests and confirm RED**
 
 Run: `pnpm build && node --test dist/test/learning-service.test.js dist/test/capture-spool.test.js dist/test/milestone-2-5-acceptance.test.js`
 
 Expected: failure because jobs are keyed by each high-water, the runner rereads the current session, and completion has no worker condition.
 
-- [ ] **Step 3: Implement coalesced streams and bounded analysis drain**
+- [x] **Step 3: Implement coalesced streams and bounded analysis drain**
 
 Replace the unique job-per-high-water model with an analysis stream keyed by repository, session or conversation, and detector version. Atomically raise desired high-water. Claim immutable runs with sequence bounds and lease expiry. Schedule one bounded analysis drain only after acknowledgement. Publish a worker-complete condition after database and spool resources close.
 
@@ -254,15 +254,17 @@ complete(run): void {
 }
 ```
 
-- [ ] **Step 4: Run focused tests and confirm GREEN**
+- [x] **Step 4: Run focused tests and confirm GREEN**
 
 Run: `pnpm build && node --test dist/test/learning-service.test.js dist/test/capture-spool.test.js dist/test/milestone-2-5-acceptance.test.js`
 
 Expected: coalescing, actual-range, restart, bounded retry, and cleanup-race regression tests pass.
 
-- [ ] **Step 5: Commit issue #6**
+- [x] **Step 5: Commit issue #6**
 
 Run: `git add src/learning src/capture src/application/experience-service.ts src/cli.ts test/learning-service.test.ts test/capture-spool.test.ts test/milestone-2-5-acceptance.test.ts && git commit -m "feat: coalesce and run operational analysis automatically"`
+
+Evidence: RED: `pnpm build && node --test dist/test/learning-service.test.js dist/test/capture-spool.test.js dist/test/milestone-2-5-acceptance.test.js` failed because stream detector versions, range fields, and stream inspection APIs did not exist. GREEN: the same focused command passed 23/23. Final verification: `pnpm build && node --test --test-concurrency=1 dist/test/**/*.test.js` passed serially on 2026-09-12.
 
 ### Task 5: Add explicit quality reporting for issue #7
 
