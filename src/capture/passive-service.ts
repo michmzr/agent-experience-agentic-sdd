@@ -12,6 +12,7 @@ export interface PassiveCaptureStore {
   endSession(source: AgentSource, id: SessionId, endedAt: string): IncrementalAppendResult;
   recordLifecycleSignal?(signal: LifecycleSignal): IncrementalAppendResult;
   appendLifecycleTechnical?(event: NormalizedCaptureEvent): IncrementalAppendResult;
+  applyLifecycle?(input: { readonly lifecycle: LifecycleSignal; readonly session?: Session; readonly end?: { readonly source: AgentSource; readonly sessionId: SessionId; readonly endedAt: string } }): IncrementalAppendResult;
 }
 
 export interface PassiveCaptureServiceOptions {
@@ -47,14 +48,23 @@ export function createPassiveCaptureService(options: PassiveCaptureServiceOption
 export function persistPassiveCapture(store: PassiveCaptureStore, record: PassiveCaptureRecord): IncrementalAppendResult {
   switch (record.kind) {
     case 'session-start': {
+      if (record.lifecycle !== undefined && store.applyLifecycle !== undefined) {
+        return store.applyLifecycle({
+          lifecycle: record.lifecycle,
+          ...(record.lifecycle.startOrigin === 'startup' ? { session: record.session } : {})
+        });
+      }
       if (record.lifecycle === undefined || store.recordLifecycleSignal === undefined) return store.appendIncremental({ session: record.session });
-      const session = record.lifecycle.kind === 'start' && /:startup(?::|$)/.test(record.lifecycle.sourceEventId)
+      const session = record.lifecycle.kind === 'start' && record.lifecycle.startOrigin === 'startup'
         ? store.appendIncremental({ session: record.session })
         : { inserted: false };
       const lifecycle = store.recordLifecycleSignal(record.lifecycle);
       return Object.freeze({ inserted: session.inserted || lifecycle.inserted });
     }
     case 'session-end': {
+      if (record.lifecycle !== undefined && store.applyLifecycle !== undefined) {
+        return store.applyLifecycle({ lifecycle: record.lifecycle, end: { source: record.source, sessionId: record.sessionId, endedAt: record.endedAt } });
+      }
       if (record.lifecycle === undefined || store.recordLifecycleSignal === undefined) return store.endSession(record.source, record.sessionId, record.endedAt);
       const lifecycle = store.recordLifecycleSignal(record.lifecycle);
       const session = store.endSession(record.source, record.sessionId, record.endedAt);

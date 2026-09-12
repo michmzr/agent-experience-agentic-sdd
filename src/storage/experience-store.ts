@@ -191,6 +191,11 @@ export interface RepositoryRegistration {
 }
 
 export interface RepositoryRecord { readonly session: Session; readonly events: readonly CapturedEventRecord[]; }
+export interface LifecycleApplication {
+  readonly lifecycle: LifecycleSignal;
+  readonly session?: Session;
+  readonly end?: { readonly source: Session['source']; readonly sessionId: SessionId; readonly endedAt: string };
+}
 export interface RepositoryStatistics {
   readonly sessions: number; readonly events: number; readonly knowledge: number;
   readonly firstRecordedAt?: string; readonly lastRecordedAt?: string;
@@ -536,9 +541,36 @@ export class ExperienceStore {
   }
 
   recordLifecycleSignal(signal: LifecycleSignal): IncrementalAppendResult {
+    return this.applyLifecycle({ lifecycle: signal });
+  }
+
+  applyLifecycle(input: LifecycleApplication): IncrementalAppendResult {
+    if (!input || typeof input !== 'object') throw new TypeError('Lifecycle application is invalid.');
+    assertLifecycleSignal(input.lifecycle);
+    const signal = input.lifecycle;
     assertLifecycleSignal(signal);
     this.database.exec('BEGIN IMMEDIATE');
     try {
+      let legacyInserted = false;
+      if (input.session !== undefined) {
+        if (signal.kind !== 'start' || signal.startOrigin !== 'startup' || input.session.id !== signal.conversationId || input.session.source !== signal.source) {
+          throw new TypeError('Lifecycle startup session does not match its signal.');
+        }
+        legacyInserted = this.insertOrVerifySession(input.session);
+      }
+      if (input.end !== undefined) {
+        if (signal.kind !== 'end' || input.end.sessionId !== signal.conversationId || input.end.source !== signal.source) {
+          throw new TypeError('Lifecycle session end does not match its signal.');
+        }
+        assertCanonicalTimestamp(input.end.endedAt);
+        const current = this.loadSession(input.end.sessionId);
+        if (current === undefined || current.source !== input.end.source) throw new TypeError('Cannot end a missing session.');
+        if (current.endedAt === undefined) {
+          if (Date.parse(input.end.endedAt) < Date.parse(current.startedAt)) throw new TypeError('Session end cannot precede its start.');
+          this.database.prepare('UPDATE sessions SET ended_at = ? WHERE id = ?').run(input.end.endedAt, input.end.sessionId);
+          legacyInserted = true;
+        }
+      }
       const conversation = this.database.prepare('SELECT id, source, first_receipt_at, identifier_provenance FROM capture_conversations WHERE id = ?').get(signal.conversationId) as ConversationRow | undefined;
       if (conversation === undefined) {
         this.database.prepare(`INSERT INTO capture_conversations (id, source, first_receipt_at, identifier_provenance)
@@ -553,7 +585,7 @@ export class ExperienceStore {
           throw new TypeError('Conflicting duplicate lifecycle signal identity.');
         }
         this.database.exec('COMMIT');
-        return Object.freeze({ inserted: false });
+        return Object.freeze({ inserted: legacyInserted });
       }
 
       const openRuns = this.database.prepare(`SELECT id, conversation_id, origin, state, receipt_started_at, source_started_at, receipt_ended_at, source_ended_at

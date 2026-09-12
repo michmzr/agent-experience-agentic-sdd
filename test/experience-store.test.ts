@@ -199,3 +199,32 @@ test('rejects technical capture after an unresolved end on a startup-origin run'
   assert.deepEqual(store.listConversationTechnicalEvents(sessionId), []);
   store.close();
 });
+
+test('accepts a resumed end after the v1 session is already closed', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-store-resume-end-')), 'experience.sqlite');
+  const store = new ExperienceStore(databasePath);
+  const sessionId = 'conversation-resume-end' as SessionId;
+  const startup = '2026-09-12T08:00:00.000Z';
+  const firstEnd = '2026-09-12T08:01:00.000Z';
+  store.applyLifecycle({ lifecycle: { sourceEventId: 'opaque-1', source: 'codex', conversationId: sessionId, kind: 'start', startOrigin: 'startup', receiptAt: startup }, session: { id: sessionId, source: 'codex', startedAt: startup } });
+  store.applyLifecycle({ lifecycle: { sourceEventId: 'opaque-2', source: 'codex', conversationId: sessionId, kind: 'end', receiptAt: firstEnd }, end: { source: 'codex', sessionId, endedAt: firstEnd } });
+  store.applyLifecycle({ lifecycle: { sourceEventId: 'opaque-3', source: 'codex', conversationId: sessionId, kind: 'start', startOrigin: 'resume', receiptAt: '2026-09-12T08:02:00.000Z' } });
+
+  assert.equal(store.applyLifecycle({ lifecycle: { sourceEventId: 'opaque-4', source: 'codex', conversationId: sessionId, kind: 'end', receiptAt: '2026-09-12T08:03:00.000Z' }, end: { source: 'codex', sessionId, endedAt: '2026-09-12T08:03:00.000Z' } }).inserted, true);
+  assert.equal(store.loadSession(sessionId)?.endedAt, firstEnd);
+  assert.equal(store.listConversationRuns(sessionId)[1]?.state, 'ended');
+  store.close();
+});
+
+test('uses lifecycle start origin rather than source-event text and rolls back a failing v1 start', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-store-lifecycle-atomic-')), 'experience.sqlite');
+  const store = new ExperienceStore(databasePath);
+  const sessionId = 'conversation-atomic' as SessionId;
+  const lifecycle = { sourceEventId: 'opaque-event-9', source: 'codex' as const, conversationId: sessionId, kind: 'start' as const, startOrigin: 'startup' as const, receiptAt: '2026-09-12T08:00:00.000Z' };
+
+  assert.throws(() => store.applyLifecycle({ lifecycle, session: { id: sessionId, source: 'codex', startedAt: lifecycle.receiptAt, endedAt: '2026-09-12T08:01:00.000Z' } }), /start open|new sessions/i);
+  assert.equal(store.loadConversation(sessionId), undefined);
+  assert.equal(store.applyLifecycle({ lifecycle, session: { id: sessionId, source: 'codex', startedAt: lifecycle.receiptAt } }).inserted, true);
+  assert.equal(store.loadSession(sessionId)?.startedAt, lifecycle.receiptAt);
+  store.close();
+});
