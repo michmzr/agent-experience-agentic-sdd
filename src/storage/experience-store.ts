@@ -567,6 +567,14 @@ export class ExperienceStore {
         if (current === undefined || current.source !== input.end.source) throw new TypeError('Cannot end a missing session.');
         if (current.endedAt === undefined) {
           if (Date.parse(input.end.endedAt) < Date.parse(current.startedAt)) throw new TypeError('Session end cannot precede its start.');
+          const eventRows = this.database.prepare('SELECT occurred_at FROM events WHERE session_id = ?').all(input.end.sessionId) as Array<{ occurred_at: string }>;
+          const latestEventAt = eventRows.reduce<string | undefined>((latest, row) => {
+            if (latest === undefined || Date.parse(row.occurred_at) > Date.parse(latest)) return row.occurred_at;
+            return latest;
+          }, undefined);
+          if (latestEventAt !== undefined && Date.parse(input.end.endedAt) < Date.parse(latestEventAt)) {
+            throw new TypeError('Session end cannot precede its latest event.');
+          }
           this.database.prepare('UPDATE sessions SET ended_at = ? WHERE id = ?').run(input.end.endedAt, input.end.sessionId);
           legacyInserted = true;
         }

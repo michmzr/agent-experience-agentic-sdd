@@ -228,3 +228,19 @@ test('uses lifecycle start origin rather than source-event text and rolls back a
   assert.equal(store.loadSession(sessionId)?.startedAt, lifecycle.receiptAt);
   store.close();
 });
+
+test('rolls back lifecycle end when it precedes the latest persisted v1 event', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-store-lifecycle-end-order-')), 'experience.sqlite');
+  const store = new ExperienceStore(databasePath);
+  const sessionId = 'conversation-end-order' as SessionId;
+  const startedAt = '2026-09-12T08:00:00.000Z';
+  store.applyLifecycle({ lifecycle: { sourceEventId: 'order:startup', source: 'codex', conversationId: sessionId, kind: 'start', startOrigin: 'startup', receiptAt: startedAt }, session: { id: sessionId, source: 'codex', startedAt } });
+  const event = normalizeMappedCapture({ source: 'codex', sourceEventId: 'order-tool:pre', sessionId, phase: 'pre-action', occurredAt: '2026-09-12T08:02:00.000Z', tool: 'shell', action: 'test', summary: 'Run a focused test.' });
+  store.appendIncremental({ event });
+
+  assert.throws(() => store.applyLifecycle({ lifecycle: { sourceEventId: 'order:end', source: 'codex', conversationId: sessionId, kind: 'end', receiptAt: '2026-09-12T08:01:00.000Z' }, end: { source: 'codex', sessionId, endedAt: '2026-09-12T08:01:00.000Z' } }), /latest event/i);
+  assert.equal(store.loadSession(sessionId)?.endedAt, undefined);
+  assert.deepEqual(store.listLifecycleSignals(sessionId).map(({ sourceEventId }) => sourceEventId), ['order:startup']);
+  assert.equal(store.listConversationRuns(sessionId)[0]?.state, 'open');
+  store.close();
+});
