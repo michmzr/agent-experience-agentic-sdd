@@ -6,6 +6,8 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import type { ExperienceImport, EventId, KnowledgeEntry } from '../src/domain/types.js';
+import type { SessionId } from '../src/domain/types.js';
+import { normalizeMappedCapture } from '../src/capture/normalization.js';
 import { ExperienceStore, ExperienceStoreInitializationError } from '../src/storage/experience-store.js';
 
 function validImport(): ExperienceImport {
@@ -72,5 +74,88 @@ test('rejects an invalid import before it can mutate stored knowledge', () => {
 
   assert.throws(() => store.import(record), /Event references a missing session|Observation references a missing event/);
   assert.deepEqual(store.listKnowledge(), []);
+  store.close();
+});
+
+test('preserves one Codex conversation across an ended run and a resume', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-store-runs-')), 'experience.sqlite');
+  const store = new ExperienceStore(databasePath);
+  const startup = '2026-09-12T08:00:00.000Z';
+  const firstEnd = '2026-09-12T08:01:00.000Z';
+  const resume = '2026-09-12T08:02:00.000Z';
+  const secondEnd = '2026-09-12T08:03:00.000Z';
+
+  store.appendIncremental({ session: { id: 'conversation-1' as SessionId, source: 'codex', startedAt: startup } });
+
+  store.recordLifecycleSignal({
+    sourceEventId: 'conversation-1:startup', source: 'codex', conversationId: 'conversation-1',
+    kind: 'start', receiptAt: startup, sourceAt: '2026-09-12T07:59:59.000Z'
+  });
+  store.recordLifecycleSignal({
+    sourceEventId: 'conversation-1:first-end', source: 'codex', conversationId: 'conversation-1', kind: 'end', receiptAt: firstEnd
+  });
+  store.recordLifecycleSignal({
+    sourceEventId: 'conversation-1:resume', source: 'codex', conversationId: 'conversation-1', kind: 'start', receiptAt: resume
+  });
+  const pre = normalizeMappedCapture({
+    source: 'codex', sourceEventId: 'later-tool:pre', sessionId: 'conversation-1' as SessionId,
+    phase: 'pre-action', occurredAt: '2026-09-12T08:02:01.000Z', tool: 'shell', action: 'test', summary: 'Run a focused test.'
+  });
+  const post = normalizeMappedCapture({
+    source: 'codex', sourceEventId: 'later-tool:post', sessionId: 'conversation-1' as SessionId,
+    phase: 'post-result', occurredAt: '2026-09-12T08:02:02.000Z', tool: 'shell', action: 'test', summary: 'Focused test passed.',
+    outcome: 'succeeded', exitStatus: 0, relatedEventId: 'later-tool:pre'
+  });
+  store.appendIncremental({ event: pre });
+  store.appendIncremental({ event: post });
+  store.recordLifecycleSignal({
+    sourceEventId: 'conversation-1:second-end', source: 'codex', conversationId: 'conversation-1', kind: 'end', receiptAt: secondEnd
+  });
+
+  assert.deepEqual(store.loadConversation('conversation-1'), {
+    id: 'conversation-1', source: 'codex', firstReceiptAt: startup, identifierProvenance: 'hook-session-id'
+  });
+  assert.deepEqual(store.listConversationRuns('conversation-1'), [
+    {
+      id: 'conversation-1:run:1', conversationId: 'conversation-1', state: 'ended',
+      receiptStartedAt: startup, sourceStartedAt: '2026-09-12T07:59:59.000Z', receiptEndedAt: firstEnd
+    },
+    {
+      id: 'conversation-1:run:2', conversationId: 'conversation-1', state: 'ended',
+      receiptStartedAt: resume, receiptEndedAt: secondEnd
+    }
+  ]);
+  assert.deepEqual(store.loadCapturedSession('conversation-1' as SessionId)?.events.map(({ sourceEventId }) => sourceEventId), ['later-tool:pre', 'later-tool:post']);
+  store.close();
+});
+
+test('makes exact lifecycle duplicates idempotent and leaves ambiguous signals unresolved', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-store-run-duplicates-')), 'experience.sqlite');
+  const store = new ExperienceStore(databasePath);
+  const start = { sourceEventId: 'conversation-1:startup', source: 'codex' as const, conversationId: 'conversation-1', kind: 'start' as const, receiptAt: '2026-09-12T08:00:00.000Z' };
+
+  assert.equal(store.recordLifecycleSignal(start).inserted, true);
+  assert.equal(store.recordLifecycleSignal(start).inserted, false);
+  assert.equal(store.recordLifecycleSignal({ ...start, sourceEventId: 'conversation-1:resume', receiptAt: '2026-09-12T08:01:00.000Z' }).inserted, true);
+  assert.deepEqual(store.listLifecycleSignals('conversation-1').map(({ sourceEventId, resolution }) => ({ sourceEventId, resolution })), [
+    { sourceEventId: 'conversation-1:startup', resolution: 'resolved' },
+    { sourceEventId: 'conversation-1:resume', resolution: 'unresolved' }
+  ]);
+  assert.equal(store.listConversationRuns('conversation-1').length, 1);
+  store.close();
+});
+
+test('does not fabricate conversation identity for legacy session rows', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-store-legacy-session-')), 'experience.sqlite');
+  const store = new ExperienceStore(databasePath);
+  const legacyEnd = '2026-09-12T08:01:00.000Z';
+  store.import({ ...validImport(), sessions: [{
+    id: 'legacy-session' as SessionId, source: 'codex', startedAt: '2026-09-12T08:00:00.000Z', endedAt: legacyEnd
+  }], events: [{
+    id: 'event-1' as EventId, sessionId: 'legacy-session' as SessionId, kind: 'test-result', occurredAt: legacyEnd, outcome: 'passed'
+  }] });
+
+  assert.equal(store.loadSession('legacy-session' as SessionId)?.endedAt, legacyEnd);
+  assert.equal(store.conversationForLegacySession('legacy-session' as SessionId), undefined);
   store.close();
 });

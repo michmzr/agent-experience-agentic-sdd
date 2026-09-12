@@ -25,9 +25,13 @@ import { applyTransition, reconcileImportedKnowledgeLifecycle } from '../domain/
 import { validateImport, validateIncrementalEvidence } from '../domain/validation.js';
 import type {
   CaptureEnforcementSnapshot,
+  CaptureConversation,
+  CaptureRun,
   CapturedEventRecord,
   IncrementalAppendResult,
   IncrementalCaptureAppend,
+  LifecycleSignal,
+  RecordedLifecycleSignal,
   RevalidationProposal
 } from '../capture/contracts.js';
 import { validateNormalizedCaptureEvent } from '../capture/normalization.js';
@@ -129,6 +133,34 @@ interface RepositoryRow {
   repository_root: string;
   observed_at: string;
   selected_sources_json: string;
+}
+
+interface ConversationRow {
+  id: string;
+  source: Session['source'];
+  first_receipt_at: string;
+  identifier_provenance: 'hook-session-id';
+}
+
+interface CaptureRunRow {
+  id: string;
+  conversation_id: string;
+  state: CaptureRun['state'];
+  receipt_started_at: string;
+  source_started_at: string | null;
+  receipt_ended_at: string | null;
+  source_ended_at: string | null;
+}
+
+interface LifecycleSignalRow {
+  source: Session['source'];
+  source_event_id: string;
+  conversation_id: string;
+  kind: LifecycleSignal['kind'];
+  receipt_at: string;
+  source_at: string | null;
+  resolution: RecordedLifecycleSignal['resolution'];
+  resolved_run_id: string | null;
 }
 
 export type KnowledgeScope = 'global' | 'repository';
@@ -299,6 +331,40 @@ const repositoryRegistryMigration = `
 `;
 const repositorySourcesMigration = `ALTER TABLE repositories ADD COLUMN selected_sources_json TEXT NOT NULL DEFAULT '[]';`;
 
+const conversationLifecycleMigration = `
+  CREATE TABLE IF NOT EXISTS capture_conversations (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL CHECK (source IN ('codex', 'claude-code', 'cursor')),
+    first_receipt_at TEXT NOT NULL,
+    identifier_provenance TEXT NOT NULL CHECK (identifier_provenance = 'hook-session-id')
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS capture_runs (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES capture_conversations(id) ON DELETE RESTRICT,
+    state TEXT NOT NULL CHECK (state IN ('open', 'ended', 'unresolved')),
+    receipt_started_at TEXT NOT NULL,
+    source_started_at TEXT,
+    receipt_ended_at TEXT,
+    source_ended_at TEXT
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS lifecycle_signals (
+    source TEXT NOT NULL CHECK (source IN ('codex', 'claude-code', 'cursor')),
+    source_event_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL REFERENCES capture_conversations(id) ON DELETE RESTRICT,
+    kind TEXT NOT NULL CHECK (kind IN ('start', 'end')),
+    receipt_at TEXT NOT NULL,
+    source_at TEXT,
+    resolution TEXT NOT NULL CHECK (resolution IN ('resolved', 'unresolved')),
+    resolved_run_id TEXT REFERENCES capture_runs(id) ON DELETE RESTRICT,
+    PRIMARY KEY (source, source_event_id)
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS capture_event_lifecycle (
+    event_id TEXT PRIMARY KEY REFERENCES capture_events(event_id) ON DELETE RESTRICT,
+    conversation_id TEXT NOT NULL REFERENCES capture_conversations(id) ON DELETE RESTRICT,
+    run_id TEXT REFERENCES capture_runs(id) ON DELETE RESTRICT
+  ) STRICT;
+`;
+
 export class ExperienceStore {
   private readonly database: DatabaseSync;
 
@@ -431,6 +497,96 @@ export class ExperienceStore {
     }
   }
 
+  reopenSession(source: Session['source'], id: SessionId): IncrementalAppendResult {
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const current = this.loadSession(id);
+      if (current === undefined) throw new TypeError('Cannot resume a missing session.');
+      if (current.source !== source) throw new TypeError('Session resume source conflicts with the stored session.');
+      if (current.endedAt === undefined) {
+        this.database.exec('COMMIT');
+        return Object.freeze({ inserted: false });
+      }
+      this.database.prepare('UPDATE sessions SET ended_at = NULL WHERE id = ?').run(id);
+      this.database.exec('COMMIT');
+      return Object.freeze({ inserted: true });
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  recordLifecycleSignal(signal: LifecycleSignal): IncrementalAppendResult {
+    assertLifecycleSignal(signal);
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const conversation = this.database.prepare('SELECT id, source, first_receipt_at, identifier_provenance FROM capture_conversations WHERE id = ?').get(signal.conversationId) as ConversationRow | undefined;
+      if (conversation === undefined) {
+        this.database.prepare(`INSERT INTO capture_conversations (id, source, first_receipt_at, identifier_provenance)
+          VALUES (?, ?, ?, 'hook-session-id')`).run(signal.conversationId, signal.source, signal.receiptAt);
+      } else if (conversation.source !== signal.source) {
+        throw new TypeError('Lifecycle conversation source conflicts with the stored conversation.');
+      }
+      const duplicate = this.database.prepare(`SELECT source, source_event_id, conversation_id, kind, receipt_at, source_at, resolution, resolved_run_id
+        FROM lifecycle_signals WHERE source = ? AND source_event_id = ?`).get(signal.source, signal.sourceEventId) as LifecycleSignalRow | undefined;
+      if (duplicate !== undefined) {
+        if (duplicate.conversation_id !== signal.conversationId || duplicate.kind !== signal.kind || duplicate.receipt_at !== signal.receiptAt || duplicate.source_at !== (signal.sourceAt ?? null)) {
+          throw new TypeError('Conflicting duplicate lifecycle signal identity.');
+        }
+        this.database.exec('COMMIT');
+        return Object.freeze({ inserted: false });
+      }
+
+      const openRuns = this.database.prepare(`SELECT id, conversation_id, state, receipt_started_at, source_started_at, receipt_ended_at, source_ended_at
+      FROM capture_runs WHERE conversation_id = ? AND state = 'open' ORDER BY receipt_started_at, id`).all(signal.conversationId) as unknown as CaptureRunRow[];
+      let resolution: RecordedLifecycleSignal['resolution'] = 'unresolved';
+      let resolvedRunId: string | undefined;
+      if (signal.kind === 'start' && openRuns.length === 0) {
+        const runId = `${signal.conversationId}:run:${this.nextRunOrdinal(signal.conversationId)}`;
+        this.database.prepare(`INSERT INTO capture_runs (id, conversation_id, state, receipt_started_at, source_started_at, receipt_ended_at, source_ended_at)
+          VALUES (?, ?, 'open', ?, ?, NULL, NULL)`).run(runId, signal.conversationId, signal.receiptAt, signal.sourceAt ?? null);
+        resolution = 'resolved';
+        resolvedRunId = runId;
+      } else if (signal.kind === 'end' && openRuns.length === 1 && sourceTimeDoesNotPrecedeRun(signal, openRuns[0]!)) {
+        const run = openRuns[0]!;
+        this.database.prepare(`UPDATE capture_runs SET state = 'ended', receipt_ended_at = ?, source_ended_at = ? WHERE id = ?`)
+          .run(signal.receiptAt, signal.sourceAt ?? null, run.id);
+        resolution = 'resolved';
+        resolvedRunId = run.id;
+      }
+      this.database.prepare(`INSERT INTO lifecycle_signals
+        (source, source_event_id, conversation_id, kind, receipt_at, source_at, resolution, resolved_run_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(signal.source, signal.sourceEventId, signal.conversationId, signal.kind, signal.receiptAt, signal.sourceAt ?? null, resolution, resolvedRunId ?? null);
+      this.database.exec('COMMIT');
+      return Object.freeze({ inserted: true });
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  loadConversation(id: string): CaptureConversation | undefined {
+    const row = this.database.prepare('SELECT id, source, first_receipt_at, identifier_provenance FROM capture_conversations WHERE id = ?').get(id) as ConversationRow | undefined;
+    return row === undefined ? undefined : conversationFromRow(row);
+  }
+
+  listConversationRuns(conversationId: string): readonly CaptureRun[] {
+    const rows = this.database.prepare(`SELECT id, conversation_id, state, receipt_started_at, source_started_at, receipt_ended_at, source_ended_at
+      FROM capture_runs WHERE conversation_id = ? ORDER BY receipt_started_at, id`).all(conversationId) as unknown as CaptureRunRow[];
+    return Object.freeze(rows.map(captureRunFromRow));
+  }
+
+  listLifecycleSignals(conversationId: string): readonly RecordedLifecycleSignal[] {
+    const rows = this.database.prepare(`SELECT source, source_event_id, conversation_id, kind, receipt_at, source_at, resolution, resolved_run_id
+      FROM lifecycle_signals WHERE conversation_id = ? ORDER BY receipt_at, rowid`).all(conversationId) as unknown as LifecycleSignalRow[];
+    return Object.freeze(rows.map(lifecycleSignalFromRow));
+  }
+
+  conversationForLegacySession(sessionId: SessionId): CaptureConversation | undefined {
+    return this.loadConversation(sessionId);
+  }
+
   import(record: ExperienceImport): void {
     const validation = validateImport(record);
     if (!validation.ok) throw new Error(`${validation.code}: ${validation.message}`);
@@ -517,6 +673,7 @@ export class ExperienceStore {
         } else {
           this.assertPostResultLink(event);
           this.insertCaptureEvent(event);
+          this.linkCaptureEventToLifecycle(event);
           inserted = true;
         }
         if (duplicate !== undefined) this.assertPostResultLink(event);
@@ -785,6 +942,10 @@ export class ExperienceStore {
         this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(12, new Date().toISOString());
       }
       if (!applied.has(13)) { this.database.exec(repositorySourcesMigration); this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(13, new Date().toISOString()); }
+      if (!applied.has(14)) {
+        this.database.exec(conversationLifecycleMigration);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(14, new Date().toISOString());
+      }
       this.database.exec('COMMIT');
     } catch (error) {
       this.database.exec('ROLLBACK');
@@ -811,6 +972,19 @@ export class ExperienceStore {
       WHERE ce.source = ? AND ce.source_event_id = ?
     `).get(source, sourceEventId) as unknown as CaptureRow | undefined;
     return row === undefined ? undefined : captureFromRow(row);
+  }
+
+  private nextRunOrdinal(conversationId: string): number {
+    return Number((this.database.prepare('SELECT COUNT(*) AS count FROM capture_runs WHERE conversation_id = ?').get(conversationId) as { count: number }).count) + 1;
+  }
+
+  private linkCaptureEventToLifecycle(event: CapturedEventRecord): void {
+    const conversation = this.database.prepare('SELECT id FROM capture_conversations WHERE id = ? AND source = ?').get(event.sessionId, event.source) as { id: string } | undefined;
+    if (conversation === undefined) return;
+    const run = this.database.prepare(`SELECT id FROM capture_runs WHERE conversation_id = ? AND state = 'open'
+      ORDER BY receipt_started_at DESC, id DESC LIMIT 1`).get(conversation.id) as { id: string } | undefined;
+    this.database.prepare(`INSERT OR IGNORE INTO capture_event_lifecycle (event_id, conversation_id, run_id) VALUES (?, ?, ?)`)
+      .run(event.id, conversation.id, run?.id ?? null);
   }
 
   private insertSession(session: Session | undefined, event: CapturedEventRecord): void {
@@ -1419,6 +1593,49 @@ function assertTransitionAfterEvent(
   if (event !== undefined && transition !== undefined && transition.occurredAt < event.occurredAt) {
     throw new TypeError('Incremental event cannot occur after its lifecycle transition.');
   }
+}
+
+function assertLifecycleSignal(signal: LifecycleSignal): void {
+  if (!signal || typeof signal !== 'object') throw new TypeError('Lifecycle signal is invalid.');
+  const value = signal as unknown as Record<string, unknown>;
+  const allowed = ['sourceEventId', 'source', 'conversationId', 'kind', 'receiptAt', 'sourceAt'];
+  assertOnlyIncrementalKeys(value, allowed);
+  if (signal.source !== 'codex' && signal.source !== 'claude-code' && signal.source !== 'cursor') throw new TypeError('Lifecycle signal source is invalid.');
+  if (signal.kind !== 'start' && signal.kind !== 'end') throw new TypeError('Lifecycle signal kind is invalid.');
+  for (const [name, identifier] of [['source event id', signal.sourceEventId], ['conversation id', signal.conversationId]] as const) {
+    if (typeof identifier !== 'string' || !canonicalIncrementalIdentifier.test(identifier)) throw new TypeError(`Lifecycle ${name} is invalid.`);
+    assertSnapshotIdentifierSafe(identifier, `lifecycle ${name}`);
+  }
+  assertCanonicalTimestamp(signal.receiptAt);
+  if (signal.sourceAt !== undefined) assertCanonicalTimestamp(signal.sourceAt);
+}
+
+function sourceTimeDoesNotPrecedeRun(signal: LifecycleSignal, run: CaptureRunRow): boolean {
+  return signal.sourceAt === undefined || run.source_started_at === null || Date.parse(signal.sourceAt) >= Date.parse(run.source_started_at);
+}
+
+function conversationFromRow(row: ConversationRow): CaptureConversation {
+  return Object.freeze({ id: row.id, source: row.source, firstReceiptAt: row.first_receipt_at, identifierProvenance: row.identifier_provenance });
+}
+
+function captureRunFromRow(row: CaptureRunRow): CaptureRun {
+  return Object.freeze({
+    id: row.id, conversationId: row.conversation_id, state: row.state,
+    receiptStartedAt: row.receipt_started_at,
+    ...(row.source_started_at === null ? {} : { sourceStartedAt: row.source_started_at }),
+    ...(row.receipt_ended_at === null ? {} : { receiptEndedAt: row.receipt_ended_at }),
+    ...(row.source_ended_at === null ? {} : { sourceEndedAt: row.source_ended_at })
+  });
+}
+
+function lifecycleSignalFromRow(row: LifecycleSignalRow): RecordedLifecycleSignal {
+  return Object.freeze({
+    source: row.source, sourceEventId: row.source_event_id, conversationId: row.conversation_id,
+    kind: row.kind, receiptAt: row.receipt_at,
+    ...(row.source_at === null ? {} : { sourceAt: row.source_at }),
+    resolution: row.resolution,
+    ...(row.resolved_run_id === null ? {} : { resolvedRunId: row.resolved_run_id })
+  });
 }
 
 interface CheckedPage {

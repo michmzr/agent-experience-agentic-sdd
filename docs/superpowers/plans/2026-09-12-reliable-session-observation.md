@@ -90,7 +90,7 @@ Recorded verification evidence: RED: `pnpm build && node --test dist/test/reliab
 - Modify: `test/passive-hook-adapters.test.ts`
 - Modify: `test/experience-store.test.ts`
 
-- [ ] **Step 1: Write failing resume and migration tests**
+- [x] **Step 1: Write failing resume and migration tests**
 
 Define a Codex startup, run end, resume, post-result, and second end sequence. Assert two run records link to one conversation, receipt and source times are separate, exact lifecycle duplicates are idempotent, and old session rows have no fabricated run identity.
 
@@ -101,13 +101,13 @@ assert.equal(store.loadSession('legacy-session' as SessionId)?.endedAt, legacyEn
 assert.equal(store.conversationForLegacySession('legacy-session'), undefined);
 ```
 
-- [ ] **Step 2: Run the focused tests and confirm RED**
+- [x] **Step 2: Run the focused tests and confirm RED**
 
 Run: `pnpm build && node --test dist/test/passive-hook-adapters.test.js dist/test/experience-store.test.js`
 
 Expected: failure because resume is ignored and conversation-run APIs are absent.
 
-- [ ] **Step 3: Add additive lifecycle contracts and migration**
+- [x] **Step 3: Add additive lifecycle contracts and migration**
 
 Add `CaptureConversation`, `CaptureRun`, and `LifecycleSignal` contracts. Add versioned tables for conversations, capture runs, and lifecycle signals. Keep `sessions` and `capture_events` unchanged. Update Codex adaptation so `SessionStart` accepts only `startup` and `resume`; map other sources to unsupported disposition. Resolve only deterministic lifecycle transitions and persist ambiguous signals unresolved.
 
@@ -121,13 +121,13 @@ export interface CaptureRun {
 }
 ```
 
-- [ ] **Step 4: Run focused lifecycle tests and confirm GREEN**
+- [x] **Step 4: Run focused lifecycle tests and confirm GREEN**
 
 Run: `pnpm build && node --test dist/test/passive-hook-adapters.test.js dist/test/experience-store.test.js`
 
 Expected: resume, duplicate, delayed, and legacy migration tests pass.
 
-- [ ] **Step 5: Commit issue #3**
+- [x] **Step 5: Commit issue #3**
 
 Run: `git add src/capture src/storage/experience-store.ts test/passive-hook-adapters.test.ts test/experience-store.test.ts && git commit -m "feat: preserve conversation runs across resumes"`
 

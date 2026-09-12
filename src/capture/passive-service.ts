@@ -1,15 +1,17 @@
 import type { AgentSource, Session, SessionId } from '../domain/types.js';
-import type { IncrementalAppendResult, IncrementalCaptureAppend, NormalizedCaptureEvent } from './contracts.js';
+import type { IncrementalAppendResult, IncrementalCaptureAppend, LifecycleSignal, NormalizedCaptureEvent } from './contracts.js';
 
 /** The only records accepted by runtime-independent passive capture. */
 export type PassiveCaptureRecord =
-  | { readonly kind: 'session-start'; readonly session: Session }
-  | { readonly kind: 'session-end'; readonly source: AgentSource; readonly sessionId: SessionId; readonly endedAt: string }
+  | { readonly kind: 'session-start'; readonly session: Session; readonly lifecycle?: LifecycleSignal }
+  | { readonly kind: 'session-end'; readonly source: AgentSource; readonly sessionId: SessionId; readonly endedAt: string; readonly lifecycle?: LifecycleSignal }
   | { readonly kind: 'technical'; readonly event: NormalizedCaptureEvent; readonly session?: Session };
 
 export interface PassiveCaptureStore {
   appendIncremental(input: IncrementalCaptureAppend): IncrementalAppendResult;
   endSession(source: AgentSource, id: SessionId, endedAt: string): IncrementalAppendResult;
+  recordLifecycleSignal?(signal: LifecycleSignal): IncrementalAppendResult;
+  reopenSession?(source: AgentSource, id: SessionId): IncrementalAppendResult;
 }
 
 export interface PassiveCaptureServiceOptions {
@@ -44,10 +46,20 @@ export function createPassiveCaptureService(options: PassiveCaptureServiceOption
 
 export function persistPassiveCapture(store: PassiveCaptureStore, record: PassiveCaptureRecord): IncrementalAppendResult {
   switch (record.kind) {
-    case 'session-start':
-      return store.appendIncremental({ session: record.session });
-    case 'session-end':
-      return store.endSession(record.source, record.sessionId, record.endedAt);
+    case 'session-start': {
+      if (record.lifecycle === undefined || store.recordLifecycleSignal === undefined) return store.appendIncremental({ session: record.session });
+      const session = record.lifecycle.kind === 'start' && record.lifecycle.sourceEventId.includes(':startup:')
+        ? store.appendIncremental({ session: record.session })
+        : store.reopenSession?.(record.session.source, record.session.id) ?? { inserted: false };
+      const lifecycle = store.recordLifecycleSignal(record.lifecycle);
+      return Object.freeze({ inserted: session.inserted || lifecycle.inserted });
+    }
+    case 'session-end': {
+      if (record.lifecycle === undefined || store.recordLifecycleSignal === undefined) return store.endSession(record.source, record.sessionId, record.endedAt);
+      const lifecycle = store.recordLifecycleSignal(record.lifecycle);
+      const session = store.endSession(record.source, record.sessionId, record.endedAt);
+      return Object.freeze({ inserted: lifecycle.inserted || session.inserted });
+    }
     case 'technical':
       return store.appendIncremental({
         ...(record.session === undefined ? {} : { session: record.session }),
