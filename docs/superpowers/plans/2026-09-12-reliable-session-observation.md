@@ -266,6 +266,8 @@ Run: `git add src/learning src/capture src/application/experience-service.ts src
 
 Evidence: RED: `pnpm build && node --test dist/test/learning-service.test.js dist/test/capture-spool.test.js dist/test/milestone-2-5-acceptance.test.js` failed because stream detector versions, range fields, and stream inspection APIs did not exist. GREEN: the same focused command passed 23/23. Final verification: `pnpm build && node --test --test-concurrency=1 dist/test/**/*.test.js` passed serially on 2026-09-12.
 
+Review follow-up evidence: persisted deterministic exponential retry eligibility is capped at 60 seconds; a concurrent drain contender cannot alter the lock owner's completion marker; completed analysis-run cost totals are exposed in the analysis JSON report. RED failed at compilation because `nextEligibleAt` and report cost contracts were absent. GREEN: `pnpm build && node --test dist/test/learning-repository.test.js dist/test/capture-spool.test.js dist/test/milestone-6-acceptance.test.js` passed 24/24. `pnpm build && node --test --test-concurrency=1 dist/test/**/*.test.js` passed serially on 2026-09-12.
+
 ### Task 5: Add explicit quality reporting for issue #7
 
 **Files:**

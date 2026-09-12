@@ -296,3 +296,16 @@ test('publishes worker completion only after the drain releases its lock', () =>
     assert.equal(spool.tryAcquireDrainLock('post-completion', '2026-09-12T10:00:02.000Z', 1_000), true);
   } finally { spool.close(); rmSync(dataDir, { recursive: true, force: true }); }
 });
+
+test('a concurrent drain contender cannot remove or publish the lock owner completion marker', () => {
+  const dataDir = dataDirectory();
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const owner = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  const completion = join(dataDir, 'capture-drain.complete');
+  try {
+    writeFileSync(completion, 'owner-complete\n');
+    assert.equal(owner.tryAcquireDrainLock('owner', new Date().toISOString(), 60_000), true);
+    drainCaptureSpool({ databasePath, now: () => '2026-09-12T10:00:01.000Z' });
+    assert.equal(readFileSync(completion, 'utf8'), 'owner-complete\n');
+  } finally { owner.releaseDrainLock('owner'); owner.close(); rmSync(dataDir, { recursive: true, force: true }); }
+});

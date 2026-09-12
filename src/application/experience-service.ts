@@ -210,6 +210,7 @@ export class ExperienceService {
     const episodeIds = new Set(scopedEpisodes.map(({ id }) => id));
     return Object.freeze({
       version: 1 as const,
+      cost: report.cost,
       coverage: report.coverage,
       findings: Object.freeze(report.findings.filter((finding) => episodeIds.has(finding.episodeId)).map(({ id, episodeId, kind, evidenceEventIds, statement }) => Object.freeze({ id, episodeId, kind, evidenceEventIds, statement }))),
       hypotheses: Object.freeze(scopedEpisodes.filter(({ hypothesis }) => hypothesis !== undefined).map(({ id, state, evidenceEventIds, hypothesis }) => Object.freeze({ id, state, evidenceEventIds, hypothesis }))),

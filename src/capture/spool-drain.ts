@@ -22,13 +22,15 @@ export interface DrainCaptureSpoolInput {
 export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolStatus {
   const spool = new CaptureSpool(join(dirname(input.databasePath), 'capture-spool.sqlite'));
   const completionPath = workerCompletionPath(dirname(input.databasePath));
-  try { rmSync(completionPath, { force: true }); } catch { /* Completion reporting is best effort. */ }
   const lockOwner = randomUUID();
+  let ownsDrainLock = false;
   let store: ExperienceStore | undefined;
   try {
     const settings = loadProjectSettings(input.projectRoot ?? process.cwd());
     const lockNow = new Date().toISOString();
     if (!spool.tryAcquireDrainLock(lockOwner, lockNow, settings.captureDeliveryDeadlineMs + 1_000)) return spool.status();
+    ownsDrainLock = true;
+    try { rmSync(completionPath, { force: true }); } catch { /* Completion reporting is best effort. */ }
     store = new ExperienceStore(input.databasePath);
     const idleDeadline = Date.now() + settings.captureDeliveryDeadlineMs;
     do {
@@ -58,9 +60,9 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
     return spool.status();
   } finally {
     try { store?.close(); } finally {
-      try { spool.releaseDrainLock(lockOwner); } finally { spool.close(); }
+      try { if (ownsDrainLock) spool.releaseDrainLock(lockOwner); } finally { spool.close(); }
     }
-    try { writeFileSync(completionPath, 'complete\n', { mode: 0o600 }); } catch { /* No worker marker must affect capture. */ }
+    if (ownsDrainLock) try { writeFileSync(completionPath, 'complete\n', { mode: 0o600 }); } catch { /* No worker marker must affect capture. */ }
   }
 }
 
