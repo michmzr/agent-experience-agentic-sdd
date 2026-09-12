@@ -71,6 +71,36 @@ test('accounts for privacy-bounded capture receipt dispositions without retainin
   }
 });
 
+test('keeps admission atomic with its accepted receipt and marks accounting unavailable on injected receipt failure', () => {
+  const dataDir = dataDirectory();
+  const path = join(dataDir, 'capture-spool.sqlite');
+  const failing = new CaptureSpool(path, { failReceiptPersistence: true });
+  try {
+    assert.throws(() => failing.admitWithReceipt(sessionStart(), { source: 'codex', receivedAt: '2026-09-12T08:00:00.000Z' }), /receipt/i);
+    assert.equal(failing.status().admitted, 0);
+    assert.equal(failing.receiptReport().accounting, 'unavailable');
+  } finally { failing.close(); }
+  const spool = new CaptureSpool(path);
+  try {
+    assert.equal(spool.admitWithReceipt(sessionStart(), { source: 'codex', receivedAt: '2026-09-12T08:00:01.000Z' }).status, 'admitted');
+    assert.equal(spool.receiptReport().byDisposition.accepted, 1);
+  } finally { spool.close(); rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('accounts for delivery retry and quarantine dispositions', () => {
+  const dataDir = dataDirectory();
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  try {
+    const delivery = spool.admitWithReceipt(sessionStart(), { source: 'codex', receivedAt: '2026-09-12T08:00:00.000Z' });
+    spool.claim('2026-09-12T08:00:00.000Z', 1);
+    spool.retry(delivery.deliveryId, '2026-09-12T08:00:01.000Z');
+    spool.quarantine(delivery.deliveryId, 'CORRUPT', '2026-09-12T08:00:02.000Z');
+    const receipts = spool.receiptReport().byDisposition;
+    assert.equal(receipts['delivery-retry'], 1);
+    assert.equal(receipts.quarantine, 1);
+  } finally { spool.close(); rmSync(dataDir, { recursive: true, force: true }); }
+});
+
 test('reclaims expired claims and acknowledges a committed delivery once', () => {
   const dataDir = dataDirectory();
   const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));

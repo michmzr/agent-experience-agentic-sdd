@@ -203,6 +203,8 @@ Run: `git add src/capture src/storage src/evidence test/passive-hook-cli.test.ts
 
 Evidence: `pnpm test` passed 691 tests serially on 2026-09-12 before the atomic commit.
 
+Follow-up evidence: receipt/admission atomicity, injected receipt persistence failure, retry and quarantine dispositions, malformed and oversized pre-parse envelopes, explicit missing-operation identities, status-field gaps, and expected-RED verification gating were added after review. Focused tests passed 39 tests; `pnpm build && node --test --test-concurrency=1 dist/test/**/*.test.js` passed 696 tests serially on 2026-09-12.
+
 ### Task 4: Coalesce and automatically execute analysis for issue #6
 
 **Files:**

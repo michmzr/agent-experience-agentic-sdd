@@ -34,11 +34,12 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
   let spool: CaptureSpool | undefined;
   try {
     if (!isPassiveHookSource(options.source)) return degraded('INVALID_INPUT');
+    spool = new CaptureSpool(join(dirname(options.databasePath), 'capture-spool.sqlite'));
     if (typeof options.input !== 'string' || Buffer.byteLength(options.input, 'utf8') > MAX_HOOK_INPUT_BYTES) {
+      if (typeof options.input === 'string') spool.recordReceipt({ source: options.source, receivedAt: options.now(), disposition: 'malformed-envelope', correlationInput: options.input });
       return degraded('INVALID_INPUT');
     }
 
-    spool = new CaptureSpool(join(dirname(options.databasePath), 'capture-spool.sqlite'));
     let payload: unknown;
     try {
       payload = JSON.parse(options.input) as unknown;
@@ -61,11 +62,9 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
       return { status: 'ignored' };
     }
 
-    const result = spool.admit(record, options.now());
-    spool.recordReceipt({
+    const result = spool.admitWithReceipt(record, {
       source: options.source,
       receivedAt: options.now(),
-      disposition: result.status === 'admitted' ? 'accepted' : 'duplicate',
       correlationInput: options.input
     });
     if (result.status === 'admitted') {

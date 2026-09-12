@@ -139,6 +139,7 @@ export interface SessionEvidenceReport {
     readonly matchedResults: number;
     readonly unmatchedResults: number;
     readonly missingResults: number;
+    readonly missingRequestSourceEventIds: readonly string[];
     readonly supportedClasses: readonly string[];
     readonly skippedClasses: readonly string[];
     readonly unsupportedClasses: readonly string[];

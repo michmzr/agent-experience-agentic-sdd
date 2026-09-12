@@ -18,6 +18,7 @@ export interface SpoolAdmission {
 export interface CaptureSpoolOptions {
   readonly maxActiveRecords?: number;
   readonly maxActiveBytes?: number;
+  readonly failReceiptPersistence?: boolean;
 }
 
 export type CaptureDisposition = 'accepted' | 'duplicate' | 'unsupported-tool' | 'privacy-redaction' | 'unsafe-normalization' | 'malformed-envelope' | 'admission-failure' | 'delivery-retry' | 'quarantine' | 'legacy-unknown';
@@ -53,10 +54,12 @@ export class CaptureSpool {
   readonly #database: DatabaseSync;
   readonly #maxActiveRecords: number;
   readonly #maxActiveBytes: number;
+  readonly #failReceiptPersistence: boolean;
 
   constructor(path: string, options: CaptureSpoolOptions = {}) {
     this.#maxActiveRecords = boundedPositiveInteger(options.maxActiveRecords, MAX_ACTIVE_RECORDS, 'Maximum active record count');
     this.#maxActiveBytes = boundedPositiveInteger(options.maxActiveBytes, MAX_ACTIVE_BYTES, 'Maximum active byte count');
+    this.#failReceiptPersistence = options.failReceiptPersistence === true;
     ensurePrivatePath(path);
     this.#database = new DatabaseSync(path, { enableForeignKeyConstraints: true, timeout: ADMISSION_BUSY_TIMEOUT_MS });
     chmodSync(path, 0o600);
@@ -113,20 +116,12 @@ export class CaptureSpool {
 
   recordReceipt(input: CaptureReceiptInput): CaptureReceipt {
     if (!['codex', 'cursor'].includes(input.source) || !dispositions.includes(input.disposition) || Number.isNaN(Date.parse(input.receivedAt)) || new Date(input.receivedAt).toISOString() !== input.receivedAt) throw new TypeError('Capture receipt is invalid.');
-    if (input.correlationInput !== undefined && (typeof input.correlationInput !== 'string' || input.correlationInput.length > 16_384)) throw new TypeError('Capture receipt correlation input is invalid.');
+    if (input.correlationInput !== undefined && (typeof input.correlationInput !== 'string' || Buffer.byteLength(input.correlationInput, 'utf8') > 2 * 1024 * 1024)) throw new TypeError('Capture receipt correlation input is invalid.');
     this.#database.exec('BEGIN IMMEDIATE');
     try {
-      let row = this.#database.prepare('SELECT secret FROM receipt_secret WHERE id = 1').get() as { secret?: Uint8Array } | undefined;
-      if (row === undefined) {
-        this.#database.prepare('INSERT INTO receipt_secret (id, secret) VALUES (1, ?)').run(randomBytes(32));
-        row = this.#database.prepare('SELECT secret FROM receipt_secret WHERE id = 1').get() as { secret: Uint8Array };
-      }
-      const secret = row.secret;
-      if (secret === undefined) throw new TypeError('Capture receipt secret is unavailable.');
-      const correlationKey = createHmac('sha256', secret).update(input.source).update('\0').update(input.correlationInput ?? '').digest('hex');
-      this.#database.prepare('INSERT INTO capture_receipts (correlation_key, disposition, received_at) VALUES (?, ?, ?)').run(correlationKey, input.disposition, input.receivedAt);
+      const receipt = this.#writeReceipt(input);
       this.#database.exec('COMMIT');
-      return Object.freeze({ correlationKey, disposition: input.disposition, receivedAt: input.receivedAt });
+      return receipt;
     } catch (error) { rollback(this.#database); throw error; }
   }
 
@@ -143,14 +138,32 @@ export class CaptureSpool {
   }
 
   admit(record: PassiveCaptureRecord, admittedAt = new Date().toISOString()): SpoolAdmission {
+    return this.#admit(record, admittedAt);
+  }
+
+  admitWithReceipt(record: PassiveCaptureRecord, receipt: Omit<CaptureReceiptInput, 'disposition'>): SpoolAdmission {
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const admission = this.#admit(record, receipt.receivedAt, false);
+      this.#writeReceipt({ ...receipt, disposition: admission.status === 'admitted' ? 'accepted' : 'duplicate' });
+      this.#database.exec('COMMIT');
+      return admission;
+    } catch (error) {
+      rollback(this.#database);
+      try { this.markReceiptAccountingUnavailable(); } catch { /* A failed private store cannot claim available accounting. */ }
+      throw error;
+    }
+  }
+
+  #admit(record: PassiveCaptureRecord, admittedAt: string, transaction = true): SpoolAdmission {
     const payload = JSON.stringify(record);
     const deliveryId = createHash('sha256').update(`ael:capture-spool:v${SPOOL_VERSION}\0`).update(payload).digest('hex');
     const payloadBytes = Buffer.byteLength(payload, 'utf8');
-    this.#database.exec('BEGIN IMMEDIATE');
+    if (transaction) this.#database.exec('BEGIN IMMEDIATE');
     try {
       const existing = this.#database.prepare('SELECT delivery_id FROM records WHERE delivery_id = ?').get(deliveryId) as { delivery_id?: string } | undefined;
       if (existing !== undefined) {
-        this.#database.exec('COMMIT');
+        if (transaction) this.#database.exec('COMMIT');
         return Object.freeze({ status: 'duplicate', deliveryId });
       }
       const usage = this.#database.prepare('SELECT COUNT(*) AS count, COALESCE(SUM(payload_bytes), 0) AS bytes FROM records').get() as { count: number; bytes: number };
@@ -160,14 +173,35 @@ export class CaptureSpool {
         VALUES (?, ?, ?, ?, 'pending', ?, ?)
       `).run(deliveryId, SPOOL_VERSION, payload, payloadBytes, admittedAt, admittedAt);
       this.#database.prepare('UPDATE counters SET admitted = admitted + 1 WHERE id = 1').run();
-      this.#database.exec('COMMIT');
+      if (transaction) this.#database.exec('COMMIT');
       return Object.freeze({ status: 'admitted', deliveryId });
     } catch (error) {
-      rollback(this.#database);
+      if (transaction) rollback(this.#database);
       if (error instanceof CaptureSpoolCapacityError) {
         this.#database.prepare('UPDATE counters SET failed_admission = failed_admission + 1 WHERE id = 1').run();
       }
       throw error;
+    }
+  }
+
+  #writeReceipt(input: CaptureReceiptInput): CaptureReceipt {
+    if (this.#failReceiptPersistence) throw new TypeError('Injected capture receipt persistence failure.');
+    let row = this.#database.prepare('SELECT secret FROM receipt_secret WHERE id = 1').get() as { secret?: Uint8Array } | undefined;
+    if (row === undefined) {
+      this.#database.prepare('INSERT INTO receipt_secret (id, secret) VALUES (1, ?)').run(randomBytes(32));
+      row = this.#database.prepare('SELECT secret FROM receipt_secret WHERE id = 1').get() as { secret: Uint8Array };
+    }
+    const secret = row.secret;
+    if (secret === undefined) throw new TypeError('Capture receipt secret is unavailable.');
+    const correlationKey = createHmac('sha256', secret).update(input.source).update('\0').update(input.correlationInput ?? '').digest('hex');
+    this.#database.prepare('INSERT INTO capture_receipts (correlation_key, disposition, received_at) VALUES (?, ?, ?)').run(correlationKey, input.disposition, input.receivedAt);
+    return Object.freeze({ correlationKey, disposition: input.disposition, receivedAt: input.receivedAt });
+  }
+
+  #appendReceiptOrMarkUnavailable(input: CaptureReceiptInput): void {
+    try { this.recordReceipt(input); }
+    catch {
+      try { this.markReceiptAccountingUnavailable(); } catch { /* Receipt store is unavailable. */ }
     }
   }
 
@@ -266,24 +300,29 @@ export class CaptureSpool {
   }
 
   retry(deliveryId: string, now: string): void {
-    const row = this.#database.prepare('SELECT attempts FROM records WHERE delivery_id = ? AND state = \'claimed\'').get(deliveryId) as { attempts?: number } | undefined;
+    const row = this.#database.prepare('SELECT attempts, payload FROM records WHERE delivery_id = ? AND state = \'claimed\'').get(deliveryId) as { attempts?: number; payload?: string } | undefined;
     if (row?.attempts === undefined) return;
     const delay = Math.min(30_000, 100 * 2 ** Math.max(0, row.attempts - 1));
     const nextRetryAt = new Date(Date.parse(now) + delay).toISOString();
-    this.#database.prepare(`
+    const result = this.#database.prepare(`
       UPDATE records SET state = 'pending', lease_until = NULL, next_retry_at = ?
       WHERE delivery_id = ? AND state = 'claimed'
     `).run(nextRetryAt, deliveryId);
+    if (result.changes === 1) this.#appendReceiptOrMarkUnavailable({ source: sourceForPayload(row.payload) ?? 'codex', receivedAt: now, disposition: 'delivery-retry', correlationInput: deliveryId });
   }
 
   quarantine(deliveryId: string, code: SpoolQuarantineCode, now = new Date().toISOString()): void {
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       const row = this.#database.prepare('SELECT payload FROM records WHERE delivery_id = ?').get(deliveryId) as { payload?: string } | undefined;
-      if (row?.payload !== undefined) quarantineRow(this.#database, deliveryId, row.payload, code, now);
+      if (row?.payload !== undefined) {
+        quarantineRow(this.#database, deliveryId, row.payload, code, now);
+        this.#writeReceipt({ source: sourceForPayload(row.payload) ?? 'codex', receivedAt: now, disposition: 'quarantine', correlationInput: deliveryId });
+      }
       this.#database.exec('COMMIT');
     } catch (error) {
       rollback(this.#database);
+      try { this.markReceiptAccountingUnavailable(); } catch { /* Receipt store is unavailable. */ }
       throw error;
     }
   }
@@ -355,6 +394,13 @@ function parseRecord(row: { version: number; payload: string }): PassiveCaptureR
   } catch {
     return undefined;
   }
+}
+
+function sourceForPayload(payload: string | undefined): 'codex' | 'cursor' | undefined {
+  if (payload === undefined) return undefined;
+  const record = parseRecord({ version: SPOOL_VERSION, payload });
+  const source = record?.kind === 'session-start' ? record.session.source : record?.kind === 'session-end' ? record.source : record?.event.source;
+  return source === 'codex' || source === 'cursor' ? source : undefined;
 }
 
 function quarantineRow(database: DatabaseSync, deliveryId: string, payload: string, code: SpoolQuarantineCode, now: string): void {

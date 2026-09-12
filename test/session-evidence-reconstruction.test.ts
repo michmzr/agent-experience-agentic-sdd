@@ -179,3 +179,40 @@ test('does not classify a raw nonzero result as repair evidence without supporte
   });
   assert.equal(report.operations[0]?.result?.interpretation?.kind, 'unclassified-nonzero');
 });
+
+test('reports immutable missing operation identities and source-field gaps', () => {
+  const report = reconstructSessionEvidence({
+    ...base,
+    observations: [
+      { id: 'missing-request', sourceEventId: 'missing-request', kind: 'request', occurredAt: '2026-09-06T08:00:01.000Z' },
+      { id: 'statusless-request', sourceEventId: 'statusless-request', kind: 'request', occurredAt: '2026-09-06T08:00:02.000Z' },
+      { id: 'statusless-result', sourceEventId: 'statusless-result', kind: 'result', occurredAt: '2026-09-06T08:00:03.000Z', relatedEventId: 'statusless-request', outcome: 'unknown', resultProvenance: 'hook-envelope' }
+    ]
+  });
+  assert.deepEqual(report.coverage.missingRequestSourceEventIds, ['missing-request']);
+  assert.equal(Object.isFrozen(report.coverage.missingRequestSourceEventIds), true);
+  assert.equal(report.operations[1]?.result?.unknownReason, 'source-field-absent');
+});
+
+test('accepts expected RED only with explicit test-cycle verification evidence', () => {
+  const withoutVerification = () => reconstructSessionEvidence({
+    ...base,
+    observations: [
+      { id: 'request', sourceEventId: 'request', kind: 'request', occurredAt: '2026-09-06T08:00:01.000Z' },
+      { id: 'result', sourceEventId: 'result', kind: 'result', occurredAt: '2026-09-06T08:00:02.000Z', relatedEventId: 'request', outcome: 'failed', exitStatus: 1, interpretation: { version: 1, kind: 'expected-red' } }
+    ]
+  });
+  assert.throws(withoutVerification, /expected.red.*verification/i);
+});
+
+test('keeps bounded semantic result interpretations when their evidence requirements hold', () => {
+  const report = reconstructSessionEvidence({
+    ...base,
+    observations: [
+      { id: 'request', sourceEventId: 'request', kind: 'request', occurredAt: '2026-09-06T08:00:01.000Z' },
+      { id: 'result', sourceEventId: 'result', kind: 'result', occurredAt: '2026-09-06T08:00:02.000Z', relatedEventId: 'request', outcome: 'failed', exitStatus: 1, interpretation: { version: 1, kind: 'expected-red' } },
+      { id: 'verification', sourceEventId: 'verification', kind: 'task-verification', occurredAt: '2026-09-06T08:00:03.000Z', relatedEventId: 'request', outcome: 'succeeded' }
+    ]
+  });
+  assert.equal(report.operations[0]?.result?.interpretation?.kind, 'expected-red');
+});

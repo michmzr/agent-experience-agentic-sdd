@@ -64,6 +64,7 @@ export function reconstructSessionEvidence(input: SessionEvidenceInput): Session
       matchedResults,
       unmatchedResults: results.length - matchedResults,
       missingResults: operations.length - matchedResults,
+      missingRequestSourceEventIds: Object.freeze(operations.filter(({ resultEvidenceId }) => resultEvidenceId === undefined).map(({ requestSourceEventId }) => requestSourceEventId).sort()),
       supportedClasses: Object.freeze(sortedUnique(input.coverage?.supportedClasses ?? [])),
       skippedClasses: Object.freeze(sortedUnique(input.coverage?.skippedClasses ?? [])),
       unsupportedClasses: Object.freeze(sortedUnique(input.coverage?.unsupportedClasses ?? [])),
@@ -84,10 +85,13 @@ function operationFrom(
   if (result !== undefined) usedEvidence.add(result.id);
   const relatedVerifications = verifications;
   for (const verification of relatedVerifications) usedEvidence.add(verification.id);
+  if (result?.interpretation?.kind === 'expected-red' && !relatedVerifications.some(({ outcome }) => outcome === 'succeeded')) {
+    throw new TypeError('Expected RED interpretation requires explicit successful test-cycle verification evidence.');
+  }
   const resultFact: NonNullable<SessionOperation['result']> = result === undefined ? Object.freeze({ unknownReason: 'result-not-delivered' as const }) : Object.freeze({
     ...(result.exitStatus === undefined ? {} : { exitStatus: result.exitStatus }),
     provenance: result.resultProvenance ?? 'hook-envelope' as const,
-    ...(result.resultUnknownReason === undefined ? {} : { unknownReason: result.resultUnknownReason }),
+    ...(result.resultUnknownReason === undefined ? (result.exitStatus === undefined ? { unknownReason: 'source-field-absent' as const } : {}) : { unknownReason: result.resultUnknownReason }),
     ...(result.interpretation === undefined
       ? (result.exitStatus !== undefined && result.exitStatus !== 0 ? { interpretation: Object.freeze({ version: 1 as const, kind: 'unclassified-nonzero' as const }) } : {})
       : { interpretation: Object.freeze({ ...result.interpretation }) })
