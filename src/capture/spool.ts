@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -19,6 +19,12 @@ export interface CaptureSpoolOptions {
   readonly maxActiveRecords?: number;
   readonly maxActiveBytes?: number;
 }
+
+export type CaptureDisposition = 'accepted' | 'duplicate' | 'unsupported-tool' | 'privacy-redaction' | 'unsafe-normalization' | 'malformed-envelope' | 'admission-failure' | 'delivery-retry' | 'quarantine' | 'legacy-unknown';
+export interface CaptureReceiptInput { readonly source: 'codex' | 'cursor'; readonly receivedAt: string; readonly disposition: CaptureDisposition; readonly correlationInput?: string; }
+export interface CaptureReceipt { readonly correlationKey: string; readonly disposition: CaptureDisposition; readonly receivedAt: string; }
+export interface CaptureReceiptReport { readonly accounting: 'available' | 'unavailable'; readonly receipts: readonly CaptureReceipt[]; readonly byDisposition: Readonly<Record<CaptureDisposition, number>>; }
+const dispositions: readonly CaptureDisposition[] = ['accepted', 'duplicate', 'unsupported-tool', 'privacy-redaction', 'unsafe-normalization', 'malformed-envelope', 'admission-failure', 'delivery-retry', 'quarantine', 'legacy-unknown'];
 
 export interface CaptureSpoolStatus {
   readonly version: 1;
@@ -93,9 +99,47 @@ export class CaptureSpool {
         owner TEXT NOT NULL,
         lease_until TEXT NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS receipt_secret (id INTEGER PRIMARY KEY CHECK (id = 1), secret BLOB NOT NULL) STRICT;
+      CREATE TABLE IF NOT EXISTS capture_receipts (
+        sequence INTEGER PRIMARY KEY, correlation_key TEXT NOT NULL, disposition TEXT NOT NULL CHECK (disposition IN ('accepted', 'duplicate', 'unsupported-tool', 'privacy-redaction', 'unsafe-normalization', 'malformed-envelope', 'admission-failure', 'delivery-retry', 'quarantine', 'legacy-unknown')),
+        received_at TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS receipt_accounting (id INTEGER PRIMARY KEY CHECK (id = 1), state TEXT NOT NULL CHECK (state IN ('available', 'unavailable'))) STRICT;
       INSERT OR IGNORE INTO counters (id, admitted, committed, quarantined, failed_admission) VALUES (1, 0, 0, 0, 0);
+      INSERT OR IGNORE INTO receipt_accounting (id, state) VALUES (1, 'available');
     `);
     ensureDiagnosticColumns(this.#database);
+  }
+
+  recordReceipt(input: CaptureReceiptInput): CaptureReceipt {
+    if (!['codex', 'cursor'].includes(input.source) || !dispositions.includes(input.disposition) || Number.isNaN(Date.parse(input.receivedAt)) || new Date(input.receivedAt).toISOString() !== input.receivedAt) throw new TypeError('Capture receipt is invalid.');
+    if (input.correlationInput !== undefined && (typeof input.correlationInput !== 'string' || input.correlationInput.length > 16_384)) throw new TypeError('Capture receipt correlation input is invalid.');
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      let row = this.#database.prepare('SELECT secret FROM receipt_secret WHERE id = 1').get() as { secret?: Uint8Array } | undefined;
+      if (row === undefined) {
+        this.#database.prepare('INSERT INTO receipt_secret (id, secret) VALUES (1, ?)').run(randomBytes(32));
+        row = this.#database.prepare('SELECT secret FROM receipt_secret WHERE id = 1').get() as { secret: Uint8Array };
+      }
+      const secret = row.secret;
+      if (secret === undefined) throw new TypeError('Capture receipt secret is unavailable.');
+      const correlationKey = createHmac('sha256', secret).update(input.source).update('\0').update(input.correlationInput ?? '').digest('hex');
+      this.#database.prepare('INSERT INTO capture_receipts (correlation_key, disposition, received_at) VALUES (?, ?, ?)').run(correlationKey, input.disposition, input.receivedAt);
+      this.#database.exec('COMMIT');
+      return Object.freeze({ correlationKey, disposition: input.disposition, receivedAt: input.receivedAt });
+    } catch (error) { rollback(this.#database); throw error; }
+  }
+
+  receiptReport(): CaptureReceiptReport {
+    const rows = this.#database.prepare('SELECT correlation_key, disposition, received_at FROM capture_receipts ORDER BY sequence').all() as Array<{ correlation_key: string; disposition: CaptureDisposition; received_at: string }>;
+    const byDisposition = Object.fromEntries(dispositions.map((value) => [value, 0])) as Record<CaptureDisposition, number>;
+    for (const row of rows) byDisposition[row.disposition] += 1;
+    const accounting = (this.#database.prepare('SELECT state FROM receipt_accounting WHERE id = 1').get() as { state: 'available' | 'unavailable' }).state;
+    return Object.freeze({ accounting, receipts: Object.freeze(rows.map((row) => Object.freeze({ correlationKey: row.correlation_key, disposition: row.disposition, receivedAt: row.received_at }))), byDisposition: Object.freeze(byDisposition) });
+  }
+
+  markReceiptAccountingUnavailable(): void {
+    this.#database.prepare("UPDATE receipt_accounting SET state = 'unavailable' WHERE id = 1").run();
   }
 
   admit(record: PassiveCaptureRecord, admittedAt = new Date().toISOString()): SpoolAdmission {

@@ -14,7 +14,7 @@ import {
 } from './contracts.js';
 
 const identifierPattern = /^[A-Za-z0-9._:/-]{1,512}$/;
-const observationKeys = new Set(['id', 'sourceEventId', 'kind', 'occurredAt', 'relatedEventId', 'tool', 'outcome', 'exitStatus', 'endedAt']);
+const observationKeys = new Set(['id', 'sourceEventId', 'kind', 'occurredAt', 'relatedEventId', 'tool', 'outcome', 'exitStatus', 'resultProvenance', 'resultUnknownReason', 'interpretation', 'endedAt']);
 const usageKeys = new Set(['id', 'occurredAt', 'mode', 'scope', 'lineageId', 'parentLineageId', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'analysisTokens']);
 const transportKeys = new Set(['id', 'capturedAt', 'admittedAt', 'committedAt', 'hookDurationMs']);
 const inputKeys = new Set(['schemaVersion', 'source', 'sessionId', 'startedAt', 'sourceEndedAt', 'observedThrough', 'reconciliation', 'observations', 'usageSnapshots', 'transportMeasurements', 'coverage']);
@@ -84,7 +84,15 @@ function operationFrom(
   if (result !== undefined) usedEvidence.add(result.id);
   const relatedVerifications = verifications;
   for (const verification of relatedVerifications) usedEvidence.add(verification.id);
-  const processOutcome: SessionOperation['processOutcome'] = result === undefined || result.outcome === undefined || result.outcome === 'unknown'
+  const resultFact: NonNullable<SessionOperation['result']> = result === undefined ? Object.freeze({ unknownReason: 'result-not-delivered' as const }) : Object.freeze({
+    ...(result.exitStatus === undefined ? {} : { exitStatus: result.exitStatus }),
+    provenance: result.resultProvenance ?? 'hook-envelope' as const,
+    ...(result.resultUnknownReason === undefined ? {} : { unknownReason: result.resultUnknownReason }),
+    ...(result.interpretation === undefined
+      ? (result.exitStatus !== undefined && result.exitStatus !== 0 ? { interpretation: Object.freeze({ version: 1 as const, kind: 'unclassified-nonzero' as const }) } : {})
+      : { interpretation: Object.freeze({ ...result.interpretation }) })
+  });
+  const processOutcome: SessionOperation['processOutcome'] = result === undefined || result.outcome === undefined || result.outcome === 'unknown' || resultFact.interpretation?.kind === 'no-match'
     ? 'unknown'
     : result.exitStatus !== undefined ? (result.exitStatus === 0 ? 'succeeded' : 'failed') : result.outcome;
   const taskOutcome = relatedVerifications.some(({ outcome }) => outcome === 'failed')
@@ -101,6 +109,7 @@ function operationFrom(
     requestEvidenceId: request.id,
     requestSourceEventId: request.sourceEventId,
     ...(result === undefined ? {} : { resultEvidenceId: result.id }),
+    result: resultFact,
     ...(relatedVerifications.length === 0 ? {} : { verificationEvidenceIds: Object.freeze(relatedVerifications.map(({ id }) => id)) }),
     ...(request.tool === undefined ? {} : { tool: request.tool }),
     startedAt: request.occurredAt,
@@ -234,6 +243,11 @@ function validateObservation(value: EvidenceObservation): void {
   if (value.kind === 'request' && value.relatedEventId !== undefined) throw new TypeError('Request evidence cannot relate to another request.');
   if (value.outcome !== undefined && !['succeeded', 'failed', 'unknown'].includes(value.outcome)) throw new TypeError('Evidence outcome is invalid.');
   if (value.exitStatus !== undefined && (!Number.isSafeInteger(value.exitStatus) || value.kind !== 'result')) throw new TypeError('Evidence exit status is invalid.');
+  if (value.resultProvenance !== undefined && (value.kind !== 'result' || !['hook-envelope', 'async-completion'].includes(value.resultProvenance))) throw new TypeError('Result provenance is invalid.');
+  if (value.resultUnknownReason !== undefined && (value.kind !== 'result' || !['source-field-absent', 'result-not-delivered', 'awaiting-async-completion', 'correlation-missing', 'unsupported-result-shape', 'privacy-redacted', 'legacy-record'].includes(value.resultUnknownReason))) throw new TypeError('Result unknown reason is invalid.');
+  if (value.interpretation !== undefined) {
+    if (value.kind !== 'result' || value.interpretation.version !== 1 || !['no-match', 'interrupted', 'environment-limited', 'failed-test', 'expected-red', 'unclassified-nonzero', 'unknown'].includes(value.interpretation.kind)) throw new TypeError('Result interpretation is invalid.');
+  }
   if (value.kind === 'result' && value.exitStatus !== undefined && value.outcome !== undefined && value.outcome !== 'unknown') {
     const exitOutcome = value.exitStatus === 0 ? 'succeeded' : 'failed';
     if (value.outcome !== exitOutcome) throw new TypeError('Evidence exit status conflicts with its outcome.');

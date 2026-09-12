@@ -6,6 +6,21 @@ export const MAX_SESSION_EVIDENCE_OBSERVATIONS = 10_000;
 export type SessionLifecycleState = 'open' | 'source-ended' | 'reconciled-complete' | 'incomplete';
 export type OperationOutcome = 'process-succeeded' | 'command-failed' | 'task-verification-failed' | 'unknown';
 export type EvidenceObservationKind = 'request' | 'result' | 'task-verification' | 'human-wait';
+export type ResultProvenance = 'hook-envelope' | 'async-completion';
+export type ResultUnknownReason = 'source-field-absent' | 'result-not-delivered' | 'awaiting-async-completion' | 'correlation-missing' | 'unsupported-result-shape' | 'privacy-redacted' | 'legacy-record';
+export type ResultInterpretationKind = 'no-match' | 'interrupted' | 'environment-limited' | 'failed-test' | 'expected-red' | 'unclassified-nonzero' | 'unknown';
+
+export interface ResultInterpretation {
+  readonly version: 1;
+  readonly kind: ResultInterpretationKind;
+}
+
+export interface ResultFact {
+  readonly exitStatus?: number;
+  readonly provenance?: ResultProvenance;
+  readonly unknownReason?: ResultUnknownReason;
+  readonly interpretation?: ResultInterpretation;
+}
 
 export interface EvidenceObservation {
   readonly id: string;
@@ -16,6 +31,9 @@ export interface EvidenceObservation {
   readonly tool?: string;
   readonly outcome?: 'succeeded' | 'failed' | 'unknown';
   readonly exitStatus?: number;
+  readonly resultProvenance?: ResultProvenance;
+  readonly resultUnknownReason?: ResultUnknownReason;
+  readonly interpretation?: ResultInterpretation;
   readonly endedAt?: string;
 }
 
@@ -73,6 +91,7 @@ export interface SessionOperation {
   readonly requestEvidenceId: string;
   readonly requestSourceEventId: string;
   readonly resultEvidenceId?: string;
+  readonly result?: ResultFact;
   readonly verificationEvidenceIds?: readonly string[];
   readonly tool?: string;
   readonly startedAt: string;

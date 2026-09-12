@@ -25,6 +25,7 @@ export function projectCapturedSessionEvidence(input: {
       ...(event.signature.tool === undefined ? {} : { tool: event.signature.tool }),
       ...(event.outcome === undefined ? (event.phase === 'post-result' ? { outcome: 'unknown' as const } : {}) : { outcome: event.outcome }),
       ...(event.exitStatus === undefined ? {} : { exitStatus: event.exitStatus })
+      ,...(event.phase === 'post-result' ? { resultProvenance: 'hook-envelope' as const } : {})
     }));
   }
   return Object.freeze({

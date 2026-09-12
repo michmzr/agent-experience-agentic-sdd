@@ -51,6 +51,26 @@ test('durably admits a sanitized record once and reports pending status', () => 
   }
 });
 
+test('accounts for privacy-bounded capture receipt dispositions without retaining raw payload markers', () => {
+  const dataDir = dataDirectory();
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  try {
+    spool.recordReceipt({ source: 'codex', receivedAt: '2026-09-12T08:00:00.000Z', disposition: 'privacy-redaction', correlationInput: 'private-marker-must-not-persist' });
+    spool.recordReceipt({ source: 'codex', receivedAt: '2026-09-12T08:00:01.000Z', disposition: 'unsupported-tool' });
+    const report = spool.receiptReport();
+    assert.equal(report.accounting, 'available');
+    assert.equal(report.byDisposition['privacy-redaction'], 1);
+    assert.equal(report.byDisposition['unsupported-tool'], 1);
+    assert.match(report.receipts[0]!.correlationKey, /^[a-f0-9]{64}$/);
+    assert.equal(JSON.stringify(report).includes('private-marker-must-not-persist'), false);
+    spool.markReceiptAccountingUnavailable();
+    assert.equal(spool.receiptReport().accounting, 'unavailable');
+  } finally {
+    spool.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test('reclaims expired claims and acknowledges a committed delivery once', () => {
   const dataDir = dataDirectory();
   const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));

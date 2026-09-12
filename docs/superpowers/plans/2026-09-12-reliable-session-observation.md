@@ -150,7 +150,7 @@ Run: `git add src/capture src/storage/experience-store.ts test/passive-hook-adap
 - Modify: `test/session-evidence-reconstruction.test.ts`
 - Modify: `test/session-evidence-measurement.test.ts`
 
-- [ ] **Step 1: Write failing receipt and outcome tests**
+- [x] **Step 1: Write failing receipt and outcome tests**
 
 Assert accepted, duplicate, unsupported, redacted, malformed, retry, quarantine, and unavailable-accounting behavior. Assert exit facts preserve source provenance and `rg` status 1, interruption, environment restriction, expected RED, and missing result have distinct interpretation or unknown reason.
 
@@ -161,13 +161,15 @@ assert.equal(operation.result?.unknownReason, 'result-not-delivered');
 assert.equal(operation.result?.interpretation?.kind, 'no-match');
 ```
 
-- [ ] **Step 2: Run focused tests and confirm RED**
+- [x] **Step 2: Run focused tests and confirm RED**
 
 Run: `pnpm build && node --test dist/test/passive-hook-cli.test.js dist/test/session-evidence-reconstruction.test.js dist/test/session-evidence-measurement.test.js`
 
 Expected: failure because receipt ledger, result provenance, and unknown reason contracts are absent.
 
-- [ ] **Step 3: Implement private receipt ledger and result-fact projection**
+Evidence: `pnpm build` failed on 2026-09-12 because `CaptureSpool.recordReceipt`, `CaptureSpool.receiptReport`, `EvidenceObservation.resultProvenance`, and `SessionOperation.result` did not exist.
+
+- [x] **Step 3: Implement private receipt ledger and result-fact projection**
 
 Persist a bounded receipt before normalization with fixed disposition and an HMAC-derived local correlation key. Do not retain source identifiers, arguments, output, prompts, or paths. Persist source exit facts separately from an interpreter result. Make task verification independent. On receipt persistence failure, return the existing fail-open diagnostic and mark accounting unavailable in reports.
 
@@ -187,15 +189,19 @@ export interface ResultFact {
 }
 ```
 
-- [ ] **Step 4: Run focused tests and confirm GREEN**
+- [x] **Step 4: Run focused tests and confirm GREEN**
 
 Run: `pnpm build && node --test dist/test/passive-hook-cli.test.js dist/test/session-evidence-reconstruction.test.js dist/test/session-evidence-measurement.test.js`
 
 Expected: receipt, privacy, source-result, and classification tests pass without exposing fixture markers.
 
-- [ ] **Step 5: Commit issues #4 and #5**
+Evidence: `pnpm build && node --test dist/test/passive-hook-cli.test.js dist/test/capture-spool.test.js dist/test/session-evidence-reconstruction.test.js dist/test/session-evidence-measurement.test.js` passed 34 tests on 2026-09-12.
+
+- [x] **Step 5: Commit issues #4 and #5**
 
 Run: `git add src/capture src/storage src/evidence test/passive-hook-cli.test.ts test/session-evidence-reconstruction.test.ts test/session-evidence-measurement.test.ts && git commit -m "feat: account for capture receipts and result facts"`
+
+Evidence: `pnpm test` passed 691 tests serially on 2026-09-12 before the atomic commit.
 
 ### Task 4: Coalesce and automatically execute analysis for issue #6
 

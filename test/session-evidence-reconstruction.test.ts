@@ -34,6 +34,7 @@ test('correlates reordered request and result records only by explicit identity'
     requestEvidenceId: 'transport-request',
     requestSourceEventId: 'request-1',
     resultEvidenceId: 'transport-result',
+    result: { exitStatus: 0, provenance: 'hook-envelope' },
     tool: 'shell',
     startedAt: '2026-09-06T08:00:01.000Z',
     endedAt: '2026-09-06T08:00:02.000Z',
@@ -151,4 +152,30 @@ test('keeps missing results unknown and rejects invalid temporal or identity ref
     observations: [{ id: 'early', sourceEventId: 'early', kind: 'request', occurredAt: '2026-09-06T07:59:59.999Z' }]
   }), /session start/i);
   assert.throws(() => reconstructSessionEvidence({ ...base, coverage: { supportedClasses: 'request' as never } }), /coverage.*array/i);
+});
+
+test('keeps source result facts separate from bounded interpretation and task verification', () => {
+  const report = reconstructSessionEvidence({
+    ...base,
+    observations: [
+      { id: 'request-rg', sourceEventId: 'request-rg', kind: 'request', occurredAt: '2026-09-06T08:00:01.000Z', tool: 'shell' },
+      { id: 'result-rg', sourceEventId: 'result-rg', kind: 'result', occurredAt: '2026-09-06T08:00:02.000Z', relatedEventId: 'request-rg', exitStatus: 1, outcome: 'failed', resultProvenance: 'hook-envelope', interpretation: { version: 1, kind: 'no-match' } },
+      { id: 'request-missing', sourceEventId: 'request-missing', kind: 'request', occurredAt: '2026-09-06T08:00:03.000Z' }
+    ]
+  });
+
+  assert.deepEqual(report.operations[0]?.result, { exitStatus: 1, provenance: 'hook-envelope', interpretation: { version: 1, kind: 'no-match' } });
+  assert.equal(report.operations[0]?.outcome, 'unknown');
+  assert.equal(report.operations[1]?.result?.unknownReason, 'result-not-delivered');
+});
+
+test('does not classify a raw nonzero result as repair evidence without supported context', () => {
+  const report = reconstructSessionEvidence({
+    ...base,
+    observations: [
+      { id: 'request', sourceEventId: 'request', kind: 'request', occurredAt: '2026-09-06T08:00:01.000Z' },
+      { id: 'result', sourceEventId: 'result', kind: 'result', occurredAt: '2026-09-06T08:00:02.000Z', relatedEventId: 'request', exitStatus: 2, outcome: 'failed', resultProvenance: 'async-completion' }
+    ]
+  });
+  assert.equal(report.operations[0]?.result?.interpretation?.kind, 'unclassified-nonzero');
 });

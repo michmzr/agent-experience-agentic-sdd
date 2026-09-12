@@ -38,10 +38,12 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
       return degraded('INVALID_INPUT');
     }
 
+    spool = new CaptureSpool(join(dirname(options.databasePath), 'capture-spool.sqlite'));
     let payload: unknown;
     try {
       payload = JSON.parse(options.input) as unknown;
     } catch {
+      spool.recordReceipt({ source: options.source, receivedAt: options.now(), disposition: 'malformed-envelope', correlationInput: options.input });
       return degraded('INVALID_INPUT');
     }
 
@@ -54,10 +56,18 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
     const record = options.source === 'cursor'
       ? cursorRecord(options, payload, repositoryId, scope!)
       : adaptPassiveHook(options.source, payload, options.now(), repositoryId);
-    if (record === undefined) return { status: 'ignored' };
+    if (record === undefined) {
+      spool.recordReceipt({ source: options.source, receivedAt: options.now(), disposition: 'unsupported-tool', correlationInput: options.input });
+      return { status: 'ignored' };
+    }
 
-    spool = new CaptureSpool(join(dirname(options.databasePath), 'capture-spool.sqlite'));
     const result = spool.admit(record, options.now());
+    spool.recordReceipt({
+      source: options.source,
+      receivedAt: options.now(),
+      disposition: result.status === 'admitted' ? 'accepted' : 'duplicate',
+      correlationInput: options.input
+    });
     if (result.status === 'admitted') {
       try { (options.scheduleDrain ?? startDrain)(dirname(options.databasePath)); }
       catch { /* Durable admission does not depend on best-effort worker startup. */ }
@@ -65,6 +75,16 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
     return { status: result.status === 'admitted' ? 'captured' : 'duplicate' };
   } catch (error) {
     const code = inputErrorCode(error);
+    try {
+      spool?.recordReceipt({
+        source: options.source,
+        receivedAt: options.now(),
+        disposition: code === 'PRIVATE_INPUT' ? 'privacy-redaction' : code === 'PERSISTENCE_FAILED' ? 'admission-failure' : 'unsafe-normalization',
+        correlationInput: options.input
+      });
+    } catch {
+      try { spool?.markReceiptAccountingUnavailable(); } catch { /* Accounting storage may itself be unavailable. */ }
+    }
     if (code === 'PERSISTENCE_FAILED' && scope !== undefined) incrementDiagnostic(options, scope, 'persistence-failure');
     return degraded(code);
   } finally {
