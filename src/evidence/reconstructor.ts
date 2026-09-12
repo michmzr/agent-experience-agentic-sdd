@@ -20,6 +20,7 @@ const transportKeys = new Set(['id', 'capturedAt', 'admittedAt', 'committedAt', 
 const inputKeys = new Set(['schemaVersion', 'source', 'sessionId', 'startedAt', 'sourceEndedAt', 'observedThrough', 'reconciliation', 'observations', 'usageSnapshots', 'transportMeasurements', 'coverage']);
 const reconciliationKeys = new Set(['attempted', 'expectedThrough', 'committedThrough']);
 const coverageKeys = new Set(['supportedClasses', 'skippedClasses', 'unsupportedClasses', 'truncatedObservations', 'synthetic']);
+const interpretationKeys = new Set(['version', 'kind']);
 
 export function reconstructSessionEvidence(input: SessionEvidenceInput): SessionEvidenceReport {
   validateInput(input);
@@ -94,7 +95,7 @@ function operationFrom(
     ...(result.resultUnknownReason === undefined ? (result.exitStatus === undefined ? { unknownReason: 'source-field-absent' as const } : {}) : { unknownReason: result.resultUnknownReason }),
     ...(result.interpretation === undefined
       ? (result.exitStatus !== undefined && result.exitStatus !== 0 ? { interpretation: Object.freeze({ version: 1 as const, kind: 'unclassified-nonzero' as const }) } : {})
-      : { interpretation: Object.freeze({ ...result.interpretation }) })
+      : { interpretation: Object.freeze({ version: 1 as const, kind: result.interpretation.kind }) })
   });
   const processOutcome: SessionOperation['processOutcome'] = result === undefined || result.outcome === undefined || result.outcome === 'unknown' || resultFact.interpretation?.kind === 'no-match'
     ? 'unknown'
@@ -250,7 +251,9 @@ function validateObservation(value: EvidenceObservation): void {
   if (value.resultProvenance !== undefined && (value.kind !== 'result' || !['hook-envelope', 'async-completion'].includes(value.resultProvenance))) throw new TypeError('Result provenance is invalid.');
   if (value.resultUnknownReason !== undefined && (value.kind !== 'result' || !['source-field-absent', 'result-not-delivered', 'awaiting-async-completion', 'correlation-missing', 'unsupported-result-shape', 'privacy-redacted', 'legacy-record'].includes(value.resultUnknownReason))) throw new TypeError('Result unknown reason is invalid.');
   if (value.interpretation !== undefined) {
-    if (value.kind !== 'result' || value.interpretation.version !== 1 || !['no-match', 'interrupted', 'environment-limited', 'failed-test', 'expected-red', 'unclassified-nonzero', 'unknown'].includes(value.interpretation.kind)) throw new TypeError('Result interpretation is invalid.');
+    if (value.kind !== 'result') throw new TypeError('Result interpretation is invalid.');
+    assertAllowedObject(value.interpretation, interpretationKeys, 'result interpretation');
+    if (value.interpretation.version !== 1 || typeof value.interpretation.kind !== 'string' || !['no-match', 'interrupted', 'environment-limited', 'failed-test', 'expected-red', 'unclassified-nonzero', 'unknown'].includes(value.interpretation.kind)) throw new TypeError('Result interpretation is invalid.');
   }
   if (value.kind === 'result' && value.exitStatus !== undefined && value.outcome !== undefined && value.outcome !== 'unknown') {
     const exitOutcome = value.exitStatus === 0 ? 'succeeded' : 'failed';

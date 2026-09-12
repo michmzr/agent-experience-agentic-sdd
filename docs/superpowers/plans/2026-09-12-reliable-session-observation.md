@@ -205,6 +205,8 @@ Evidence: `pnpm test` passed 691 tests serially on 2026-09-12 before the atomic 
 
 Follow-up evidence: receipt/admission atomicity, injected receipt persistence failure, retry and quarantine dispositions, malformed and oversized pre-parse envelopes, explicit missing-operation identities, status-field gaps, and expected-RED verification gating were added after review. Focused tests passed 39 tests; `pnpm build && node --test --test-concurrency=1 dist/test/**/*.test.js` passed 696 tests serially on 2026-09-12.
 
+Quality follow-up evidence: retry and receipt rollback, automatic corrupt-record quarantine receipts, closed-world interpretation validation, and deterministic receipt retention/report limits were added after quality review. Focused tests passed 42 tests; `pnpm build && node --test --test-concurrency=1 dist/test/**/*.test.js` passed 699 tests serially on 2026-09-12.
+
 ### Task 4: Coalesce and automatically execute analysis for issue #6
 
 **Files:**

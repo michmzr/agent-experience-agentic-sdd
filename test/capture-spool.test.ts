@@ -101,6 +101,35 @@ test('accounts for delivery retry and quarantine dispositions', () => {
   } finally { spool.close(); rmSync(dataDir, { recursive: true, force: true }); }
 });
 
+test('bounds retained and reported receipts deterministically', () => {
+  const dataDir = dataDirectory();
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'), { maxReceipts: 2 });
+  try {
+    spool.recordReceipt({ source: 'codex', receivedAt: '2026-09-12T08:00:00.000Z', disposition: 'accepted' });
+    spool.recordReceipt({ source: 'codex', receivedAt: '2026-09-12T08:00:01.000Z', disposition: 'duplicate' });
+    spool.recordReceipt({ source: 'codex', receivedAt: '2026-09-12T08:00:02.000Z', disposition: 'delivery-retry' });
+    const report = spool.receiptReport();
+    assert.deepEqual(report.receipts.map(({ receivedAt }) => receivedAt), ['2026-09-12T08:00:01.000Z', '2026-09-12T08:00:02.000Z']);
+    assert.equal(report.byDisposition.accepted, 0);
+    assert.equal(report.byDisposition['delivery-retry'], 1);
+  } finally { spool.close(); rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('rolls back a retry when its receipt cannot persist and marks accounting unavailable', () => {
+  const dataDir = dataDirectory();
+  const path = join(dataDir, 'capture-spool.sqlite');
+  const admitted = new CaptureSpool(path);
+  const delivery = admitted.admit(sessionStart(), '2026-09-12T08:00:00.000Z');
+  admitted.close();
+  const spool = new CaptureSpool(path, { failReceiptPersistence: true });
+  try {
+    spool.claim('2026-09-12T08:00:00.000Z', 1);
+    assert.throws(() => spool.retry(delivery.deliveryId, '2026-09-12T08:00:01.000Z'), /receipt/i);
+    assert.equal(spool.status().claimed, 1);
+    assert.equal(spool.receiptReport().accounting, 'unavailable');
+  } finally { spool.close(); rmSync(dataDir, { recursive: true, force: true }); }
+});
+
 test('reclaims expired claims and acknowledges a committed delivery once', () => {
   const dataDir = dataDirectory();
   const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
@@ -188,6 +217,7 @@ test('quarantines a corrupt stored record without blocking later records', () =>
     const [claimed] = spool.claim('2026-09-07T08:00:01.000Z', 10);
     assert.equal(claimed?.record.kind, 'session-start');
     assert.equal(spool.status().quarantined, 1);
+    assert.equal(spool.receiptReport().byDisposition.quarantine, 1);
   } finally {
     spool.close();
     rmSync(dataDir, { recursive: true, force: true });

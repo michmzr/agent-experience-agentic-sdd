@@ -216,3 +216,13 @@ test('keeps bounded semantic result interpretations when their evidence requirem
   });
   assert.equal(report.operations[0]?.result?.interpretation?.kind, 'expected-red');
 });
+
+test('rejects unexpected or secret-bearing interpretation fields without retaining them', () => {
+  assert.throws(() => reconstructSessionEvidence({
+    ...base,
+    observations: [
+      { id: 'request', sourceEventId: 'request', kind: 'request', occurredAt: '2026-09-06T08:00:01.000Z' },
+      { id: 'result', sourceEventId: 'result', kind: 'result', occurredAt: '2026-09-06T08:00:02.000Z', relatedEventId: 'request', outcome: 'failed', exitStatus: 1, interpretation: { version: 1, kind: 'no-match', secret: 'token=must-not-appear' } }
+    ]
+  } as never), (error: unknown) => error instanceof Error && /interpretation/i.test(error.message) && !error.message.includes('must-not-appear'));
+});

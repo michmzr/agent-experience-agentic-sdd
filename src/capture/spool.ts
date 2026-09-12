@@ -9,6 +9,7 @@ const SPOOL_VERSION = 1;
 const ADMISSION_BUSY_TIMEOUT_MS = 100;
 const MAX_ACTIVE_RECORDS = 50_000;
 const MAX_ACTIVE_BYTES = 32 * 1024 * 1024;
+const MAX_RECEIPTS = 10_000;
 
 export interface SpoolAdmission {
   readonly status: 'admitted' | 'duplicate';
@@ -19,6 +20,7 @@ export interface CaptureSpoolOptions {
   readonly maxActiveRecords?: number;
   readonly maxActiveBytes?: number;
   readonly failReceiptPersistence?: boolean;
+  readonly maxReceipts?: number;
 }
 
 export type CaptureDisposition = 'accepted' | 'duplicate' | 'unsupported-tool' | 'privacy-redaction' | 'unsafe-normalization' | 'malformed-envelope' | 'admission-failure' | 'delivery-retry' | 'quarantine' | 'legacy-unknown';
@@ -55,11 +57,13 @@ export class CaptureSpool {
   readonly #maxActiveRecords: number;
   readonly #maxActiveBytes: number;
   readonly #failReceiptPersistence: boolean;
+  readonly #maxReceipts: number;
 
   constructor(path: string, options: CaptureSpoolOptions = {}) {
     this.#maxActiveRecords = boundedPositiveInteger(options.maxActiveRecords, MAX_ACTIVE_RECORDS, 'Maximum active record count');
     this.#maxActiveBytes = boundedPositiveInteger(options.maxActiveBytes, MAX_ACTIVE_BYTES, 'Maximum active byte count');
     this.#failReceiptPersistence = options.failReceiptPersistence === true;
+    this.#maxReceipts = boundedPositiveInteger(options.maxReceipts, MAX_RECEIPTS, 'Maximum receipt count');
     ensurePrivatePath(path);
     this.#database = new DatabaseSync(path, { enableForeignKeyConstraints: true, timeout: ADMISSION_BUSY_TIMEOUT_MS });
     chmodSync(path, 0o600);
@@ -195,6 +199,7 @@ export class CaptureSpool {
     if (secret === undefined) throw new TypeError('Capture receipt secret is unavailable.');
     const correlationKey = createHmac('sha256', secret).update(input.source).update('\0').update(input.correlationInput ?? '').digest('hex');
     this.#database.prepare('INSERT INTO capture_receipts (correlation_key, disposition, received_at) VALUES (?, ?, ?)').run(correlationKey, input.disposition, input.receivedAt);
+    this.#database.prepare('DELETE FROM capture_receipts WHERE sequence NOT IN (SELECT sequence FROM capture_receipts ORDER BY sequence DESC LIMIT ?)').run(this.#maxReceipts);
     return Object.freeze({ correlationKey, disposition: input.disposition, receivedAt: input.receivedAt });
   }
 
@@ -255,6 +260,7 @@ export class CaptureSpool {
         const record = parseRecord(row);
         if (record === undefined) {
           quarantineRow(this.#database, row.delivery_id, row.payload, row.version === SPOOL_VERSION ? 'CORRUPT' : 'UNSUPPORTED', now);
+          this.#writeReceipt({ source: sourceForPayload(row.payload) ?? 'codex', receivedAt: now, disposition: 'quarantine', correlationInput: row.delivery_id });
           continue;
         }
         this.#database.prepare(`
@@ -267,6 +273,7 @@ export class CaptureSpool {
       return Object.freeze(claimed);
     } catch (error) {
       rollback(this.#database);
+      try { this.markReceiptAccountingUnavailable(); } catch { /* Receipt store is unavailable. */ }
       throw error;
     }
   }
@@ -304,11 +311,19 @@ export class CaptureSpool {
     if (row?.attempts === undefined) return;
     const delay = Math.min(30_000, 100 * 2 ** Math.max(0, row.attempts - 1));
     const nextRetryAt = new Date(Date.parse(now) + delay).toISOString();
-    const result = this.#database.prepare(`
-      UPDATE records SET state = 'pending', lease_until = NULL, next_retry_at = ?
-      WHERE delivery_id = ? AND state = 'claimed'
-    `).run(nextRetryAt, deliveryId);
-    if (result.changes === 1) this.#appendReceiptOrMarkUnavailable({ source: sourceForPayload(row.payload) ?? 'codex', receivedAt: now, disposition: 'delivery-retry', correlationInput: deliveryId });
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const result = this.#database.prepare(`
+        UPDATE records SET state = 'pending', lease_until = NULL, next_retry_at = ?
+        WHERE delivery_id = ? AND state = 'claimed'
+      `).run(nextRetryAt, deliveryId);
+      if (result.changes === 1) this.#writeReceipt({ source: sourceForPayload(row.payload) ?? 'codex', receivedAt: now, disposition: 'delivery-retry', correlationInput: deliveryId });
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      rollback(this.#database);
+      try { this.markReceiptAccountingUnavailable(); } catch { /* Receipt store is unavailable. */ }
+      throw error;
+    }
   }
 
   quarantine(deliveryId: string, code: SpoolQuarantineCode, now = new Date().toISOString()): void {
