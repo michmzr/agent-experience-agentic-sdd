@@ -90,13 +90,13 @@ test('preserves one Codex conversation across an ended run and a resume', () => 
 
   store.recordLifecycleSignal({
     sourceEventId: 'conversation-1:startup', source: 'codex', conversationId: 'conversation-1',
-    kind: 'start', receiptAt: startup, sourceAt: '2026-09-12T07:59:59.000Z'
+    kind: 'start', startOrigin: 'startup', receiptAt: startup, sourceAt: '2026-09-12T07:59:59.000Z'
   });
   store.recordLifecycleSignal({
     sourceEventId: 'conversation-1:first-end', source: 'codex', conversationId: 'conversation-1', kind: 'end', receiptAt: firstEnd
   });
   store.recordLifecycleSignal({
-    sourceEventId: 'conversation-1:resume', source: 'codex', conversationId: 'conversation-1', kind: 'start', receiptAt: resume
+    sourceEventId: 'conversation-1:resume', source: 'codex', conversationId: 'conversation-1', kind: 'start', startOrigin: 'resume', receiptAt: resume
   });
   const pre = normalizeMappedCapture({
     source: 'codex', sourceEventId: 'later-tool:pre', sessionId: 'conversation-1' as SessionId,
@@ -118,11 +118,11 @@ test('preserves one Codex conversation across an ended run and a resume', () => 
   });
   assert.deepEqual(store.listConversationRuns('conversation-1'), [
     {
-      id: 'conversation-1:run:1', conversationId: 'conversation-1', state: 'ended',
+      id: 'conversation-1:run:1', conversationId: 'conversation-1', origin: 'startup', state: 'ended',
       receiptStartedAt: startup, sourceStartedAt: '2026-09-12T07:59:59.000Z', receiptEndedAt: firstEnd
     },
     {
-      id: 'conversation-1:run:2', conversationId: 'conversation-1', state: 'ended',
+      id: 'conversation-1:run:2', conversationId: 'conversation-1', origin: 'resume', state: 'ended',
       receiptStartedAt: resume, receiptEndedAt: secondEnd
     }
   ]);
@@ -133,7 +133,7 @@ test('preserves one Codex conversation across an ended run and a resume', () => 
 test('makes exact lifecycle duplicates idempotent and leaves ambiguous signals unresolved', () => {
   const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-store-run-duplicates-')), 'experience.sqlite');
   const store = new ExperienceStore(databasePath);
-  const start = { sourceEventId: 'conversation-1:startup', source: 'codex' as const, conversationId: 'conversation-1', kind: 'start' as const, receiptAt: '2026-09-12T08:00:00.000Z' };
+  const start = { sourceEventId: 'conversation-1:startup', source: 'codex' as const, conversationId: 'conversation-1', kind: 'start' as const, startOrigin: 'startup' as const, receiptAt: '2026-09-12T08:00:00.000Z' };
 
   assert.equal(store.recordLifecycleSignal(start).inserted, true);
   assert.equal(store.recordLifecycleSignal(start).inserted, false);
@@ -168,11 +168,11 @@ test('keeps the v1 session closed while storing resumed technical activity in th
   const startedAt = '2026-09-12T08:00:00.000Z';
   const endedAt = '2026-09-12T08:01:00.000Z';
   const resumedAt = '2026-09-12T08:02:00.000Z';
-  const lifecycle = (sourceEventId: string, kind: 'start' | 'end', receiptAt: string) => ({ sourceEventId, source: 'codex' as const, conversationId: sessionId, kind, receiptAt });
+  const lifecycle = (sourceEventId: string, kind: 'start' | 'end', receiptAt: string, startOrigin?: 'startup' | 'resume') => ({ sourceEventId, source: 'codex' as const, conversationId: sessionId, kind, receiptAt, ...(startOrigin === undefined ? {} : { startOrigin }) });
 
-  persistPassiveCapture(store, { kind: 'session-start', session: { id: sessionId, source: 'codex', startedAt }, lifecycle: lifecycle('immutable:startup', 'start', startedAt) });
+  persistPassiveCapture(store, { kind: 'session-start', session: { id: sessionId, source: 'codex', startedAt }, lifecycle: lifecycle('immutable:startup', 'start', startedAt, 'startup') });
   persistPassiveCapture(store, { kind: 'session-end', source: 'codex', sessionId, endedAt, lifecycle: lifecycle('immutable:end', 'end', endedAt) });
-  persistPassiveCapture(store, { kind: 'session-start', session: { id: sessionId, source: 'codex', startedAt: resumedAt }, lifecycle: lifecycle('immutable:resume', 'start', resumedAt) });
+  persistPassiveCapture(store, { kind: 'session-start', session: { id: sessionId, source: 'codex', startedAt: resumedAt }, lifecycle: lifecycle('immutable:resume', 'start', resumedAt, 'resume') });
 
   const pre = normalizeMappedCapture({ source: 'codex', sourceEventId: 'immutable-tool:pre', sessionId, phase: 'pre-action', occurredAt: '2026-09-12T08:02:01.000Z', tool: 'shell', action: 'test', summary: 'Run a focused test.' });
   const post = normalizeMappedCapture({ source: 'codex', sourceEventId: 'immutable-tool:post', sessionId, phase: 'post-result', occurredAt: '2026-09-12T08:02:02.000Z', tool: 'shell', action: 'test', summary: 'Focused test passed.', outcome: 'succeeded', exitStatus: 0, relatedEventId: 'immutable-tool:pre' });
@@ -182,5 +182,20 @@ test('keeps the v1 session closed while storing resumed technical activity in th
   assert.equal(store.loadSession(sessionId)?.endedAt, endedAt);
   assert.deepEqual(store.listConversationTechnicalEvents(sessionId).map(({ sourceEventId }) => sourceEventId), ['immutable-tool:pre', 'immutable-tool:post']);
   assert.equal(store.loadCapturedSession(sessionId)?.events.length, 0);
+  store.close();
+});
+
+test('rejects technical capture after an unresolved end on a startup-origin run', () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'ael-store-unresolved-run-')), 'experience.sqlite');
+  const store = new ExperienceStore(databasePath);
+  const sessionId = 'conversation-unresolved' as SessionId;
+  store.appendIncremental({ session: { id: sessionId, source: 'codex', startedAt: '2026-09-12T08:00:00.000Z' } });
+  store.recordLifecycleSignal({ sourceEventId: 'unresolved:startup', source: 'codex', conversationId: sessionId, kind: 'start', startOrigin: 'startup', receiptAt: '2026-09-12T08:00:00.000Z', sourceAt: '2026-09-12T08:00:00.000Z' });
+  store.recordLifecycleSignal({ sourceEventId: 'unresolved:end', source: 'codex', conversationId: sessionId, kind: 'end', receiptAt: '2026-09-12T08:01:00.000Z', sourceAt: '2026-09-12T07:59:59.000Z' });
+  store.endSession('codex', sessionId, '2026-09-12T08:01:00.000Z');
+  const event = normalizeMappedCapture({ source: 'codex', sourceEventId: 'unresolved-tool:pre', sessionId, phase: 'pre-action', occurredAt: '2026-09-12T08:02:00.000Z', tool: 'shell', action: 'test', summary: 'Run a focused test.' });
+
+  assert.throws(() => store.appendLifecycleTechnical(event), /resume run/i);
+  assert.deepEqual(store.listConversationTechnicalEvents(sessionId), []);
   store.close();
 });

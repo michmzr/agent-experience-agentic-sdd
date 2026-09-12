@@ -43,6 +43,7 @@ function lifecycleStart(record: Readonly<Record<string, unknown>>, receiptAt: st
     sourceEventId: `${id}:SessionStart:${source}:${receiptAt}`,
     source: 'codex' as const,
     kind: 'start' as const,
+    startOrigin: source,
     conversationId: id,
     receiptAt,
     ...(sourceTimestamp(record) === undefined ? {} : { sourceAt: sourceTimestamp(record) })

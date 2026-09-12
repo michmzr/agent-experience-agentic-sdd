@@ -162,7 +162,7 @@ test('captures both sources end to end with correlation, migration and no learni
     const database = new DatabaseSync(databasePath(dataDir));
     try {
       const migration = database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number };
-      assert.equal(migration.version, 15);
+      assert.equal(migration.version, 17);
       const endedAtColumn = database.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
       assert.equal(endedAtColumn.some(({ name }) => name === 'ended_at'), true);
     } finally {

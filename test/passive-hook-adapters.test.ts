@@ -78,7 +78,7 @@ test('maps session start and end without transcript or user identity fields', ()
     session: { id: 'session-1', source: 'codex', startedAt: preTime },
     lifecycle: {
       sourceEventId: 'session-1:SessionStart:startup:2026-08-26T08:00:00.000Z',
-      source: 'codex', kind: 'start', conversationId: 'session-1', receiptAt: preTime
+      source: 'codex', kind: 'start', startOrigin: 'startup', conversationId: 'session-1', receiptAt: preTime
     }
   });
 
@@ -106,7 +106,7 @@ test('accepts Codex startup and resume lifecycle starts without changing immutab
     session: { id: 'session-1', source: 'codex', startedAt: preTime },
     lifecycle: {
       sourceEventId: 'session-1:SessionStart:startup:2026-08-26T08:00:00.000Z',
-      source: 'codex', kind: 'start', conversationId: 'session-1', receiptAt: preTime
+      source: 'codex', kind: 'start', startOrigin: 'startup', conversationId: 'session-1', receiptAt: preTime
     }
   });
 
@@ -120,7 +120,7 @@ test('accepts Codex startup and resume lifecycle starts without changing immutab
     session: { id: 'session-1', source: 'codex', startedAt: postTime },
     lifecycle: {
       sourceEventId: 'session-1:SessionStart:resume:2026-08-26T08:00:01.000Z',
-      source: 'codex', kind: 'start',
+      source: 'codex', kind: 'start', startOrigin: 'resume',
       conversationId: 'session-1',
       receiptAt: postTime,
       sourceAt: '2026-08-26T07:59:59.000Z'

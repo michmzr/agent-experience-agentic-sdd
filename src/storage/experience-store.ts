@@ -146,6 +146,7 @@ interface ConversationRow {
 interface CaptureRunRow {
   id: string;
   conversation_id: string;
+  origin: CaptureRun['origin'];
   state: CaptureRun['state'];
   receipt_started_at: string;
   source_started_at: string | null;
@@ -158,6 +159,7 @@ interface LifecycleSignalRow {
   source_event_id: string;
   conversation_id: string;
   kind: LifecycleSignal['kind'];
+  start_origin: LifecycleSignal['startOrigin'] | null;
   receipt_at: string;
   source_at: string | null;
   resolution: RecordedLifecycleSignal['resolution'];
@@ -357,6 +359,7 @@ const conversationLifecycleMigration = `
   CREATE TABLE IF NOT EXISTS capture_runs (
     id TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL REFERENCES capture_conversations(id) ON DELETE RESTRICT,
+    origin TEXT NOT NULL CHECK (origin IN ('startup', 'resume', 'unknown')),
     state TEXT NOT NULL CHECK (state IN ('open', 'ended', 'unresolved')),
     receipt_started_at TEXT NOT NULL,
     source_started_at TEXT,
@@ -368,6 +371,7 @@ const conversationLifecycleMigration = `
     source_event_id TEXT NOT NULL,
     conversation_id TEXT NOT NULL REFERENCES capture_conversations(id) ON DELETE RESTRICT,
     kind TEXT NOT NULL CHECK (kind IN ('start', 'end')),
+    start_origin TEXT CHECK (start_origin IN ('startup', 'resume')),
     receipt_at TEXT NOT NULL,
     source_at TEXT,
     resolution TEXT NOT NULL CHECK (resolution IN ('resolved', 'unresolved')),
@@ -542,24 +546,24 @@ export class ExperienceStore {
       } else if (conversation.source !== signal.source) {
         throw new TypeError('Lifecycle conversation source conflicts with the stored conversation.');
       }
-      const duplicate = this.database.prepare(`SELECT source, source_event_id, conversation_id, kind, receipt_at, source_at, resolution, resolved_run_id
+      const duplicate = this.database.prepare(`SELECT source, source_event_id, conversation_id, kind, start_origin, receipt_at, source_at, resolution, resolved_run_id
         FROM lifecycle_signals WHERE source = ? AND source_event_id = ?`).get(signal.source, signal.sourceEventId) as LifecycleSignalRow | undefined;
       if (duplicate !== undefined) {
-        if (duplicate.conversation_id !== signal.conversationId || duplicate.kind !== signal.kind || duplicate.receipt_at !== signal.receiptAt || duplicate.source_at !== (signal.sourceAt ?? null)) {
+        if (duplicate.conversation_id !== signal.conversationId || duplicate.kind !== signal.kind || duplicate.start_origin !== (signal.startOrigin ?? null) || duplicate.receipt_at !== signal.receiptAt || duplicate.source_at !== (signal.sourceAt ?? null)) {
           throw new TypeError('Conflicting duplicate lifecycle signal identity.');
         }
         this.database.exec('COMMIT');
         return Object.freeze({ inserted: false });
       }
 
-      const openRuns = this.database.prepare(`SELECT id, conversation_id, state, receipt_started_at, source_started_at, receipt_ended_at, source_ended_at
+      const openRuns = this.database.prepare(`SELECT id, conversation_id, origin, state, receipt_started_at, source_started_at, receipt_ended_at, source_ended_at
       FROM capture_runs WHERE conversation_id = ? AND state = 'open' ORDER BY receipt_started_at, id`).all(signal.conversationId) as unknown as CaptureRunRow[];
       let resolution: RecordedLifecycleSignal['resolution'] = 'unresolved';
       let resolvedRunId: string | undefined;
       if (signal.kind === 'start' && openRuns.length === 0) {
         const runId = `${signal.conversationId}:run:${this.nextRunOrdinal(signal.conversationId)}`;
-        this.database.prepare(`INSERT INTO capture_runs (id, conversation_id, state, receipt_started_at, source_started_at, receipt_ended_at, source_ended_at)
-          VALUES (?, ?, 'open', ?, ?, NULL, NULL)`).run(runId, signal.conversationId, signal.receiptAt, signal.sourceAt ?? null);
+        this.database.prepare(`INSERT INTO capture_runs (id, conversation_id, origin, state, receipt_started_at, source_started_at, receipt_ended_at, source_ended_at)
+          VALUES (?, ?, ?, 'open', ?, ?, NULL, NULL)`).run(runId, signal.conversationId, signal.startOrigin ?? 'unknown', signal.receiptAt, signal.sourceAt ?? null);
         resolution = 'resolved';
         resolvedRunId = runId;
       } else if (signal.kind === 'end' && openRuns.length === 1 && sourceTimeDoesNotPrecedeRun(signal, openRuns[0]!)) {
@@ -570,9 +574,9 @@ export class ExperienceStore {
         resolvedRunId = run.id;
       }
       this.database.prepare(`INSERT INTO lifecycle_signals
-        (source, source_event_id, conversation_id, kind, receipt_at, source_at, resolution, resolved_run_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(signal.source, signal.sourceEventId, signal.conversationId, signal.kind, signal.receiptAt, signal.sourceAt ?? null, resolution, resolvedRunId ?? null);
+        (source, source_event_id, conversation_id, kind, start_origin, receipt_at, source_at, resolution, resolved_run_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(signal.source, signal.sourceEventId, signal.conversationId, signal.kind, signal.startOrigin ?? null, signal.receiptAt, signal.sourceAt ?? null, resolution, resolvedRunId ?? null);
       this.database.exec('COMMIT');
       return Object.freeze({ inserted: true });
     } catch (error) {
@@ -587,13 +591,13 @@ export class ExperienceStore {
   }
 
   listConversationRuns(conversationId: string): readonly CaptureRun[] {
-    const rows = this.database.prepare(`SELECT id, conversation_id, state, receipt_started_at, source_started_at, receipt_ended_at, source_ended_at
+    const rows = this.database.prepare(`SELECT id, conversation_id, origin, state, receipt_started_at, source_started_at, receipt_ended_at, source_ended_at
       FROM capture_runs WHERE conversation_id = ? ORDER BY receipt_started_at, id`).all(conversationId) as unknown as CaptureRunRow[];
     return Object.freeze(rows.map(captureRunFromRow));
   }
 
   listLifecycleSignals(conversationId: string): readonly RecordedLifecycleSignal[] {
-    const rows = this.database.prepare(`SELECT source, source_event_id, conversation_id, kind, receipt_at, source_at, resolution, resolved_run_id
+    const rows = this.database.prepare(`SELECT source, source_event_id, conversation_id, kind, start_origin, receipt_at, source_at, resolution, resolved_run_id
       FROM lifecycle_signals WHERE conversation_id = ? ORDER BY receipt_at, rowid`).all(conversationId) as unknown as LifecycleSignalRow[];
     return Object.freeze(rows.map(lifecycleSignalFromRow));
   }
@@ -620,9 +624,9 @@ export class ExperienceStore {
         this.database.exec('COMMIT');
         return Object.freeze({ inserted: false });
       }
-      const run = this.database.prepare(`SELECT id FROM capture_runs WHERE conversation_id = ? AND state = 'open'
-        ORDER BY receipt_started_at DESC, id DESC LIMIT 1`).get(normalized.sessionId) as { id: string } | undefined;
-      if (run === undefined) throw new TypeError('Lifecycle technical capture requires an open capture run.');
+      const run = this.database.prepare(`SELECT id, origin FROM capture_runs WHERE conversation_id = ? AND state = 'open'
+        ORDER BY receipt_started_at DESC, id DESC LIMIT 1`).get(normalized.sessionId) as { id: string; origin: CaptureRun['origin'] } | undefined;
+      if (run?.origin !== 'resume') throw new TypeError('Lifecycle technical capture requires an open resolved resume run.');
       if (normalized.phase === 'post-result') this.assertLifecyclePostResultLink(normalized, conversation.id, run.id);
       this.database.prepare(`INSERT INTO capture_run_events
         (event_id, source, source_event_id, conversation_id, run_id, phase, occurred_at, signature_json, summary, capture_outcome, exit_status, related_event_id)
@@ -1006,6 +1010,18 @@ export class ExperienceStore {
       if (!applied.has(15)) {
         this.database.exec(resumedTechnicalEventMigration);
         this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(15, new Date().toISOString());
+      }
+      if (!applied.has(16)) {
+        ensureCaptureRunOriginMigration(this.database);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(16, new Date().toISOString());
+      } else {
+        ensureCaptureRunOriginMigration(this.database);
+      }
+      if (!applied.has(17)) {
+        ensureLifecycleStartOriginMigration(this.database);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(17, new Date().toISOString());
+      } else {
+        ensureLifecycleStartOriginMigration(this.database);
       }
       this.database.exec('COMMIT');
     } catch (error) {
@@ -1671,10 +1687,13 @@ function assertTransitionAfterEvent(
 function assertLifecycleSignal(signal: LifecycleSignal): void {
   if (!signal || typeof signal !== 'object') throw new TypeError('Lifecycle signal is invalid.');
   const value = signal as unknown as Record<string, unknown>;
-  const allowed = ['sourceEventId', 'source', 'conversationId', 'kind', 'receiptAt', 'sourceAt'];
+  const allowed = ['sourceEventId', 'source', 'conversationId', 'kind', 'startOrigin', 'receiptAt', 'sourceAt'];
   assertOnlyIncrementalKeys(value, allowed);
   if (signal.source !== 'codex' && signal.source !== 'claude-code' && signal.source !== 'cursor') throw new TypeError('Lifecycle signal source is invalid.');
   if (signal.kind !== 'start' && signal.kind !== 'end') throw new TypeError('Lifecycle signal kind is invalid.');
+  if (signal.startOrigin !== undefined && (signal.kind !== 'start' || (signal.startOrigin !== 'startup' && signal.startOrigin !== 'resume'))) {
+    throw new TypeError('Lifecycle signal start origin is invalid.');
+  }
   for (const [name, identifier] of [['source event id', signal.sourceEventId], ['conversation id', signal.conversationId]] as const) {
     if (typeof identifier !== 'string' || !canonicalIncrementalIdentifier.test(identifier)) throw new TypeError(`Lifecycle ${name} is invalid.`);
     assertSnapshotIdentifierSafe(identifier, `lifecycle ${name}`);
@@ -1693,7 +1712,7 @@ function conversationFromRow(row: ConversationRow): CaptureConversation {
 
 function captureRunFromRow(row: CaptureRunRow): CaptureRun {
   return Object.freeze({
-    id: row.id, conversationId: row.conversation_id, state: row.state,
+    id: row.id, conversationId: row.conversation_id, origin: row.origin, state: row.state,
     receiptStartedAt: row.receipt_started_at,
     ...(row.source_started_at === null ? {} : { sourceStartedAt: row.source_started_at }),
     ...(row.receipt_ended_at === null ? {} : { receiptEndedAt: row.receipt_ended_at }),
@@ -1701,10 +1720,20 @@ function captureRunFromRow(row: CaptureRunRow): CaptureRun {
   });
 }
 
+function ensureCaptureRunOriginMigration(database: DatabaseSync): void {
+  const columns = new Set((database.prepare("PRAGMA table_info('capture_runs')").all() as Array<{ name: string }>).map(({ name }) => name));
+  if (!columns.has('origin')) database.exec("ALTER TABLE capture_runs ADD COLUMN origin TEXT NOT NULL DEFAULT 'unknown'");
+}
+
+function ensureLifecycleStartOriginMigration(database: DatabaseSync): void {
+  const columns = new Set((database.prepare("PRAGMA table_info('lifecycle_signals')").all() as Array<{ name: string }>).map(({ name }) => name));
+  if (!columns.has('start_origin')) database.exec("ALTER TABLE lifecycle_signals ADD COLUMN start_origin TEXT CHECK (start_origin IN ('startup', 'resume'))");
+}
+
 function lifecycleSignalFromRow(row: LifecycleSignalRow): RecordedLifecycleSignal {
   return Object.freeze({
     source: row.source, sourceEventId: row.source_event_id, conversationId: row.conversation_id,
-    kind: row.kind, receiptAt: row.receipt_at,
+    kind: row.kind, ...(row.start_origin === null ? {} : { startOrigin: row.start_origin }), receiptAt: row.receipt_at,
     ...(row.source_at === null ? {} : { sourceAt: row.source_at }),
     resolution: row.resolution,
     ...(row.resolved_run_id === null ? {} : { resolvedRunId: row.resolved_run_id })

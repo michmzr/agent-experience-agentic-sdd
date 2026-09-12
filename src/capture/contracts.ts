@@ -26,6 +26,7 @@ export interface CaptureConversation {
 export interface CaptureRun {
   readonly id: string;
   readonly conversationId: string;
+  readonly origin: 'startup' | 'resume' | 'unknown';
   readonly state: 'open' | 'ended' | 'unresolved';
   readonly receiptStartedAt: string;
   readonly sourceStartedAt?: string;
@@ -38,6 +39,7 @@ export interface LifecycleSignal {
   readonly source: AgentSource;
   readonly conversationId: string;
   readonly kind: 'start' | 'end';
+  readonly startOrigin?: 'startup' | 'resume';
   readonly receiptAt: string;
   readonly sourceAt?: string;
 }
