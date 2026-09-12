@@ -31,7 +31,7 @@
 - Create: `test/reliable-observation.test.ts`
 - Modify: `test/milestone-5-acceptance.test.ts`
 
-- [ ] **Step 1: Write failing corpus tests**
+- [x] **Step 1: Write failing corpus tests**
 
 Add tests that parse the fixture as a closed schema and reject raw transcript keys, absolute private paths, credential-like values, duplicate scenario IDs, and missing expected disposition or evidence-gap fields.
 
@@ -44,13 +44,13 @@ assert.deepEqual(fixture.scenarios.map(({ id }) => id), [
 assert.deepEqual(evaluateReliableObservationFixture(fixture), fixture.expectedQuality);
 ```
 
-- [ ] **Step 2: Run the focused test and confirm RED**
+- [x] **Step 2: Run the focused test and confirm RED**
 
 Run: `pnpm build && node --test dist/test/reliable-observation.test.js`
 
 Expected: failure because the fixture and evaluator do not exist.
 
-- [ ] **Step 3: Add the fixture evaluator and synthetic data**
+- [x] **Step 3: Add the fixture evaluator and synthetic data**
 
 Implement a test-local `evaluateReliableObservationFixture` that counts unique source operation IDs, receipts, linked results, skip dispositions, unknown reasons, analysis states, findings, abstentions, and cost. Store only synthetic identifiers and bounded expected metadata.
 
@@ -66,13 +66,13 @@ function evaluateReliableObservationFixture(fixture: Fixture): QualityMeasure {
 }
 ```
 
-- [ ] **Step 4: Run the focused test and confirm GREEN**
+- [x] **Step 4: Run the focused test and confirm GREEN**
 
 Run: `pnpm build && node --test dist/test/reliable-observation.test.js`
 
 Expected: all corpus tests pass.
 
-- [ ] **Step 5: Commit issue #2**
+- [x] **Step 5: Commit issue #2**
 
 Run: `git add test/fixtures/reliable-observation/scenarios.json test/reliable-observation.test.ts test/milestone-5-acceptance.test.ts && git commit -m "test: add reliable observation regression corpus"`
 
