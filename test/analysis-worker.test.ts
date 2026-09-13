@@ -17,16 +17,21 @@ const origin = Date.parse('2026-09-13T10:00:00.000Z');
 class FakeRepository implements AnalysisWorkerRepository {
   pending = 0;
   running = 0;
+  expired = 0;
   retryAt: number | undefined;
   lease: { ownerId: string; attempt: number; leaseExpiresAt: string } | undefined;
   attempts = 0;
   renewals = 0;
   releases = 0;
+  recoveryCalls = 0;
+  readonly acquisitionInputs: { ownerId: string; leaseMs: number }[] = [];
+  readonly renewalInputs: { ownerId: string; attempt: number; leaseMs: number }[] = [];
   readonly diagnostics: string[] = [];
 
   constructor(private readonly currentTime: () => number) {}
 
   acquireCoordinatorLease(input: { ownerId: string; leaseMs: number }) {
+    this.acquisitionInputs.push({ ...input });
     if (this.lease && Date.parse(this.lease.leaseExpiresAt) > this.currentTime()) return undefined;
     this.attempts += 1;
     this.lease = { ownerId: input.ownerId, attempt: this.attempts,
@@ -35,6 +40,7 @@ class FakeRepository implements AnalysisWorkerRepository {
   }
 
   renewCoordinatorLease(input: { ownerId: string; attempt: number; leaseMs: number }) {
+    this.renewalInputs.push({ ...input });
     if (!this.lease || this.lease.ownerId !== input.ownerId || this.lease.attempt !== input.attempt ||
       Date.parse(this.lease.leaseExpiresAt) <= this.currentTime()) return undefined;
     this.renewals += 1;
@@ -50,7 +56,14 @@ class FakeRepository implements AnalysisWorkerRepository {
     return true;
   }
 
-  recoverExpiredJobs(): number { return 0; }
+  recoverExpiredJobs(): number {
+    this.recoveryCalls += 1;
+    const recovered = this.expired;
+    this.running -= recovered;
+    this.pending += recovered;
+    this.expired = 0;
+    return recovered;
+  }
 
   claimableCount(): number {
     return this.pending + (this.retryAt !== undefined && this.currentTime() >= this.retryAt ? 1 : 0);
@@ -59,7 +72,7 @@ class FakeRepository implements AnalysisWorkerRepository {
   status() {
     const eligibleRetry = this.retryAt !== undefined && this.currentTime() >= this.retryAt;
     return {
-      activeRunningCount: this.running,
+      activeRunningCount: this.running - this.expired,
       nextRetryAt: this.retryAt === undefined ? null : new Date(this.retryAt).toISOString(),
       jobs: {
         pending: this.pending,
@@ -88,7 +101,7 @@ class FakeRepository implements AnalysisWorkerRepository {
 
 interface DeferredChild { readonly finish: (code?: number) => void; }
 
-function harness(options: { pending?: number; retryDelayMs?: number; idleTimeoutMs?: number; maxProcesses?: number } = {}) {
+function harness(options: { pending?: number; expired?: number; retryDelayMs?: number; idleTimeoutMs?: number; maxProcesses?: number } = {}) {
   let millis = origin;
   let active = 0;
   let maximumActive = 0;
@@ -96,6 +109,8 @@ function harness(options: { pending?: number; retryDelayMs?: number; idleTimeout
   const children: DeferredChild[] = [];
   const repository = new FakeRepository(() => millis);
   repository.pending = options.pending ?? 0;
+  repository.expired = options.expired ?? 0;
+  repository.running = repository.expired;
   if (options.retryDelayMs !== undefined) repository.retryAt = millis + options.retryDelayMs;
   const host: AnalysisWorkerHost = {
     now: () => millis,
@@ -122,7 +137,8 @@ function harness(options: { pending?: number; retryDelayMs?: number; idleTimeout
     maxProcesses: options.maxProcesses ?? 3,
     idleTimeoutMs: options.idleTimeoutMs ?? 1_000
   });
-  return { repository, host, settings, children, startTimes, maximumActive: () => maximumActive, now: () => millis };
+  return { repository, host, settings, children, startTimes, maximumActive: () => maximumActive,
+    now: () => millis, advanceTime: (delayMs: number) => { millis += delayMs; } };
 }
 
 async function nextTurn(): Promise<void> {
@@ -144,6 +160,38 @@ test('only one coordinator owns the global lease', async () => {
   setup.children[0]!.finish();
   assert.deepEqual(await first, { status: 'idle-timeout' });
   assert.equal(setup.repository.releases, 1);
+});
+
+test('uses ten-second fenced leases and permits takeover only after expiry', async () => {
+  const setup = harness({ pending: 1 });
+  const first = runAnalysisCoordinator('/data', setup.settings, setup.repository, setup.host, 'owner-1');
+
+  assert.deepEqual(setup.repository.acquisitionInputs[0], { ownerId: 'owner-1', leaseMs: 10_000 });
+  assert.deepEqual(await runAnalysisCoordinator('/data', setup.settings, setup.repository, setup.host, 'owner-2'),
+    { status: 'lease-held' });
+  assert.equal(setup.repository.lease?.ownerId, 'owner-1');
+
+  setup.advanceTime(10_000);
+  const takeover = runAnalysisCoordinator('/data', setup.settings, setup.repository, setup.host, 'owner-2');
+  assert.equal(setup.repository.lease?.ownerId, 'owner-2');
+  assert.equal(setup.repository.lease?.attempt, 2);
+  await waitUntil(() => setup.repository.renewalInputs.length > 0);
+  assert.ok(setup.repository.renewalInputs.every(({ leaseMs }) => leaseMs === 10_000));
+
+  setup.children[0]!.finish();
+  assert.deepEqual(await first, { status: 'lease-held' });
+  assert.deepEqual(await takeover, { status: 'idle-timeout' });
+});
+
+test('recovers expired jobs before counting work and starts a child for the recovered job', async () => {
+  const setup = harness({ expired: 1 });
+  const running = runAnalysisCoordinator('/data', setup.settings, setup.repository, setup.host, 'owner');
+  await waitUntil(() => setup.children.length === 1);
+
+  assert.ok(setup.repository.recoveryCalls >= 1);
+  assert.equal(setup.repository.expired, 0);
+  setup.children[0]!.finish();
+  assert.deepEqual(await running, { status: 'idle-timeout' });
 });
 
 test('honours configured child concurrency and replaces completed children', async () => {
@@ -198,8 +246,7 @@ test('waits for a 30 second retry instead of treating the stream as idle', async
   const running = runAnalysisCoordinator('/data', setup.settings, setup.repository, setup.host, 'owner');
   while (setup.children.length === 0) await nextTurn();
 
-  assert.ok(setup.startTimes[0]! >= origin + 30_000);
-  assert.ok(setup.startTimes[0]! < origin + 300_000);
+  assert.equal(setup.startTimes[0], origin + 30_000);
   setup.children[0]!.finish();
   assert.deepEqual(await running, { status: 'idle-timeout' });
 });
