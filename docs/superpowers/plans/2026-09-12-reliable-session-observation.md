@@ -338,6 +338,8 @@ Second review follow-up evidence: coverage is now keyed to its completed analysi
 
 Quality follow-up evidence: schema-version 2 has dedicated human renderers for status, global status, and analysis report; they contain dimensions only and status exit derives from installation readiness. Evidence quality and analysis quality use aggregate repository queries, while detector and coverage output is capped at 64 records. Focused tests passed 32/32; the serial suite passed on 2026-09-13.
 
+Final quality follow-up evidence: analysis state now uses aggregate coverage status before selecting the bounded example list. Coverage JSON reports `total` and `truncated` alongside at most 64 examples. A regression with 64 completed coverage rows and one further failed row reports `failed`, total 65, and truncation. Focused tests passed 33/33; the serial suite passed on 2026-09-13.
+
 ### Task 6: Preserve historical instruction and execution context for issue #8
 
 **Files:**

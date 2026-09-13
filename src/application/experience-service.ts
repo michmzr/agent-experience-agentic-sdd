@@ -301,7 +301,7 @@ export class ExperienceService {
   }
 
   private analysisQuality(repositoryId: string) {
-    const empty = Object.freeze({ state: 'not-run' as const, detectorVersions: Object.freeze([]), desiredThrough: 0, completedThrough: 0, backlog: 0, range: Object.freeze({ from: 0, through: 0 }), retries: 0, cost: Object.freeze({ completedRuns: 0, total: 0 }), coverage: Object.freeze({ required: true as const, detectors: Object.freeze([]) }), result: 'unavailable' as const });
+    const empty = Object.freeze({ state: 'not-run' as const, detectorVersions: Object.freeze([]), desiredThrough: 0, completedThrough: 0, backlog: 0, range: Object.freeze({ from: 0, through: 0 }), retries: 0, cost: Object.freeze({ completedRuns: 0, total: 0 }), coverage: Object.freeze({ required: true as const, total: 0, truncated: false, detectors: Object.freeze([]) }), result: 'unavailable' as const });
     if (!existsSync(this.databasePath)) return empty;
     const repository = new OperationalLearningRepository(this.databasePath);
     try { return reportAnalysisQuality(repository.quality(repositoryId)); } finally { repository.close(); }
@@ -374,9 +374,9 @@ function reportAnalysisQuality(quality: OperationalAnalysisQuality) {
   const state = streams.total === 0 ? 'not-run'
     : streams.quarantined > 0 ? 'quarantined'
       : streams.running > 0 ? 'running'
-        : streams.failed > 0 || quality.coverage.detectors.some(({ status }) => status === 'failed') ? 'failed'
+    : streams.failed > 0 || quality.coverage.failed > 0 ? 'failed'
           : streams.pending > 0 ? 'pending'
-            : !coverageComplete || quality.coverage.detectors.some(({ status }) => status === 'incomplete') ? 'incomplete'
+            : !coverageComplete || quality.coverage.incomplete > 0 ? 'incomplete'
               : 'completed';
   const completed = state === 'completed';
   return Object.freeze({
@@ -388,7 +388,7 @@ function reportAnalysisQuality(quality: OperationalAnalysisQuality) {
     range: Object.freeze({ from: quality.runs.firstInput, through: quality.runs.lastInput }),
     retries: quality.runs.retries,
     cost: quality.cost,
-    coverage: Object.freeze({ required: true as const, detectors: quality.coverage.detectors }),
+    coverage: Object.freeze({ required: true as const, total: quality.coverage.total, truncated: quality.coverage.total > quality.coverage.detectors.length, detectors: quality.coverage.detectors }),
     result: completed && coverageComplete ? (quality.findings > 0 ? 'findings' as const : 'no-findings' as const) : 'unavailable' as const
   });
 }

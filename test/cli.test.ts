@@ -58,7 +58,7 @@ test('reports installation, delivery, data quality, and analysis independently i
     assert.equal(initial.dataQuality.denominator.state, 'unavailable');
     assert.equal(initial.analysis.state, 'not-run');
     assert.equal(initial.analysis.result, 'unavailable');
-    assert.deepEqual(initial.analysis.coverage, { required: true, detectors: [] });
+    assert.deepEqual(initial.analysis.coverage, { required: true, total: 0, truncated: false, detectors: [] });
 
     const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
     spool.admitWithReceipt({ kind: 'session-start', session: { source: 'codex', id: 'session-health' as never, startedAt: '2026-09-13T08:00:00.000Z', repositoryId: 'repo-health' as never } }, { source: 'codex', receivedAt: '2026-09-13T08:00:00.000Z' });
@@ -157,7 +157,7 @@ test('reports unknown results and a completed no-findings analysis without leaki
     assert.equal(complete.analysis.result, 'no-findings');
     assert.deepEqual(complete.analysis.cost, { completedRuns: 1, total: 3 });
     assert.deepEqual(complete.analysis.range, { from: 1, through: 2 });
-    assert.deepEqual(complete.analysis.coverage, { required: true, detectors: [{ detector: 'm6-deterministic@1', status: 'completed', examinedEvents: 2, findings: 0 }] });
+    assert.deepEqual(complete.analysis.coverage, { required: true, total: 1, truncated: false, detectors: [{ detector: 'm6-deterministic@1', status: 'completed', examinedEvents: 2, findings: 0 }] });
 
     const global = runCli(['status-global', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout;
     assert.equal(global.includes(dataDir), false);
@@ -204,7 +204,7 @@ test('does not call an uncovered completed stream a no-findings analysis', () =>
     };
     assert.equal(report.analysis.state, 'incomplete');
     assert.equal(report.analysis.result, 'unavailable');
-    assert.deepEqual(report.analysis.coverage, { required: true, detectors: [] });
+    assert.deepEqual(report.analysis.coverage, { required: true, total: 0, truncated: false, detectors: [] });
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 
@@ -218,6 +218,24 @@ test('bounds version 2 detector summaries while retaining aggregate high waters'
     assert.equal(report.analysis.desiredThrough, 70);
     assert.equal(report.analysis.detectorVersions.length, 64);
     assert.equal(report.analysis.coverage.detectors.length, 0);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('uses coverage failures beyond the displayed sample when deriving analysis state', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-coverage-total-'));
+  try {
+    const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    for (let index = 0; index < 65; index += 1) {
+      learning.enqueue({ repositoryId: 'repo-coverage-total', sessionId: `coverage-${index}`, detectorVersion: `coverage-${index}@1`, inputHighWater: 1 });
+      const job = learning.claim('repo-coverage-total')!;
+      learning.saveResult(job.id, { episodes: [], findings: [], candidates: [], coverage: [{ detector: `coverage-${index}@1`, status: index === 64 ? 'failed' : 'completed', examinedEvents: 1, findings: 0 }] }, job.leaseToken);
+    }
+    learning.close();
+    const report = JSON.parse(runCli(['analysis', 'report', '--repository-id', 'repo-coverage-total', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as { analysis: { state: string; coverage: { total: number; truncated: boolean; detectors: unknown[] } } };
+    assert.equal(report.analysis.state, 'failed');
+    assert.equal(report.analysis.coverage.total, 65);
+    assert.equal(report.analysis.coverage.truncated, true);
+    assert.equal(report.analysis.coverage.detectors.length, 64);
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 

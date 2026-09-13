@@ -546,18 +546,18 @@ interface Version2HealthReport {
   readonly installation?: { readonly state: string };
   readonly delivery?: { readonly state: string };
   readonly dataQuality?: { readonly state: string; readonly denominator?: { readonly state: string } };
-  readonly analysis?: { readonly state: string; readonly result: string; readonly coverage: { readonly detectors: readonly unknown[] } };
+  readonly analysis?: { readonly state: string; readonly result: string; readonly coverage: { readonly total?: number; readonly truncated?: boolean; readonly detectors: readonly unknown[] } };
   readonly repositories?: readonly { readonly repository: { readonly id: string }; readonly installation: { readonly state: string }; readonly delivery: { readonly state: string }; readonly dataQuality: { readonly state: string }; readonly analysis: { readonly state: string; readonly result: string } }[];
 }
 function formatVersion2Health(report: Version2HealthReport, command: string | undefined, subcommand: string | undefined): string {
   if (command === 'analysis' && subcommand === 'report') {
     const analysis = report.analysis!;
-    return [`Analysis: ${analysis.state}`, `Result: ${analysis.result}`, `Coverage: ${analysis.coverage.detectors.length}`].join('\n');
+    return [`Analysis: ${analysis.state}`, `Result: ${analysis.result}`, `Coverage: ${analysis.coverage.total ?? analysis.coverage.detectors.length}${analysis.coverage.truncated ? ' (truncated)' : ''}`].join('\n');
   }
   if (command === 'status-global') {
     return [`Installation: ${report.installation?.state ?? 'unknown'}`, ...(report.repositories ?? []).map(({ repository, installation, delivery, dataQuality, analysis }) => `${repository.id}: installation=${installation.state}; delivery=${delivery.state}; dataQuality=${dataQuality.state}; analysis=${analysis.state}/${analysis.result}`)].join('\n');
   }
-  return [`Installation: ${report.installation!.state}`, `Delivery: ${report.delivery!.state}`, `Data quality: ${report.dataQuality!.state}`, `Analysis: ${report.analysis!.state}`, `Analysis result: ${report.analysis!.result}`, `Coverage: ${report.analysis!.coverage.detectors.length}`].join('\n');
+  return [`Installation: ${report.installation!.state}`, `Delivery: ${report.delivery!.state}`, `Data quality: ${report.dataQuality!.state}`, `Analysis: ${report.analysis!.state}`, `Analysis result: ${report.analysis!.result}`, `Coverage: ${report.analysis!.coverage.total ?? report.analysis!.coverage.detectors.length}${report.analysis!.coverage.truncated ? ' (truncated)' : ''}`].join('\n');
 }
 interface KnowledgeRecord { readonly id: string; readonly state: string; readonly statement: string; readonly evidenceIds: readonly string[]; readonly authoritative?: boolean; }
 function formatRecords(records: readonly { session: { id: string; source: string; startedAt: string; endedAt?: string }; events: readonly { phase: string; occurredAt: string; summary: string; outcome?: string }[] }[]): string {
