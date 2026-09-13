@@ -312,6 +312,13 @@ export class OperationalLearningRepository {
       WHERE state = 'running' AND lease_expires_at > ? ${filter.sql} LIMIT 1`).get(timestamp, ...filter.values) !== undefined;
   }
 
+  hasOutstandingWork(filters: AnalysisFilters = {}): boolean {
+    const filter = sqlFilters(filters);
+    return this.database.prepare(`SELECT 1 FROM operational_analysis_jobs j
+      WHERE state IN ('pending', 'retryable-failure', 'running') ${filter.sql} LIMIT 1`)
+      .get(...filter.values) !== undefined;
+  }
+
   jobById(id: string): AnalysisJob | undefined {
     const row = this.database.prepare(`SELECT * FROM operational_analysis_jobs WHERE id = ?`).get(id);
     return row === undefined ? undefined : this.job(row);

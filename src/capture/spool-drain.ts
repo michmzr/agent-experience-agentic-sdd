@@ -25,8 +25,10 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
   const lockOwner = randomUUID();
   let store: ExperienceStore | undefined;
   let analysisWorkAdded = false;
+  let captureAcknowledged = false;
   try {
     const settings = loadProjectSettings(input.projectRoot ?? process.cwd());
+    const automaticLearningEnabled = settings.automaticOperationalLearning !== false && input.learningAdmission !== undefined;
     const lockNow = new Date().toISOString();
     if (!spool.tryAcquireDrainLock(lockOwner, lockNow, settings.captureDeliveryDeadlineMs + 1_000)) return spool.status();
     store = new ExperienceStore(input.databasePath);
@@ -40,8 +42,9 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
         try {
           persistPassiveCapture(store, claimed.record);
           const recordAddedAnalysisWork = admitCommittedSession(store, claimed.record,
-            settings.automaticOperationalLearning !== false ? input.learningAdmission : undefined);
+            automaticLearningEnabled ? input.learningAdmission : undefined);
           spool.acknowledge(claimed.deliveryId, input.now());
+          captureAcknowledged = true;
           analysisWorkAdded ||= recordAddedAnalysisWork;
         } catch (error) {
           if (isRetryableCaptureError(error)) spool.retry(claimed.deliveryId, input.now());
@@ -54,7 +57,11 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
       if (claimedRecords.length === 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     } while (Date.now() < idleDeadline);
     const status = spool.status();
-    if (analysisWorkAdded) scheduleAnalysis(input.databasePath, input.now, input.scheduleAnalysis ?? startAnalysisWorker);
+    const reachedWakeBoundary = captureAcknowledged || (status.pending === 0 && status.claimed === 0);
+    const hasWakeIntent = analysisWorkAdded || (automaticLearningEnabled && hasOutstandingAnalysisWork(input.databasePath, input.now));
+    if (automaticLearningEnabled && reachedWakeBoundary && hasWakeIntent) {
+      scheduleAnalysis(input.databasePath, input.now, input.scheduleAnalysis ?? startAnalysisWorker);
+    }
     return status;
   } finally {
     try { store?.close(); } finally {
@@ -70,6 +77,18 @@ function admitCommittedSession(store: ExperienceStore, record: Parameters<typeof
   if (!session?.repositoryId) return false;
   try { return learningAdmission.enqueueCommittedSession(session.repositoryId, session.id); }
   catch { return false; /* Analysis admission never affects capture delivery. */ }
+}
+
+function hasOutstandingAnalysisWork(databasePath: string, now: () => string): boolean {
+  let repository: OperationalLearningRepository | undefined;
+  try {
+    repository = new OperationalLearningRepository(databasePath, now);
+    return repository.hasOutstandingWork();
+  } catch {
+    return false;
+  } finally {
+    try { repository?.close(); } catch { /* Wake inspection remains best effort. */ }
+  }
 }
 
 function scheduleAnalysis(databasePath: string, now: () => string, schedule: AnalysisWorkerScheduler): void {

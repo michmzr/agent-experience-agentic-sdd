@@ -10,6 +10,7 @@ import { CaptureSpool } from '../src/capture/spool.js';
 import { drainCaptureSpool } from '../src/capture/spool-drain.js';
 import type { PassiveCaptureRecord } from '../src/capture/passive-service.js';
 import { OperationalLearningRepository } from '../src/learning/repository.js';
+import { OperationalLearningService } from '../src/learning/service.js';
 import { startAnalysisWorker } from '../src/learning/worker-launcher.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 
@@ -277,6 +278,67 @@ test('keeps capture acknowledged and records a bounded diagnostic when schedulin
   } finally {
     spool.close();
     rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('replay schedules durable analysis work after admission committed before capture acknowledgement failed', () => {
+  const dataDir = dataDirectory();
+  const root = dataDirectory();
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const spoolPath = join(dataDir, 'capture-spool.sqlite');
+  const spool = new CaptureSpool(spoolPath);
+  let launches = 0;
+  try {
+    mkdirSync(join(root, '.ael'));
+    writeFileSync(join(root, '.ael', 'settings.json'), '{"version":1,"captureDeliveryDeadlineMs":100}\n');
+    spool.admit({ kind: 'session-start', session: { ...sessionStart().session, repositoryId: 'repo-1' as never } }, '2026-09-07T08:00:00.000Z');
+    const database = new DatabaseSync(spoolPath);
+    database.exec("CREATE TRIGGER fail_capture_ack BEFORE DELETE ON records BEGIN SELECT RAISE(ABORT, 'ack failed'); END;");
+    database.close();
+
+    const learning = new OperationalLearningService(databasePath);
+    const first = drainCaptureSpool({ databasePath, projectRoot: root, now: () => '2026-09-07T08:00:01.000Z',
+      learningAdmission: learning, scheduleAnalysis() { launches += 1; } });
+    assert.equal(first.committed, 0);
+    assert.equal(first.pending, 1);
+    assert.equal(launches, 0);
+    const admitted = new OperationalLearningRepository(databasePath);
+    try { assert.equal(admitted.hasOutstandingWork(), true); }
+    finally { admitted.close(); }
+
+    const repair = new DatabaseSync(spoolPath);
+    repair.exec('DROP TRIGGER fail_capture_ack');
+    repair.close();
+    const replay = drainCaptureSpool({ databasePath, projectRoot: root, now: () => '2026-09-07T08:00:02.000Z',
+      learningAdmission: learning, scheduleAnalysis() { launches += 1; } });
+    assert.equal(replay.committed, 1);
+    assert.equal(replay.pending, 0);
+    assert.equal(launches, 1);
+  } finally {
+    spool.close();
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an empty drain wakes durable outstanding work but ignores completed-only analysis state', () => {
+  for (const state of ['outstanding', 'completed'] as const) {
+    const dataDir = dataDirectory();
+    const databasePath = join(dataDir, 'experience.sqlite');
+    let launches = 0;
+    try {
+      const repository = new OperationalLearningRepository(databasePath);
+      const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 0 })!;
+      if (state === 'completed') {
+        repository.claim();
+        repository.saveResult(job.id, { episodes: [], findings: [], candidates: [] });
+      }
+      repository.close();
+      const status = drainCaptureSpool({ databasePath, now: () => '2026-09-07T08:00:01.000Z',
+        learningAdmission: { enqueueCommittedSession() { return false; } }, scheduleAnalysis() { launches += 1; } });
+      assert.equal(status.committed, 0);
+      assert.equal(launches, state === 'outstanding' ? 1 : 0);
+    } finally { rmSync(dataDir, { recursive: true, force: true }); }
   }
 });
 
