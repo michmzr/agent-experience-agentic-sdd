@@ -356,7 +356,7 @@ Detector-list follow-up evidence: the capped detector-version list now includes 
 - Create: `test/learning-project-conventions.test.ts`
 - Modify: `test/learning-service.test.ts`
 
-- [ ] **Step 1: Write failing immutable-context tests**
+- [x] **Step 1: Write failing immutable-context tests**
 
 Assert `.agents/AGENTS.md` is found under configured bounded locations, found is not delivered or read, later file mutation cannot alter a stored snapshot, separate worktrees retain separate keyed identities, and unknown agent provenance stays unknown.
 
@@ -367,13 +367,13 @@ assert.equal(snapshot.instructions[0]?.explicitlyRead, 'unknown');
 assert.notEqual(snapshot.worktreeKey, otherSnapshot.worktreeKey);
 ```
 
-- [ ] **Step 2: Run focused tests and confirm RED**
+- [x] **Step 2: Run focused tests and confirm RED**
 
 Run: `pnpm build && node --test dist/test/learning-project-conventions.test.js dist/test/learning-service.test.js`
 
 Expected: failure because context snapshots and `.agents/AGENTS.md` support do not exist.
 
-- [ ] **Step 3: Implement immutable context snapshots**
+- [x] **Step 3: Implement immutable context snapshots**
 
 Add bounded configurable instruction locations. At first retained event, persist only relative location, scope, keyed digest, state triples, and evidence identity. Derive repository family from Git common directory and worktree from canonical root using local keys. Do not persist raw instruction text, absolute paths, or source agent IDs.
 
@@ -387,15 +387,17 @@ export interface InstructionContext {
 }
 ```
 
-- [ ] **Step 4: Run focused tests and confirm GREEN**
+- [x] **Step 4: Run focused tests and confirm GREEN**
 
 Run: `pnpm build && node --test dist/test/learning-project-conventions.test.js dist/test/learning-service.test.js`
 
 Expected: context history, worktree isolation, symlink safety, and privacy tests pass.
 
-- [ ] **Step 5: Commit issue #8**
+- [x] **Step 5: Commit issue #8**
 
 Run: `git add src/config src/domain src/learning src/repository test/learning-project-conventions.test.ts test/learning-service.test.ts && git commit -m "feat: preserve instruction and worktree provenance"`
+
+Evidence: initial focused context tests passed 21/21. Spec review found missing conversation/run linkage; a regression now persists only private, domain-separated HMAC keys when lifecycle data is available and exactly one run is resolved. A second review required a distinct local secret and race-safe initialization. Focused build and learning tests passed 17/17. `pnpm check` encountered the pre-existing parallel `hook-readiness` temporary-directory cleanup race; the isolated hook test passed 2/2 and the complete serial suite passed on 2026-09-13.
 
 ### Task 7: Detect evidence-backed corrections and verification gaps for issue #9
 
