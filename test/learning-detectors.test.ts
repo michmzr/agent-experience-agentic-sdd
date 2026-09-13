@@ -108,6 +108,7 @@ test('derives a linked changed decision as a correction without inventing a reas
   assert.equal(episode?.originalDecisionEvidenceId, 'liquibase-decision');
   assert.equal(episode?.changedDecisionEvidenceId, 'sql-decision');
   assert.equal(episode?.reasonEvidenceId, undefined);
+  assert.equal(episode?.state, 'unresolved');
   assert.equal(result.findings.some(({ kind }) => kind === 'insufficient-evidence'), false);
   assert.equal(result.candidates.length, 0);
 });
@@ -187,16 +188,42 @@ test('derives a verification gap for closure with no recorded criterion', () => 
   assert.equal(episode?.criterionState, 'unknown');
 });
 
-test('prefers a matching successful verification over a failed sibling', () => {
+test('suppresses a gap only for a successful criterion linked to the same closure', () => {
   const result = detectOperationalEpisodes({
     repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
     episodeEvidence: [
-      evidence({ id: 'closure', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository' }),
+      evidence({ id: 'closure', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['criterion-succeeded'] }),
       evidence({ id: 'criterion-failed', kind: 'task-verification', state: 'failed', decisionKey: 'issue-9', scopeKey: 'repository' }),
       evidence({ id: 'criterion-succeeded', kind: 'task-verification', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository' })
     ]
   });
   assert.equal(result.episodes.some((item) => item.kind === 'verification-gap'), false);
+});
+
+test('does not let an unrelated successful criterion suppress a failed linked verification', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'closure', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['criterion-failed'] }),
+      evidence({ id: 'criterion-failed', kind: 'task-verification', state: 'failed', decisionKey: 'issue-9', scopeKey: 'repository' }),
+      evidence({ id: 'stale-success', kind: 'task-verification', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository' })
+    ]
+  });
+  const gap = result.episodes.find((item): item is VerificationGapEpisode => item.kind === 'verification-gap');
+  assert.equal(gap?.criterionEvidenceId, 'criterion-failed');
+  assert.equal(gap?.criterionState, 'unmet');
+});
+
+test('does not treat a tool result as an agent claim or a repeated acceptance', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'agent-claim', kind: 'agent-claim', state: 'succeeded', decisionKey: 'approval', scopeKey: 'repository' }),
+      evidence({ id: 'tool-result', kind: 'tool-result', state: 'succeeded', decisionKey: 'approval', scopeKey: 'repository', evidenceIds: ['agent-claim'] })
+    ]
+  });
+  assert.equal(result.episodes.some((item) => item.kind === 'repeated-acceptance'), false);
+  assert.equal(result.candidates.length, 0);
 });
 
 test('derives repeated acceptance only for a matching decision in the same scope', () => {

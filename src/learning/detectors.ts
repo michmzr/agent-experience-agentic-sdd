@@ -87,7 +87,7 @@ function typedEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 
         const outcome = outcomes[0];
         const evidenceEventIds = [original.id, changed.id, ...(reason ? [reason.id] : []), ...(outcome ? [outcome.id] : [])];
         episodes.push(createTypedEpisode({
-          id: stableId('episode', input.repositoryId, input.sessionId, typedDetectorVersion, 'correction', ...evidenceEventIds), repositoryId: input.repositoryId, sessionId: input.sessionId, detector: typedDetectorVersion, state: 'outcome-observed', evidenceEventIds,
+          id: stableId('episode', input.repositoryId, input.sessionId, typedDetectorVersion, 'correction', ...evidenceEventIds), repositoryId: input.repositoryId, sessionId: input.sessionId, detector: typedDetectorVersion, state: outcome === undefined ? 'unresolved' : 'outcome-observed', evidenceEventIds,
           kind: 'correction', originalDecisionEvidenceId: original.id, changedDecisionEvidenceId: changed.id,
           ...(reason === undefined ? {} : { reasonEvidenceId: reason.id }), ...(outcome === undefined ? {} : { outcomeEvidenceId: outcome.id })
         }));
@@ -102,7 +102,7 @@ function typedEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 
     const implementation = related.find((item) => item.kind === 'tool-result');
     const checkExecution = related.find((item) => item.kind === 'tool-request');
     const checkResult = related.find((item) => item.kind === 'tool-result' && checkExecution !== undefined && item.evidenceIds.includes(checkExecution.id));
-    const criterion = evidence.filter((item) => item.kind === 'task-verification' && item.decisionKey === closure.decisionKey && item.scopeKey === closure.scopeKey).sort(byVerificationStateThenId)[0];
+    const criterion = evidence.filter((item) => item.kind === 'task-verification' && closure.evidenceIds.includes(item.id) && item.decisionKey === closure.decisionKey && item.scopeKey === closure.scopeKey).sort(byVerificationStateThenId)[0];
     const criterionState = criterion === undefined ? 'unknown' : criterion.state === 'failed' ? 'unmet' : criterion.state === 'succeeded' ? 'met' : 'unknown';
     if (criterionState === 'met') continue;
     const evidenceEventIds = [closure.id, ...(implementation === undefined ? [] : [implementation.id]), ...(checkExecution === undefined ? [] : [checkExecution.id]), ...(checkResult === undefined ? [] : [checkResult.id]), ...(criterion === undefined ? [] : [criterion.id])];
