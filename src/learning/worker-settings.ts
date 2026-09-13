@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const DEFAULT_MAX_PROCESSES = 3;
@@ -16,18 +16,27 @@ export interface AnalysisWorkerSettings {
 
 export function loadAnalysisWorkerSettings(dataDirectory: string): AnalysisWorkerSettings {
   const path = join(dataDirectory, 'analysis-worker.json');
-  let stat;
+  let fileDescriptor: number;
   try {
-    stat = lstatSync(path);
+    fileDescriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return defaults();
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return defaults();
+    if (code === 'ELOOP') throw new TypeError('Analysis worker settings must be a regular file.');
     throw new TypeError('Analysis worker settings are invalid.');
   }
-  if (stat.isSymbolicLink() || !stat.isFile()) throw new TypeError('Analysis worker settings must be a regular file.');
+  try {
+    if (!fstatSync(fileDescriptor).isFile()) throw new TypeError('Analysis worker settings must be a regular file.');
+    let value: unknown;
+    try { value = JSON.parse(readFileSync(fileDescriptor, 'utf8')) as unknown; }
+    catch { throw new TypeError('Analysis worker settings are invalid.'); }
+    return validate(value);
+  } finally {
+    closeSync(fileDescriptor);
+  }
+}
 
-  let value: unknown;
-  try { value = JSON.parse(readFileSync(path, 'utf8')) as unknown; }
-  catch { throw new TypeError('Analysis worker settings are invalid.'); }
+function validate(value: unknown): AnalysisWorkerSettings {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Analysis worker settings are invalid.');
 
   const record = value as Record<string, unknown>;

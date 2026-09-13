@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import test from 'node:test';
 
@@ -23,7 +24,22 @@ test('returns frozen defaults when the global settings file is missing', () => {
 test('loads a valid global settings file', () => {
   const directory = dataDirectory();
   writeSettings(directory, JSON.stringify({ version: 1, maxProcesses: 6, idleTimeoutMs: 60_000 }));
-  assert.deepEqual(loadAnalysisWorkerSettings(directory), { version: 1, maxProcesses: 6, idleTimeoutMs: 60_000 });
+  const settings = loadAnalysisWorkerSettings(directory);
+  assert.deepEqual(settings, { version: 1, maxProcesses: 6, idleTimeoutMs: 60_000 });
+  assert.equal(Object.isFrozen(settings), true);
+});
+
+test('accepts exact process and timeout bounds', () => {
+  for (const maxProcesses of [1, 16]) {
+    const directory = dataDirectory();
+    writeSettings(directory, JSON.stringify({ version: 1, maxProcesses, idleTimeoutMs: 60_000 }));
+    assert.equal(loadAnalysisWorkerSettings(directory).maxProcesses, maxProcesses);
+  }
+  for (const idleTimeoutMs of [1_000, 3_600_000]) {
+    const directory = dataDirectory();
+    writeSettings(directory, JSON.stringify({ version: 1, maxProcesses: 3, idleTimeoutMs }));
+    assert.equal(loadAnalysisWorkerSettings(directory).idleTimeoutMs, idleTimeoutMs);
+  }
 });
 
 test('rejects maxProcesses outside 1..16', () => {
@@ -79,4 +95,27 @@ test('rejects symlinked and non-regular settings files', () => {
   const directory = dataDirectory();
   mkdirSync(join(directory, 'analysis-worker.json'));
   assert.throws(() => loadAnalysisWorkerSettings(directory), /must be a regular file/);
+});
+
+test('reads the original file when it is replaced after opening', () => {
+  const directory = dataDirectory();
+  const settingsPath = join(directory, 'analysis-worker.json');
+  const replacementPath = join(directory, 'replacement.json');
+  writeFileSync(settingsPath, JSON.stringify({ version: 1, maxProcesses: 6, idleTimeoutMs: 60_000 }));
+  writeFileSync(replacementPath, JSON.stringify({ version: 1, maxProcesses: 9, idleTimeoutMs: 60_000 }));
+  const nativeFs = createRequire(import.meta.url)('node:fs') as typeof import('node:fs');
+  const originalOpen = nativeFs.openSync;
+  nativeFs.openSync = ((...args: Parameters<typeof nativeFs.openSync>) => {
+    const descriptor = originalOpen(...args);
+    unlinkSync(settingsPath);
+    symlinkSync(replacementPath, settingsPath);
+    return descriptor;
+  }) as typeof nativeFs.openSync;
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(loadAnalysisWorkerSettings(directory), { version: 1, maxProcesses: 6, idleTimeoutMs: 60_000 });
+  } finally {
+    nativeFs.openSync = originalOpen;
+    syncBuiltinESMExports();
+  }
 });
