@@ -5,6 +5,10 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { runCli, runCliAsync } from '../src/cli.js';
+import { CaptureSpool } from '../src/capture/spool.js';
+import { OperationalLearningRepository } from '../src/learning/repository.js';
+import { normalizeMappedCapture } from '../src/capture/normalization.js';
+import { ExperienceStore } from '../src/storage/experience-store.js';
 import { initializeGitRepository } from './helpers/git-repository.js';
 
 test('returns an error for an unknown command', () => {
@@ -38,6 +42,87 @@ test('returns a nonzero status when repository hooks are unavailable', () => {
     const result = runCli(['status', '--repository', process.cwd(), '--json', '--data-dir', dataDir]);
     assert.equal(result.exitCode, 1);
     assert.match(result.stdout, /"status":"not-ready"/);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('reports installation, delivery, data quality, and analysis independently in schema version 2', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-v2-'));
+  try {
+    const initial = JSON.parse(runCli(['status', '--repository', process.cwd(), '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
+      schemaVersion: number; installation: { state: string }; delivery: { state: string }; dataQuality: { state: string; denominator: { state: string } }; analysis: { state: string; result: string };
+    };
+    assert.equal(initial.schemaVersion, 2);
+    assert.equal(initial.installation.state, 'not-ready');
+    assert.equal(initial.delivery.state, 'unknown');
+    assert.equal(initial.dataQuality.state, 'not-applicable');
+    assert.equal(initial.dataQuality.denominator.state, 'unavailable');
+    assert.equal(initial.analysis.state, 'not-run');
+    assert.equal(initial.analysis.result, 'unavailable');
+
+    const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+    spool.admitWithReceipt({ kind: 'session-start', session: { source: 'codex', id: 'session-health' as never, startedAt: '2026-09-13T08:00:00.000Z', repositoryId: 'repo-health' as never } }, { source: 'codex', receivedAt: '2026-09-13T08:00:00.000Z' });
+    spool.close();
+    const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    learning.enqueue({ repositoryId: 'repo-health', sessionId: 'session-health', inputHighWater: 3 });
+    learning.close();
+
+    const pending = JSON.parse(runCli(['status', '--repository-id', 'repo-health', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
+      delivery: { state: string }; dataQuality: { receipts: { accepted: number } }; analysis: { state: string; desiredThrough: number; completedThrough: number; result: string };
+    };
+    assert.equal(pending.delivery.state, 'backlogged');
+    assert.equal(pending.dataQuality.receipts.accepted, 1);
+    assert.equal(pending.analysis.state, 'pending');
+    assert.equal(pending.analysis.desiredThrough, 3);
+    assert.equal(pending.analysis.completedThrough, 0);
+    assert.equal(pending.analysis.result, 'unavailable');
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('keeps legacy status JSON byte-for-byte compatible unless schema version 2 is explicit', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-legacy-'));
+  try {
+    const legacy = runCli(['status-global', '--json', '--data-dir', dataDir]);
+    const repeated = runCli(['status-global', '--json', '--data-dir', dataDir]);
+    assert.equal(repeated.stdout, legacy.stdout);
+    assert.equal(runCli(['status-global', '--schema-version', '1', '--json', '--data-dir', dataDir]).exitCode, 2);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('reports unknown results and a completed no-findings analysis without leaking paths globally', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-complete-'));
+  const repositoryId = 'repo-quality';
+  try {
+    const store = new ExperienceStore(join(dataDir, 'experience.sqlite'));
+    store.appendIncremental({
+      session: { id: 'session-quality' as never, source: 'codex', startedAt: '2026-09-13T09:00:00.000Z', repositoryId: repositoryId as never },
+      event: normalizeMappedCapture({ source: 'codex', sourceEventId: 'request-quality', sessionId: 'session-quality' as never, phase: 'pre-action', occurredAt: '2026-09-13T09:00:00.000Z', tool: 'shell', action: 'run', summary: 'Run check.' })
+    });
+    store.close();
+    const unknown = JSON.parse(runCli(['status', '--repository-id', repositoryId, '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
+      dataQuality: { state: string; results: { linked: number; unknown: Record<string, number> }; observedTimeRange: { first: string; last: string } }; analysis: { state: string };
+    };
+    assert.equal(unknown.dataQuality.state, 'degraded');
+    assert.deepEqual(unknown.dataQuality.results, { linked: 0, unknown: { 'result-not-delivered': 1 } });
+    assert.deepEqual(unknown.dataQuality.observedTimeRange, { first: '2026-09-13T09:00:00.000Z', last: '2026-09-13T09:00:00.000Z' });
+    assert.equal(unknown.analysis.state, 'not-run');
+
+    const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    learning.enqueue({ repositoryId, sessionId: 'session-quality', inputHighWater: 2 });
+    const job = learning.claim(repositoryId)!;
+    learning.saveResult(job.id, { episodes: [], findings: [], candidates: [], coverage: [{ detector: 'm6-deterministic@1', status: 'completed', examinedEvents: 2, findings: 0 }], cost: 3 }, job.leaseToken);
+    learning.close();
+    const complete = JSON.parse(runCli(['analysis', 'report', '--repository-id', repositoryId, '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
+      schemaVersion: number; analysis: { state: string; result: string; cost: { completedRuns: number; total: number }; range: { from: number; through: number } };
+    };
+    assert.equal(complete.schemaVersion, 2);
+    assert.equal(complete.analysis.state, 'completed');
+    assert.equal(complete.analysis.result, 'no-findings');
+    assert.deepEqual(complete.analysis.cost, { completedRuns: 1, total: 3 });
+    assert.deepEqual(complete.analysis.range, { from: 1, through: 2 });
+
+    const global = runCli(['status-global', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout;
+    assert.equal(global.includes(dataDir), false);
+    assert.equal(global.includes('experience.sqlite'), false);
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 

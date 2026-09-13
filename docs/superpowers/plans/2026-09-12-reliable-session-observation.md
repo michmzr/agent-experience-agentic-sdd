@@ -289,7 +289,7 @@ Retry fencing follow-up evidence: retry now takes an immediate transaction, cond
 - Modify: `skills/ael/references/setup-and-health.md`
 - Modify: `skills/ael/references/diagnostics.md`
 
-- [ ] **Step 1: Write failing schema-version 2 report tests**
+- [x] **Step 1: Write failing schema-version 2 report tests**
 
 Assert default JSON is unchanged. Assert explicit `--schema-version 2` distinguishes ready installation with backlog, all unknown results, no analysis, completed no-findings, failed analysis, and absent denominator.
 
@@ -300,13 +300,13 @@ assert.equal(quality.dataQuality.completeness, 'unavailable');
 assert.equal(quality.analysis.result, 'no-findings');
 ```
 
-- [ ] **Step 2: Run focused tests and confirm RED**
+- [x] **Step 2: Run focused tests and confirm RED**
 
 Run: `pnpm build && node --test dist/test/cli.test.js dist/test/repository-observability.test.js`
 
 Expected: failure because schema version 2 reports do not exist.
 
-- [ ] **Step 3: Implement the multidimensional report**
+- [x] **Step 3: Implement the multidimensional report**
 
 Add an explicit schema-version option and a report assembler that reads installation, spool delivery, receipt quality, and analysis stream state independently. Keep legacy output untouched when no version is requested. Keep global aggregation path-free.
 
@@ -320,15 +320,17 @@ return Object.freeze({
 });
 ```
 
-- [ ] **Step 4: Run focused tests and confirm GREEN**
+- [x] **Step 4: Run focused tests and confirm GREEN**
 
 Run: `pnpm build && node --test dist/test/cli.test.js dist/test/repository-observability.test.js`
 
 Expected: version 1 compatibility and version 2 state-separation tests pass.
 
-- [ ] **Step 5: Commit issue #7**
+- [x] **Step 5: Commit issue #7**
 
 Run: `git add src/application/experience-service.ts src/cli.ts src/learning/repository.ts src/storage/experience-store.ts test/cli.test.ts test/repository-observability.test.ts skills/ael/references && git commit -m "feat: report installation data and analysis quality separately"`
+
+Evidence: RED: `pnpm build && node --test dist/test/cli.test.js dist/test/repository-observability.test.js` failed because `schemaVersion` was absent from `status --schema-version 2`. GREEN: the same focused command passed 18/18 on 2026-09-13. Coverage includes empty data, a delivery backlog, unavailable denominator, unknown result evidence, not-run analysis, completed no-findings analysis, and path-free global JSON. Legacy status JSON is selected unchanged when the version option is omitted. Final verification: `pnpm build && node --test --test-concurrency=1 dist/test/**/*.test.js` passed serially on 2026-09-13.
 
 ### Task 6: Preserve historical instruction and execution context for issue #8
 
