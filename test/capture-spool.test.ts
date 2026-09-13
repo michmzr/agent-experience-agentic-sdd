@@ -8,6 +8,9 @@ import test from 'node:test';
 import { CaptureSpool } from '../src/capture/spool.js';
 import { drainCaptureSpool } from '../src/capture/spool-drain.js';
 import type { PassiveCaptureRecord } from '../src/capture/passive-service.js';
+import { OperationalLearningRepository } from '../src/learning/repository.js';
+import { startAnalysisWorker } from '../src/learning/worker-launcher.js';
+import { ExperienceStore } from '../src/storage/experience-store.js';
 
 function dataDirectory(): string {
   return mkdtempSync(join(tmpdir(), 'ael-capture-spool-'));
@@ -174,15 +177,112 @@ test('admits repository-bound committed capture for analysis without making capt
   const received: Array<{ repositoryId: string; sessionId: string }> = [];
   try {
     spool.admit({ kind: 'session-start', session: { ...sessionStart().session, repositoryId: 'repo-1' as never } }, '2026-09-07T08:00:00.000Z');
-    assert.equal(drainCaptureSpool({ databasePath, now: () => '2026-09-07T08:00:01.000Z', learningAdmission: { enqueueCommittedSession(repositoryId, sessionId) { received.push({ repositoryId, sessionId }); } } }).committed, 1);
+    assert.equal(drainCaptureSpool({ databasePath, now: () => '2026-09-07T08:00:01.000Z', learningAdmission: { enqueueCommittedSession(repositoryId, sessionId) { received.push({ repositoryId, sessionId }); return true; } }, scheduleAnalysis() {} }).committed, 1);
     assert.deepEqual(received, [{ repositoryId: 'repo-1', sessionId: 'session-1' }]);
 
     spool.admit({ kind: 'session-start', session: { ...sessionStart().session, id: 'session-2' as never, repositoryId: 'repo-1' as never } }, '2026-09-07T08:00:01.000Z');
-    assert.equal(drainCaptureSpool({ databasePath, now: () => '2026-09-07T08:00:02.000Z', learningAdmission: { enqueueCommittedSession() { throw new Error('analysis unavailable'); } } }).committed, 2);
+    assert.equal(drainCaptureSpool({ databasePath, now: () => '2026-09-07T08:00:02.000Z', learningAdmission: { enqueueCommittedSession() { throw new Error('analysis unavailable'); } }, scheduleAnalysis() { throw new Error('must not schedule'); } }).committed, 2);
   } finally {
     spool.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+test('schedules analysis once per drain only after every admitted capture is persisted and acknowledged', () => {
+  const dataDir = dataDirectory();
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  const admitted: string[] = [];
+  let launches = 0;
+  try {
+    spool.admit({ kind: 'session-start', session: { ...sessionStart().session, repositoryId: 'repo-1' as never } }, '2026-09-07T08:00:00.000Z');
+    spool.admit({ kind: 'session-start', session: { ...sessionStart().session, id: 'session-2' as never, repositoryId: 'repo-1' as never } }, '2026-09-07T08:00:00.000Z');
+
+    const status = drainCaptureSpool({
+      databasePath,
+      now: () => '2026-09-07T08:00:01.000Z',
+      learningAdmission: {
+        enqueueCommittedSession(_repositoryId, sessionId) {
+          admitted.push(sessionId);
+          return true;
+        }
+      },
+      scheduleAnalysis() {
+        launches += 1;
+        const observedSpool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+        const observedStore = new ExperienceStore(databasePath);
+        try {
+          assert.equal(observedSpool.status().committed, 2);
+          assert.ok(observedStore.loadSession('session-1' as never));
+          assert.ok(observedStore.loadSession('session-2' as never));
+        } finally {
+          observedStore.close();
+          observedSpool.close();
+        }
+      }
+    });
+
+    assert.equal(status.committed, 2);
+    assert.deepEqual(admitted.sort(), ['session-1', 'session-2']);
+    assert.equal(launches, 1);
+  } finally {
+    spool.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('does not schedule analysis when admission reports no new work', () => {
+  const dataDir = dataDirectory();
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  let launches = 0;
+  try {
+    spool.admit({ kind: 'session-start', session: { ...sessionStart().session, repositoryId: 'repo-1' as never } }, '2026-09-07T08:00:00.000Z');
+    const status = drainCaptureSpool({
+      databasePath,
+      now: () => '2026-09-07T08:00:01.000Z',
+      learningAdmission: { enqueueCommittedSession() { return false; } },
+      scheduleAnalysis() { launches += 1; }
+    });
+    assert.equal(status.committed, 1);
+    assert.equal(launches, 0);
+  } finally {
+    spool.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('keeps capture acknowledged and records a bounded diagnostic when scheduling throws', () => {
+  const dataDir = dataDirectory();
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  try {
+    spool.admit({ kind: 'session-start', session: { ...sessionStart().session, repositoryId: 'repo-1' as never } }, '2026-09-07T08:00:00.000Z');
+    const status = drainCaptureSpool({
+      databasePath,
+      now: () => '2026-09-07T08:00:01.000Z',
+      learningAdmission: { enqueueCommittedSession() { return true; } },
+      scheduleAnalysis() { throw new Error('process unavailable'); }
+    });
+    assert.equal(status.committed, 1);
+    const repository = new OperationalLearningRepository(databasePath);
+    try { assert.equal(repository.status().diagnostics['coordinator-launch-failed'], 1); }
+    finally { repository.close(); }
+    const database = new DatabaseSync(databasePath);
+    try {
+      assert.equal(database.prepare("SELECT last_at FROM operational_analysis_diagnostics WHERE code = 'coordinator-launch-failed'").get()?.last_at,
+        '2026-09-07T08:00:01.000Z');
+    } finally { database.close(); }
+  } finally {
+    spool.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('reports synchronous worker launch failure through the bounded callback', () => {
+  let failures = 0;
+  startAnalysisWorker({ dataDirectory: '\0', onFailure() { failures += 1; } });
+  assert.equal(failures, 1);
 });
 
 test('can disable automatic operational learning without disabling capture', () => {
@@ -195,7 +295,7 @@ test('can disable automatic operational learning without disabling capture', () 
     mkdirSync(join(root, '.ael'));
     writeFileSync(join(root, '.ael', 'settings.json'), '{"version":1,"captureDeliveryDeadlineMs":2000,"automaticOperationalLearning":false}\n');
     spool.admit({ kind: 'session-start', session: { ...sessionStart().session, repositoryId: 'repo-1' as never } }, '2026-09-07T08:00:00.000Z');
-    assert.equal(drainCaptureSpool({ databasePath, projectRoot: root, now: () => '2026-09-07T08:00:01.000Z', learningAdmission: { enqueueCommittedSession() { admitted = true; } } }).committed, 1);
+    assert.equal(drainCaptureSpool({ databasePath, projectRoot: root, now: () => '2026-09-07T08:00:01.000Z', learningAdmission: { enqueueCommittedSession() { admitted = true; return true; } }, scheduleAnalysis() { throw new Error('must not schedule'); } }).committed, 1);
     assert.equal(admitted, false);
   } finally {
     spool.close();

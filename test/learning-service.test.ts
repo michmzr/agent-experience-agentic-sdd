@@ -132,9 +132,10 @@ test('does not create another job when completed input is admitted unchanged', (
   append(store, repairEvents());
   store.close();
   const service = new OperationalLearningService(databasePath);
-  service.enqueueCommittedSession('repo-1', 'session-1');
+  assert.equal(service.enqueueCommittedSession('repo-1', 'session-1'), true);
+  assert.equal(service.enqueueCommittedSession('repo-1', 'session-1'), false);
   assert.equal(service.runNext({ ownerId: 'worker-1' }).status, 'completed');
-  service.enqueueCommittedSession('repo-1', 'session-1');
+  assert.equal(service.enqueueCommittedSession('repo-1', 'session-1'), false);
   assert.deepEqual(service.runNext({ ownerId: 'worker-2' }), { status: 'idle' });
 });
 

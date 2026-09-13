@@ -19,6 +19,7 @@ import { projectCapturedSessionEvidence } from '../evidence/capture-projection.j
 import { sourceEvidenceCapabilities } from '../evidence/capabilities.js';
 import { SessionEvidenceRepository } from '../evidence/repository.js';
 import { OperationalLearningService } from '../learning/service.js';
+import type { AnalysisWorkerScheduler } from '../learning/worker-launcher.js';
 import type { SessionId } from '../domain/types.js';
 import {
   RuntimeService,
@@ -36,6 +37,7 @@ export interface LessonFilter {
 
 export interface ExperienceServiceOptions {
   readonly dataDir?: string;
+  readonly scheduleAnalysis?: AnalysisWorkerScheduler;
 }
 
 export interface CursorCaptureDiagnosticsReport {
@@ -49,11 +51,13 @@ export class ExperienceService {
   private readonly dataDirectory: string;
   private readonly databasePath: string;
   private readonly runtime: RuntimeService;
+  private readonly scheduleAnalysis: AnalysisWorkerScheduler | undefined;
 
   constructor(options: ExperienceServiceOptions = {}) {
     this.databasePath = options.dataDir ? join(options.dataDir, 'experience.sqlite') : defaultDatabasePath();
     this.dataDirectory = options.dataDir ?? dirname(this.databasePath);
     this.runtime = new RuntimeService({ dataDir: this.dataDirectory });
+    this.scheduleAnalysis = options.scheduleAnalysis;
   }
 
   init(): { databasePath: string } {
@@ -195,7 +199,8 @@ export class ExperienceService {
   }
 
   captureDrain(now: () => string = () => new Date().toISOString()) {
-    return drainCaptureSpool({ databasePath: this.databasePath, now, learningAdmission: new OperationalLearningService(this.databasePath) });
+    return drainCaptureSpool({ databasePath: this.databasePath, now, learningAdmission: new OperationalLearningService(this.databasePath),
+      ...(this.scheduleAnalysis === undefined ? {} : { scheduleAnalysis: this.scheduleAnalysis }) });
   }
 
   runOperationalAnalysis(repositoryId: string) {

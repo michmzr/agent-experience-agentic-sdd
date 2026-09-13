@@ -3,11 +3,13 @@ import { randomUUID } from 'node:crypto';
 
 import { ExperienceStore } from '../storage/experience-store.js';
 import { loadProjectSettings } from '../config/project-settings.js';
+import { OperationalLearningRepository } from '../learning/repository.js';
+import { startAnalysisWorker, type AnalysisWorkerScheduler } from '../learning/worker-launcher.js';
 import { persistPassiveCapture } from './passive-service.js';
 import { CaptureSpool, type CaptureSpoolStatus } from './spool.js';
 
 export interface LearningAdmission {
-  enqueueCommittedSession(repositoryId: string, sessionId: string): void;
+  enqueueCommittedSession(repositoryId: string, sessionId: string): boolean;
 }
 
 export interface DrainCaptureSpoolInput {
@@ -15,12 +17,14 @@ export interface DrainCaptureSpoolInput {
   readonly now: () => string;
   readonly projectRoot?: string;
   readonly learningAdmission?: LearningAdmission;
+  readonly scheduleAnalysis?: AnalysisWorkerScheduler;
 }
 
 export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolStatus {
   const spool = new CaptureSpool(join(dirname(input.databasePath), 'capture-spool.sqlite'));
   const lockOwner = randomUUID();
   let store: ExperienceStore | undefined;
+  let analysisWorkAdded = false;
   try {
     const settings = loadProjectSettings(input.projectRoot ?? process.cwd());
     const lockNow = new Date().toISOString();
@@ -35,8 +39,10 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
         if (Date.parse(observedAt) > Date.parse(deadlineAt)) spool.recordDelayedDelivery(claimed.deliveryId, deadlineAt, observedAt);
         try {
           persistPassiveCapture(store, claimed.record);
-          admitCommittedSession(store, claimed.record, settings.automaticOperationalLearning !== false ? input.learningAdmission : undefined);
+          const recordAddedAnalysisWork = admitCommittedSession(store, claimed.record,
+            settings.automaticOperationalLearning !== false ? input.learningAdmission : undefined);
           spool.acknowledge(claimed.deliveryId, input.now());
+          analysisWorkAdded ||= recordAddedAnalysisWork;
         } catch (error) {
           if (isRetryableCaptureError(error)) spool.retry(claimed.deliveryId, input.now());
           else if (error instanceof TypeError) spool.quarantine(claimed.deliveryId, 'CORRUPT', input.now());
@@ -47,7 +53,9 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
       if (status.pending === 0) break;
       if (claimedRecords.length === 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     } while (Date.now() < idleDeadline);
-    return spool.status();
+    const status = spool.status();
+    if (analysisWorkAdded) scheduleAnalysis(input.databasePath, input.now, input.scheduleAnalysis ?? startAnalysisWorker);
+    return status;
   } finally {
     try { store?.close(); } finally {
       try { spool.releaseDrainLock(lockOwner); } finally { spool.close(); }
@@ -55,12 +63,32 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
   }
 }
 
-function admitCommittedSession(store: ExperienceStore, record: Parameters<typeof persistPassiveCapture>[1], learningAdmission: LearningAdmission | undefined): void {
-  if (!learningAdmission) return;
+function admitCommittedSession(store: ExperienceStore, record: Parameters<typeof persistPassiveCapture>[1], learningAdmission: LearningAdmission | undefined): boolean {
+  if (!learningAdmission) return false;
   const sessionId = record.kind === 'session-start' ? record.session.id : record.kind === 'session-end' ? record.sessionId : record.event.sessionId;
   const session = store.loadSession(sessionId);
-  if (!session?.repositoryId) return;
-  try { learningAdmission.enqueueCommittedSession(session.repositoryId, session.id); } catch { /* Analysis admission never affects capture delivery. */ }
+  if (!session?.repositoryId) return false;
+  try { return learningAdmission.enqueueCommittedSession(session.repositoryId, session.id); }
+  catch { return false; /* Analysis admission never affects capture delivery. */ }
+}
+
+function scheduleAnalysis(databasePath: string, now: () => string, schedule: AnalysisWorkerScheduler): void {
+  let failureRecorded = false;
+  const onFailure = (): void => {
+    if (failureRecorded) return;
+    failureRecorded = true;
+    let repository: OperationalLearningRepository | undefined;
+    try {
+      repository = new OperationalLearningRepository(databasePath, now);
+      repository.recordDiagnostic('coordinator-launch-failed');
+    } catch {
+      // Diagnostics cannot change durable capture acknowledgement.
+    } finally {
+      try { repository?.close(); } catch { /* Diagnostics cleanup remains best effort. */ }
+    }
+  };
+  try { schedule({ dataDirectory: dirname(databasePath), onFailure }); }
+  catch { onFailure(); }
 }
 
 function isRetryableCaptureError(error: unknown): boolean {

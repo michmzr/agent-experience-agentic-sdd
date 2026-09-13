@@ -51,14 +51,18 @@ export class OperationalLearningService {
     this.readConventions = dependencies.readConventions ?? readProjectToolConventions;
   }
 
-  enqueueCommittedSession(repositoryId: string, sessionId: string): void {
+  enqueueCommittedSession(repositoryId: string, sessionId: string): boolean {
     const store = this.openStore(this.databasePath);
     try {
       const records = store.listRepositoryRecords(repositoryId);
       const record = records.find(({ session }) => session.id === sessionId);
-      if (!record) return;
+      if (!record) return false;
       const repository = new OperationalLearningRepository(this.databasePath);
-      try { repository.enqueue({ repositoryId, sessionId, inputHighWater: record.events.length }); } finally { repository.close(); }
+      try {
+        const previous = repository.stream(repositoryId, sessionId);
+        const job = repository.enqueue({ repositoryId, sessionId, inputHighWater: record.events.length });
+        return job !== undefined && (previous === undefined || record.events.length > previous.committedHighWater);
+      } finally { repository.close(); }
     } finally { store.close(); }
   }
 
