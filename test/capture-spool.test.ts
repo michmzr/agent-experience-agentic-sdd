@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -282,6 +283,20 @@ test('keeps capture acknowledged and records a bounded diagnostic when schedulin
 test('reports synchronous worker launch failure through the bounded callback', () => {
   let failures = 0;
   startAnalysisWorker({ dataDirectory: '\0', onFailure() { failures += 1; } });
+  assert.equal(failures, 1);
+});
+
+test('reports an asynchronous spawn error once even if cleanup also throws synchronously', async () => {
+  let failures = 0;
+  const child = new EventEmitter() as EventEmitter & { unref(): void };
+  child.unref = () => { throw new Error('cleanup failed'); };
+  startAnalysisWorker({ dataDirectory: '/tmp/ael', onFailure() { failures += 1; } }, {
+    spawn() {
+      queueMicrotask(() => child.emit('error', new Error('launch failed')));
+      return child;
+    }
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(failures, 1);
 });
 

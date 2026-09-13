@@ -59,9 +59,7 @@ export class OperationalLearningService {
       if (!record) return false;
       const repository = new OperationalLearningRepository(this.databasePath);
       try {
-        const previous = repository.stream(repositoryId, sessionId);
-        const job = repository.enqueue({ repositoryId, sessionId, inputHighWater: record.events.length });
-        return job !== undefined && (previous === undefined || record.events.length > previous.committedHighWater);
+        return repository.enqueueWithOutcome({ repositoryId, sessionId, inputHighWater: record.events.length }).workAdded;
       } finally { repository.close(); }
     } finally { store.close(); }
   }

@@ -9,14 +9,32 @@ export interface AnalysisWorkerLaunchRequest {
 
 export type AnalysisWorkerScheduler = (input: AnalysisWorkerLaunchRequest) => void;
 
-export function startAnalysisWorker(input: AnalysisWorkerLaunchRequest): void {
+interface DetachedAnalysisWorkerProcess {
+  once(event: 'error', listener: (error: Error) => void): this;
+  unref(): void;
+}
+
+export interface AnalysisWorkerLauncherDependencies {
+  readonly spawn?: (executable: string, args: string[], options: { readonly detached: true; readonly stdio: 'ignore' }) => DetachedAnalysisWorkerProcess;
+}
+
+export function startAnalysisWorker(input: AnalysisWorkerLaunchRequest, dependencies: AnalysisWorkerLauncherDependencies = {}): void {
+  let failureReported = false;
+  const reportFailure = (): void => {
+    if (failureReported) return;
+    failureReported = true;
+    input.onFailure?.();
+  };
   try {
     const entrypoint = join(dirname(fileURLToPath(import.meta.url)), '..', 'cli.js');
-    spawn(process.execPath, [entrypoint, 'analysis', 'worker', '--data-dir', input.dataDirectory], {
+    const spawnWorker = dependencies.spawn ?? spawn;
+    const child = spawnWorker(process.execPath, [entrypoint, 'analysis', 'worker', '--data-dir', input.dataDirectory], {
       detached: true,
       stdio: 'ignore'
-    }).unref();
+    });
+    child.once('error', reportFailure);
+    child.unref();
   } catch {
-    input.onFailure?.();
+    reportFailure();
   }
 }

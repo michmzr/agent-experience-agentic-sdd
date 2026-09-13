@@ -698,6 +698,22 @@ test('unchanged processed input creates no job and each detector version schedul
   repository.close();
 });
 
+test('two repository connections report one atomic outstanding-work admission for the same high-water', () => {
+  const databasePath = path();
+  const first = new OperationalLearningRepository(databasePath);
+  const second = new OperationalLearningRepository(databasePath);
+  try {
+    const input = { repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 4 };
+    const outcomes = [first.enqueueWithOutcome(input), second.enqueueWithOutcome(input)];
+    assert.deepEqual(outcomes.map(({ workAdded }) => workAdded), [true, false]);
+    assert.equal(outcomes[0].job?.id, outcomes[1].job?.id);
+    assert.equal(first.jobsForStream('repo-1', 'session-1').length, 1);
+  } finally {
+    first.close();
+    second.close();
+  }
+});
+
 test('schema enforces one running and one pending or retryable row per versioned stream', () => {
   const databasePath = path();
   const repository = new OperationalLearningRepository(databasePath);

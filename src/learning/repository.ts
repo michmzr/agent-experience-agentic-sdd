@@ -92,6 +92,7 @@ const resultSchema = `
 `;
 
 export interface AnalysisAdmission { readonly repositoryId: string; readonly sessionId: string; readonly inputHighWater: number; readonly detectorSetVersion?: string; }
+export interface AnalysisAdmissionOutcome { readonly job: AnalysisJob | undefined; readonly workAdded: boolean; }
 export interface AnalysisStream {
   readonly repositoryId: string; readonly sessionId: string; readonly detectorSetVersion: string;
   readonly committedHighWater: number; readonly processedHighWater: number;
@@ -169,6 +170,10 @@ export class OperationalLearningRepository {
   close(): void { this.database.close(); }
 
   enqueue(input: AnalysisAdmission): AnalysisJob | undefined {
+    return this.enqueueWithOutcome(input).job;
+  }
+
+  enqueueWithOutcome(input: AnalysisAdmission): AnalysisAdmissionOutcome {
     const version = input.detectorSetVersion ?? DETECTOR_SET_VERSION;
     assertStreamIdentity(input.repositoryId, input.sessionId, version);
     if (!Number.isSafeInteger(input.inputHighWater) || input.inputHighWater < 0) throw new TypeError('Analysis high-water is invalid.');
@@ -188,7 +193,7 @@ export class OperationalLearningRepository {
         .get(input.repositoryId, input.sessionId, version, stream.processed_high_water);
       if (quarantined && previousStream !== undefined && input.inputHighWater <= previousStream.committed_high_water) {
         this.database.exec('COMMIT');
-        return undefined;
+        return Object.freeze({ job: undefined, workAdded: false });
       }
       const pending = this.database.prepare(`SELECT id FROM operational_analysis_jobs WHERE repository_id = ? AND session_id = ?
         AND detector_set_version = ? AND state IN ('pending', 'retryable-failure')`).get(input.repositoryId, input.sessionId, version) as { id: string } | undefined;
@@ -206,7 +211,8 @@ export class OperationalLearningRepository {
         }
       }
       this.database.exec('COMMIT');
-      return job;
+      const workAdded = job !== undefined && (isNewStream || input.inputHighWater > previousStream.committed_high_water);
+      return Object.freeze({ job, workAdded });
     } catch (error) { this.database.exec('ROLLBACK'); throw error; }
   }
 
