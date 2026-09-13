@@ -73,26 +73,51 @@ async function waitUntil(predicate: () => boolean, message: string): Promise<voi
   assert.ok(predicate(), message);
 }
 
-function resultIdentityCounts(databasePath: string): Readonly<Record<string, { readonly total: number; readonly unique: number }>> {
+function semanticResultKeys(databasePath: string): Readonly<Record<string, readonly string[]>> {
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
-    return Object.freeze(Object.fromEntries(['operational_episodes', 'operational_findings', 'operational_candidates'].map((table) => {
-      const row = database.prepare(`SELECT COUNT(*) AS total, COUNT(DISTINCT id) AS unique_count FROM ${table}`).get() as {
-        total: number; unique_count: number;
-      };
-      return [table, Object.freeze({ total: Number(row.total), unique: Number(row.unique_count) })];
-    })));
+    const episodes = (database.prepare('SELECT payload_json FROM operational_episodes ORDER BY id').all() as Array<{
+      payload_json: string;
+    }>).map(({ payload_json }) => {
+      const { id: _id, ...businessFields } = JSON.parse(payload_json) as Record<string, unknown>;
+      return JSON.stringify(businessFields);
+    });
+    const findings = (database.prepare(`SELECT e.repository_id, e.session_id, e.detector,
+      f.kind, f.evidence_json, f.statement FROM operational_findings f
+      JOIN operational_episodes e ON e.id = f.episode_id ORDER BY f.id`).all() as Array<Record<string, unknown>>)
+      .map((row) => JSON.stringify(row));
+    const evidence = new Map<string, string[]>();
+    for (const row of database.prepare(`SELECT candidate_id, event_id, polarity
+      FROM operational_candidate_evidence ORDER BY candidate_id, event_id, polarity`).all() as Array<{
+        candidate_id: string; event_id: string; polarity: string;
+      }>) {
+      const values = evidence.get(row.candidate_id) ?? [];
+      values.push(`${row.polarity}:${row.event_id}`);
+      evidence.set(row.candidate_id, values);
+    }
+    const candidates = (database.prepare(`SELECT c.id, e.repository_id, e.session_id, e.detector,
+      c.kind, c.state, c.statement, c.conditions_json, c.procedure_json, c.invalidation_json
+      FROM operational_candidates c JOIN operational_episodes e ON e.id = c.episode_id ORDER BY c.id`).all() as Array<{
+        id: string; repository_id: string; session_id: string; detector: string; kind: string; state: string;
+        statement: string; conditions_json: string; procedure_json: string; invalidation_json: string;
+      }>).map(({ id, ...businessFields }) => JSON.stringify({ ...businessFields, evidence: evidence.get(id) ?? [] }));
+    return Object.freeze({ episodes: Object.freeze(episodes), findings: Object.freeze(findings),
+      candidates: Object.freeze(candidates) });
   } finally { database.close(); }
 }
 
 function assertNoDuplicateResults(databasePath: string, requireResults = false): void {
-  const counts = resultIdentityCounts(databasePath);
+  const keys = semanticResultKeys(databasePath);
   if (requireResults) {
-    assert.ok(counts.operational_episodes!.total > 0, 'fixture must produce at least one operational episode');
-    assert.ok(counts.operational_findings!.total > 0, 'fixture must produce at least one operational finding');
-    assert.ok(counts.operational_candidates!.total > 0, 'fixture must produce at least one operational candidate');
+    assert.ok(keys.episodes!.length > 0, 'fixture must produce at least one operational episode');
+    assert.ok(keys.findings!.length > 0, 'fixture must produce at least one operational finding');
+    assert.ok(keys.candidates!.length > 0, 'fixture must produce at least one operational candidate');
   }
-  for (const value of Object.values(counts)) assert.equal(value.total, value.unique);
+  for (const [resultKind, values] of Object.entries(keys)) {
+    const groups = new Map<string, number>();
+    for (const value of values) groups.set(value, (groups.get(value) ?? 0) + 1);
+    for (const count of groups.values()) assert.equal(count, 1, `duplicate semantic ${resultKind} result`);
+  }
 }
 
 test('coalesces 565 high-water admissions into one 559-event stream without measurable rereads', async () => {
@@ -136,7 +161,9 @@ test('coalesces 565 high-water admissions into one 559-event stream without meas
     Array.from({ length: 559 }, (_, ordinal) => `session-load-event-${String(ordinal).padStart(4, '0')}`));
   assert.equal(stream?.processedHighWater, 559);
   assert.equal(stream?.committedHighWater, 559);
+  assert.equal(status.eventsLoaded, 559);
   assert.equal(status.uniqueAcknowledgedEvents, 559);
+  assert.equal(status.rereadRatio, 1);
   assert.ok(status.rereadRatio <= 1.05, `reread ratio ${status.rereadRatio} exceeded 1.05`);
   assert.equal(status.failureCounts['execution-failure'] + status.failureCounts.timeout +
     status.failureCounts['invalid-input'] + status.failureCounts['lease-expired'], 0);

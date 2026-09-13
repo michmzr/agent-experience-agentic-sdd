@@ -8,7 +8,7 @@ Tested implementation commit: `b1051b6`.
 
 The deterministic load fixture submitted 565 nondecreasing high-water admissions for one session. The first 559 admissions appended distinct capture events and advanced the high-water from 1 through 559. The final six admissions repeated high-water 559 to represent duplicate wakeups. The repository retained one logical analysis stream and one coalesced job before execution.
 
-The coordinator used `maxProcesses: 3`. One stream supplied one claimable job, so observed child concurrency was 1 and did not exceed the configured limit. The completed stream had committed and processed high-water 559. All 559 source-event ordinals were present in insertion order. `uniqueAcknowledgedEvents` was 559, `eventsLoaded` was 559 and the measured reread ratio was 1.0. Pending, running, retryable and quarantined job counts were zero. Episode, finding and candidate table counts matched their distinct identity counts.
+The coordinator used `maxProcesses: 3`. One stream supplied one claimable job, so observed child concurrency was 1 and did not exceed the configured limit. The completed stream had committed and processed high-water 559. All 559 source-event ordinals were present in insertion order. `uniqueAcknowledgedEvents` was exactly 559, `eventsLoaded` was exactly 559 and the measured reread ratio was exactly 1.0. Pending, running, retryable and quarantined job counts were zero. Episode, finding and candidate results were grouped by their canonical scope, payload and evidence fields without using record IDs. Every semantic group contained one result.
 
 ## Restart fixture
 
@@ -20,13 +20,23 @@ The two load fixtures use injected process hosts and real SQLite repositories, r
 
 ## Commands
 
+Load stability commands:
+
+```text
+rtk pnpm build && node --test dist/test/analysis-load.test.js
+node --test dist/test/analysis-load.test.js
+node --test dist/test/analysis-load.test.js
+```
+
+Result: each run passed 2 tests with 0 failures. Durations were 1.071, 1.058 and 1.505 seconds.
+
 Focused acceptance command:
 
 ```text
 rtk pnpm build && node --test dist/test/analysis-worker-settings.test.js dist/test/learning-repository.test.js dist/test/learning-detectors.test.js dist/test/learning-service.test.js dist/test/analysis-worker.test.js dist/test/capture-spool.test.js dist/test/automatic-analysis-acceptance.test.js dist/test/analysis-load.test.js dist/test/cli.test.js dist/test/cli-integration.test.js
 ```
 
-Result: 147 tests passed, 0 failed, in 4.314 seconds.
+Result: 147 tests passed, 0 failed, in 5.171 seconds.
 
 Full project check:
 
@@ -34,7 +44,7 @@ Full project check:
 rtk pnpm check
 ```
 
-Result: 785 tests passed, 0 failed, in 15.822 seconds. Two preceding full runs reported temporary-directory cleanup races in existing hook tests. The directly affected `hook-readiness` file passed 2 tests with 0 failures in isolation before the final full pass.
+Result: 785 tests passed, 0 failed, in 19.297 seconds. During the initial verification pass, two full runs reported temporary-directory cleanup races in existing hook tests. The directly affected `hook-readiness` file passed 2 tests with 0 failures in isolation before subsequent full passes.
 
 Patch validation:
 
