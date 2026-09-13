@@ -6,6 +6,7 @@ import type { ProjectToolConvention } from './project-conventions.js';
 
 const legacyDetectorVersion = 'm6-deterministic@1';
 const typedDetectorVersion = 'm9-typed-evidence@1';
+const identifierPattern = /^[A-Za-z0-9._:@/-]{1,512}$/;
 
 export interface DetectorInput {
   readonly repositoryId: string;
@@ -36,6 +37,8 @@ export interface RepeatedAcceptanceEpisode extends OperationalEpisode {
 }
 export type DerivedOperationalEpisode = (OperationalEpisode & { readonly kind?: never }) | CorrectionEpisode | VerificationGapEpisode | RepeatedAcceptanceEpisode;
 export type DerivedOperationalFinding = OperationalFinding | (Omit<OperationalFinding, 'kind'> & { readonly kind: 'insufficient-evidence' });
+export type TypedOperationalEpisode = CorrectionEpisode | VerificationGapEpisode | RepeatedAcceptanceEpisode;
+export type TypedInsufficientFinding = Extract<DerivedOperationalFinding, { readonly kind: 'insufficient-evidence' }>;
 
 export interface DetectorResult {
   readonly episodes: readonly DerivedOperationalEpisode[];
@@ -80,7 +83,7 @@ function typedEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 
         const reason = reasons[0];
         const outcome = outcomes[0];
         const evidenceEventIds = [original.id, changed.id, ...(reason ? [reason.id] : []), ...(outcome ? [outcome.id] : [])];
-        episodes.push(typedEpisode({
+        episodes.push(createTypedEpisode({
           id: stableId('episode', input.repositoryId, input.sessionId, typedDetectorVersion, 'correction', ...evidenceEventIds), repositoryId: input.repositoryId, sessionId: input.sessionId, detector: typedDetectorVersion, state: 'outcome-observed', evidenceEventIds,
           kind: 'correction', originalDecisionEvidenceId: original.id, changedDecisionEvidenceId: changed.id,
           ...(reason === undefined ? {} : { reasonEvidenceId: reason.id }), ...(outcome === undefined ? {} : { outcomeEvidenceId: outcome.id })
@@ -96,7 +99,7 @@ function typedEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 
     const criterionState = criterion === undefined ? 'unknown' : criterion.state === 'failed' ? 'unmet' : criterion.state === 'succeeded' ? 'met' : 'unknown';
     if (criterionState === 'met') continue;
     const evidenceEventIds = [closure.id, ...(criterion === undefined ? [] : [criterion.id])];
-    episodes.push(typedEpisode({
+    episodes.push(createTypedEpisode({
       id: stableId('episode', input.repositoryId, input.sessionId, typedDetectorVersion, 'verification-gap', ...evidenceEventIds), repositoryId: input.repositoryId, sessionId: input.sessionId, detector: typedDetectorVersion, state: 'unresolved', evidenceEventIds,
       kind: 'verification-gap', closureEvidenceId: closure.id, ...(criterion === undefined ? {} : { criterionEvidenceId: criterion.id }), criterionState
     }));
@@ -107,7 +110,7 @@ function typedEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 
     const first = acceptances[index]!; const repeated = acceptances[next]!;
     if (first.decisionKey !== repeated.decisionKey || first.scopeKey !== repeated.scopeKey || first.scopeKey === undefined) continue;
     const evidenceEventIds = [first.id, repeated.id];
-    episodes.push(typedEpisode({
+    episodes.push(createTypedEpisode({
       id: stableId('episode', input.repositoryId, input.sessionId, typedDetectorVersion, 'repeated-acceptance', ...evidenceEventIds), repositoryId: input.repositoryId, sessionId: input.sessionId, detector: typedDetectorVersion, state: 'outcome-observed', evidenceEventIds,
       kind: 'repeated-acceptance', firstAcceptanceEvidenceId: first.id, repeatedAcceptanceEvidenceId: repeated.id, scopeKey: first.scopeKey
     }));
@@ -119,14 +122,58 @@ function isDecision(value: EpisodeEvidence): boolean {
   return value.kind === 'tool-request' || value.kind === 'agent-claim' || value.kind === 'user-instruction';
 }
 
-function typedEpisode<T extends DerivedOperationalEpisode>(value: T): T {
-  return Object.freeze({ ...createOperationalEpisode(value), ...value }) as unknown as T;
+export function createTypedEpisode(value: TypedOperationalEpisode): TypedOperationalEpisode {
+  const base = createOperationalEpisode(value);
+  assertTypedEpisodeFields(value);
+  if (base.detector !== typedDetectorVersion) throw new TypeError('Typed episode detector is invalid.');
+  if (value.kind === 'correction') {
+    assertReferences(base.evidenceEventIds, [value.originalDecisionEvidenceId, value.changedDecisionEvidenceId, ...(value.reasonEvidenceId === undefined ? [] : [value.reasonEvidenceId]), ...(value.outcomeEvidenceId === undefined ? [] : [value.outcomeEvidenceId])]);
+    if (value.originalDecisionEvidenceId === value.changedDecisionEvidenceId) throw new TypeError('Correction decision evidence is invalid.');
+    return Object.freeze({ ...base, kind: value.kind, originalDecisionEvidenceId: value.originalDecisionEvidenceId, changedDecisionEvidenceId: value.changedDecisionEvidenceId, ...(value.reasonEvidenceId === undefined ? {} : { reasonEvidenceId: value.reasonEvidenceId }), ...(value.outcomeEvidenceId === undefined ? {} : { outcomeEvidenceId: value.outcomeEvidenceId }) });
+  }
+  if (value.kind === 'verification-gap') {
+    if (!['met', 'unmet', 'unknown'].includes(value.criterionState)) throw new TypeError('Verification criterion state is invalid.');
+    if (value.criterionState !== 'unknown' && value.criterionEvidenceId === undefined) throw new TypeError('Verification criterion evidence is invalid.');
+    assertReferences(base.evidenceEventIds, [value.closureEvidenceId, ...(value.criterionEvidenceId === undefined ? [] : [value.criterionEvidenceId])]);
+    return Object.freeze({ ...base, kind: value.kind, closureEvidenceId: value.closureEvidenceId, ...(value.criterionEvidenceId === undefined ? {} : { criterionEvidenceId: value.criterionEvidenceId }), criterionState: value.criterionState });
+  }
+  assertIdentifier(value.scopeKey, 'Repeated acceptance scope');
+  assertReferences(base.evidenceEventIds, [value.firstAcceptanceEvidenceId, value.repeatedAcceptanceEvidenceId]);
+  if (value.firstAcceptanceEvidenceId === value.repeatedAcceptanceEvidenceId) throw new TypeError('Repeated acceptance evidence is invalid.');
+  return Object.freeze({ ...base, kind: value.kind, firstAcceptanceEvidenceId: value.firstAcceptanceEvidenceId, repeatedAcceptanceEvidenceId: value.repeatedAcceptanceEvidenceId, scopeKey: value.scopeKey });
+}
+
+export function createTypedFinding(value: TypedInsufficientFinding): TypedInsufficientFinding {
+  assertFindingFields(value);
+  assertIdentifier(value.id, 'Finding identity'); assertIdentifier(value.episodeId, 'Finding episode identity');
+  if (value.kind !== 'insufficient-evidence') throw new TypeError('Finding kind is invalid.');
+  if (!Array.isArray(value.evidenceEventIds) || value.evidenceEventIds.length < 1) throw new TypeError('Finding evidence is invalid.');
+  for (const id of value.evidenceEventIds) assertIdentifier(id, 'Finding evidence identity');
+  if (typeof value.statement !== 'string' || value.statement.trim() !== value.statement || value.statement.length < 1 || value.statement.length > 2_048) throw new TypeError('Finding statement is invalid.');
+  return Object.freeze({ id: value.id, episodeId: value.episodeId, kind: value.kind, evidenceEventIds: Object.freeze([...value.evidenceEventIds]), statement: value.statement });
 }
 
 function insufficientFinding(input: DetectorInput, evidenceEventIds: readonly string[], missing: string): DerivedOperationalFinding {
   const id = stableId('finding', input.repositoryId, input.sessionId, typedDetectorVersion, 'insufficient-evidence', missing, ...evidenceEventIds);
-  return Object.freeze({ id, episodeId: id, kind: 'insufficient-evidence', evidenceEventIds: Object.freeze([...evidenceEventIds]), statement: `Missing ${missing}.` });
+  return createTypedFinding({ id, episodeId: id, kind: 'insufficient-evidence', evidenceEventIds, statement: `Missing ${missing}.` });
 }
+
+function assertReferences(evidenceEventIds: readonly string[], references: readonly string[]): void {
+  for (const reference of references) { assertIdentifier(reference, 'Typed episode evidence identity'); if (!evidenceEventIds.includes(reference)) throw new TypeError('Typed episode evidence reference is invalid.'); }
+}
+
+function assertTypedEpisodeFields(value: TypedOperationalEpisode): void {
+  const base = new Set(['id', 'repositoryId', 'sessionId', 'detector', 'state', 'evidenceEventIds', 'attemptedOperation', 'changedOperation', 'confirmingEventId', 'hypothesis']);
+  const fields = value.kind === 'correction' ? ['kind', 'originalDecisionEvidenceId', 'changedDecisionEvidenceId', 'reasonEvidenceId', 'outcomeEvidenceId'] : value.kind === 'verification-gap' ? ['kind', 'closureEvidenceId', 'criterionEvidenceId', 'criterionState'] : ['kind', 'firstAcceptanceEvidenceId', 'repeatedAcceptanceEvidenceId', 'scopeKey'];
+  for (const key of Reflect.ownKeys(value)) if (typeof key !== 'string' || (!base.has(key) && !fields.includes(key))) throw new TypeError('Typed episode payload is invalid.');
+}
+
+function assertFindingFields(value: TypedInsufficientFinding): void {
+  const fields = new Set(['id', 'episodeId', 'kind', 'evidenceEventIds', 'statement']);
+  for (const key of Reflect.ownKeys(value)) if (typeof key !== 'string' || !fields.has(key)) throw new TypeError('Typed finding payload is invalid.');
+}
+
+function assertIdentifier(value: string, field: string): void { if (typeof value !== 'string' || !identifierPattern.test(value)) throw new TypeError(`${field} is invalid.`); }
 
 function conventionEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 'candidates'> {
   const episodes: OperationalEpisode[] = [];

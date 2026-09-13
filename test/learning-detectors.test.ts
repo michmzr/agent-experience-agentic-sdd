@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import type { CapturedEventRecord } from '../src/capture/contracts.js';
-import { detectOperationalEpisodes, type CorrectionEpisode, type VerificationGapEpisode } from '../src/learning/detectors.js';
+import { createTypedEpisode, createTypedFinding, detectOperationalEpisodes, type CorrectionEpisode, type VerificationGapEpisode } from '../src/learning/detectors.js';
 import { readProjectToolConventions } from '../src/learning/project-conventions.js';
 import type { EpisodeEvidence } from '../src/learning/contracts.js';
 
@@ -161,6 +161,16 @@ test('uses a typed-evidence detector version without changing legacy detector re
   });
 
   assert.equal(result.episodes[0]?.detector, 'm9-typed-evidence@1');
+});
+
+test('rejects malformed typed episode and insufficient-evidence payloads at runtime', () => {
+  const base = { id: 'episode-1', repositoryId: 'repo-1', sessionId: 'session-1', detector: 'm9-typed-evidence@1', state: 'unresolved' as const, evidenceEventIds: ['closure-1'] };
+  assert.throws(() => createTypedEpisode({ ...base, kind: 'verification-gap', closureEvidenceId: 'closure-1', criterionState: 'missing' as never }), /criterion/i);
+  assert.throws(() => createTypedEpisode({ ...base, kind: 'verification-gap', closureEvidenceId: 'closure-1', criterionState: 'unmet' }), /criterion/i);
+  assert.throws(() => createTypedEpisode({ ...base, detector: 'm6-deterministic@1', kind: 'verification-gap', closureEvidenceId: 'closure-1', criterionState: 'unknown' }), /detector/i);
+  assert.throws(() => createTypedEpisode({ ...base, kind: 'repeated-acceptance', firstAcceptanceEvidenceId: 'approval-1', repeatedAcceptanceEvidenceId: 'approval-2', scopeKey: '', evidenceEventIds: ['approval-1', 'approval-2'] }), /scope/i);
+  assert.throws(() => createTypedEpisode({ ...base, kind: 'correction', originalDecisionEvidenceId: 'decision-1', changedDecisionEvidenceId: 'decision-2', evidenceEventIds: ['decision-1'] }), /evidence/i);
+  assert.throws(() => createTypedFinding({ id: 'finding-1', episodeId: 'episode-1', kind: 'insufficient-evidence', evidenceEventIds: [], statement: 'Missing relation.' }), /evidence/i);
 });
 
 test('derives a verification gap for closure with no recorded criterion', () => {

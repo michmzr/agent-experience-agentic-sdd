@@ -65,7 +65,7 @@ test('rejects forged evidence and discriminated references outside the job scope
   const validClaim = valid.claim();
   assert.throws(() => valid.saveResult(validClaim!.id, {
     episodeEvidence: [{ id: 'closure-1', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['closure-1'] }],
-    episodes: [{ id: 'gap-1', kind: 'verification-gap', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm9-typed-evidence@1', state: 'unresolved', evidenceEventIds: ['closure-1'], closureEvidenceId: 'forged-closure', criterionState: 'unknown' }],
+    episodes: [{ id: 'gap-1', kind: 'verification-gap', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm9-typed-evidence@1', state: 'unresolved', evidenceEventIds: ['closure-1', 'forged-closure'], closureEvidenceId: 'forged-closure', criterionState: 'unknown' }],
     findings: [], candidates: []
   }, validClaim!.leaseToken), /episode evidence.*scope/i);
   valid.close();
@@ -78,7 +78,7 @@ test('rejects forged evidence and discriminated references outside the job scope
       { id: 'original', kind: 'tool-request', state: 'observed', decisionKey: 'schema-update', scopeKey: 'repository', evidenceIds: ['original'] },
       { id: 'changed', kind: 'tool-request', state: 'succeeded', decisionKey: 'schema-update', scopeKey: 'repository', evidenceIds: ['original'] }
     ],
-    episodes: [{ id: 'correction-1', kind: 'correction', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm9-typed-evidence@1', state: 'outcome-observed', evidenceEventIds: ['original', 'changed'], originalDecisionEvidenceId: 'original', changedDecisionEvidenceId: 'changed', reasonEvidenceId: 'forged-reason' }],
+    episodes: [{ id: 'correction-1', kind: 'correction', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm9-typed-evidence@1', state: 'outcome-observed', evidenceEventIds: ['original', 'changed', 'forged-reason'], originalDecisionEvidenceId: 'original', changedDecisionEvidenceId: 'changed', reasonEvidenceId: 'forged-reason' }],
     findings: [], candidates: []
   }, correctionClaim!.leaseToken), /episode evidence.*scope/i);
   correction.close();
@@ -91,13 +91,28 @@ test('uses the typed-evidence detector version for default analysis jobs', () =>
   repository.close();
 });
 
+test('rejects typed evidence IDs that are already owned by another repository scope', () => {
+  const databasePath = path();
+  const first = new OperationalLearningRepository(databasePath);
+  first.enqueue({ repositoryId: 'repo-a', sessionId: 'session-1', inputHighWater: 1 });
+  const firstClaim = first.claim();
+  first.saveResult(firstClaim!.id, { episodeEvidence: [{ id: 'shared-evidence', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['shared-evidence'] }], episodes: [], findings: [], candidates: [] }, firstClaim!.leaseToken);
+  first.close();
+
+  const second = new OperationalLearningRepository(databasePath);
+  second.enqueue({ repositoryId: 'repo-b', sessionId: 'session-1', inputHighWater: 1 });
+  const secondClaim = second.claim();
+  assert.throws(() => second.saveResult(secondClaim!.id, { episodeEvidence: [{ id: 'shared-evidence', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['shared-evidence'] }], episodes: [], findings: [], candidates: [] }, secondClaim!.leaseToken), /collision.*scope/i);
+  second.close();
+});
+
 test('rejects a typed episode whose evidence was not persisted for the job scope', () => {
   const repository = new OperationalLearningRepository(path());
   const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
   const claimed = repository.claim();
   assert.throws(() => repository.saveResult(claimed!.id, {
     episodeEvidence: [],
-    episodes: [{ id: 'gap-missing', kind: 'verification-gap', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm6-deterministic@1', state: 'unresolved', evidenceEventIds: ['missing-evidence'], closureEvidenceId: 'missing-evidence', criterionState: 'unknown' }],
+    episodes: [{ id: 'gap-missing', kind: 'verification-gap', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm9-typed-evidence@1', state: 'unresolved', evidenceEventIds: ['missing-evidence'], closureEvidenceId: 'missing-evidence', criterionState: 'unknown' }],
     findings: [], candidates: []
   }, claimed!.leaseToken), /evidence.*job/i);
   repository.close();
