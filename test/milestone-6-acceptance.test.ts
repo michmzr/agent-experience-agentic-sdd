@@ -31,7 +31,8 @@ test('reports scoped convention candidates and a privacy-bounded analysis shape'
     const report = runCli(['analysis', 'report', '--repository-id', 'repo-1', '--data-dir', dataDir, '--json']);
     assert.equal(report.exitCode, 0);
     const parsed = JSON.parse(report.stdout) as Record<string, unknown>;
-    assert.deepEqual(Object.keys(parsed).sort(), ['candidates', 'coverage', 'findings', 'hypotheses', 'unverifiedRepairs', 'verifiedKnowledge', 'version']);
+    assert.deepEqual(Object.keys(parsed).sort(), ['candidates', 'cost', 'coverage', 'findings', 'hypotheses', 'unverifiedRepairs', 'verifiedKnowledge', 'version']);
+    assert.deepEqual(parsed.cost, { completedRuns: 1, total: 0 });
     assert.equal((parsed.candidates as unknown[]).length, 1);
     assert.equal((parsed.unverifiedRepairs as unknown[]).length, 0);
     assert.equal(report.stdout.includes('credential-like-marker'), false);

@@ -15,6 +15,40 @@ export const MAX_CAPTURE_ARGUMENTS = 64;
 export type CapturePhase = 'pre-intent' | 'pre-action' | 'post-result';
 export type CaptureOutcome = 'succeeded' | 'failed' | 'unknown';
 
+/** Additive v2 lifecycle records. They never alter version 1 session facts. */
+export interface CaptureConversation {
+  readonly id: string;
+  readonly source: AgentSource;
+  readonly firstReceiptAt: string;
+  readonly identifierProvenance: 'hook-session-id';
+}
+
+export interface CaptureRun {
+  readonly id: string;
+  readonly conversationId: string;
+  readonly origin: 'startup' | 'resume' | 'unknown';
+  readonly state: 'open' | 'ended' | 'unresolved';
+  readonly receiptStartedAt: string;
+  readonly sourceStartedAt?: string;
+  readonly receiptEndedAt?: string;
+  readonly sourceEndedAt?: string;
+}
+
+export interface LifecycleSignal {
+  readonly sourceEventId: string;
+  readonly source: AgentSource;
+  readonly conversationId: string;
+  readonly kind: 'start' | 'end';
+  readonly startOrigin?: 'startup' | 'resume';
+  readonly receiptAt: string;
+  readonly sourceAt?: string;
+}
+
+export interface RecordedLifecycleSignal extends LifecycleSignal {
+  readonly resolution: 'resolved' | 'unresolved';
+  readonly resolvedRunId?: string;
+}
+
 export interface NormalizedCaptureEvent {
   readonly id: string;
   readonly source: AgentSource;

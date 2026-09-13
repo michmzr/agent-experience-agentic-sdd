@@ -5,6 +5,10 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { runCli, runCliAsync } from '../src/cli.js';
+import { CaptureSpool } from '../src/capture/spool.js';
+import { OperationalLearningRepository } from '../src/learning/repository.js';
+import { normalizeMappedCapture } from '../src/capture/normalization.js';
+import { ExperienceStore } from '../src/storage/experience-store.js';
 import { initializeGitRepository } from './helpers/git-repository.js';
 
 test('returns an error for an unknown command', () => {
@@ -38,6 +42,202 @@ test('returns a nonzero status when repository hooks are unavailable', () => {
     const result = runCli(['status', '--repository', process.cwd(), '--json', '--data-dir', dataDir]);
     assert.equal(result.exitCode, 1);
     assert.match(result.stdout, /"status":"not-ready"/);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('reports installation, delivery, data quality, and analysis independently in schema version 2', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-v2-'));
+  try {
+    const initial = JSON.parse(runCli(['status', '--repository', process.cwd(), '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
+      schemaVersion: number; installation: { state: string }; delivery: { state: string }; dataQuality: { state: string; denominator: { state: string } }; analysis: { state: string; result: string; coverage: { required: boolean; detectors: unknown[] } };
+    };
+    assert.equal(initial.schemaVersion, 2);
+    assert.equal(initial.installation.state, 'not-ready');
+    assert.equal(initial.delivery.state, 'unknown');
+    assert.equal(initial.dataQuality.state, 'not-applicable');
+    assert.equal(initial.dataQuality.denominator.state, 'unavailable');
+    assert.equal(initial.analysis.state, 'not-run');
+    assert.equal(initial.analysis.result, 'unavailable');
+    assert.deepEqual(initial.analysis.coverage, { required: true, total: 0, truncated: false, detectors: [] });
+
+    const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+    spool.admitWithReceipt({ kind: 'session-start', session: { source: 'codex', id: 'session-health' as never, startedAt: '2026-09-13T08:00:00.000Z', repositoryId: 'repo-health' as never } }, { source: 'codex', receivedAt: '2026-09-13T08:00:00.000Z' });
+    spool.close();
+    const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    learning.enqueue({ repositoryId: 'repo-health', sessionId: 'session-health', inputHighWater: 3 });
+    learning.close();
+
+    const pending = JSON.parse(runCli(['status', '--repository-id', 'repo-health', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
+      delivery: { state: string }; dataQuality: { admittedOperations: { state: string }; receipts: { accounting: string } }; analysis: { state: string; desiredThrough: number; completedThrough: number; result: string; coverage: { detectors: unknown[] } };
+    };
+    assert.equal(pending.delivery.state, 'backlogged');
+    assert.deepEqual(pending.dataQuality.admittedOperations, { state: 'unavailable' });
+    assert.equal(pending.dataQuality.receipts.accounting, 'unavailable');
+    assert.equal(pending.analysis.state, 'pending');
+    assert.equal(pending.analysis.desiredThrough, 3);
+    assert.equal(pending.analysis.completedThrough, 0);
+    assert.equal(pending.analysis.result, 'unavailable');
+    assert.deepEqual(pending.analysis.coverage.detectors, []);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('keeps legacy status JSON byte-for-byte compatible unless schema version 2 is explicit', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-legacy-'));
+  try {
+    const legacy = runCli(['status-global', '--json', '--data-dir', dataDir]);
+    const repeated = runCli(['status-global', '--json', '--data-dir', dataDir]);
+    assert.equal(repeated.stdout, legacy.stdout);
+    assert.equal(runCli(['status-global', '--schema-version', '1', '--json', '--data-dir', dataDir]).exitCode, 2);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('renders only version 2 dimensions and derives status exit from installation', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-human-'));
+  const root = mkdtempSync(join(tmpdir(), 'ael-health-human-repo-'));
+  try {
+    initializeGitRepository(root);
+    const notReady = runCli(['status', '--repository', root, '--schema-version', '2', '--data-dir', dataDir]);
+    assert.equal(notReady.exitCode, 1);
+    assert.match(notReady.stdout, /^Installation: not-ready$/m);
+    assert.match(notReady.stdout, /^Delivery: unknown$/m);
+    assert.equal(notReady.stdout.includes('Root:'), false);
+    assert.equal(notReady.stdout.includes('Database:'), false);
+
+    const initialized = runCli(['init', '--scope', 'repo', '--hooks', 'cursor', '--data-dir', dataDir, '--json'], { workingDirectory: root, cliEntrypoint: join(process.cwd(), 'dist', 'src', 'cli.js') });
+    assert.equal(initialized.exitCode, 0, initialized.stderr);
+    const readyJson = runCli(['status', '--repository', root, '--schema-version', '2', '--data-dir', dataDir, '--json']);
+    assert.equal(readyJson.exitCode, 0);
+    assert.equal((JSON.parse(readyJson.stdout) as { installation: { state: string } }).installation.state, 'ready');
+    const ready = runCli(['status', '--repository', root, '--schema-version', '2', '--data-dir', dataDir]);
+    assert.equal(ready.exitCode, 0);
+    assert.match(ready.stdout, /^Installation: ready$/m);
+
+    const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    learning.enqueue({ repositoryId: 'repo-failed', sessionId: 'session-failed', inputHighWater: 1 });
+    const job = learning.claim('repo-failed')!;
+    learning.retry(job.id, 'execution-failure', job.leaseToken);
+    learning.close();
+    const failed = runCli(['analysis', 'report', '--repository-id', 'repo-failed', '--schema-version', '2', '--data-dir', dataDir]);
+    assert.equal(failed.exitCode, 0);
+    assert.match(failed.stdout, /^Analysis: failed$/m);
+    assert.equal(failed.stdout.includes('findings'), false);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('reports unknown results and a completed no-findings analysis without leaking paths globally', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-complete-'));
+  const repositoryId = 'repo-quality';
+  try {
+    const store = new ExperienceStore(join(dataDir, 'experience.sqlite'));
+    store.appendIncremental({
+      session: { id: 'session-quality' as never, source: 'codex', startedAt: '2026-09-13T09:00:00.000Z', repositoryId: repositoryId as never },
+      event: normalizeMappedCapture({ source: 'codex', sourceEventId: 'request-quality', sessionId: 'session-quality' as never, phase: 'pre-action', occurredAt: '2026-09-13T09:00:00.000Z', tool: 'shell', action: 'run', summary: 'Run check.' })
+    });
+    store.close();
+    const unknown = JSON.parse(runCli(['status', '--repository-id', repositoryId, '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
+      dataQuality: { state: string; admittedOperations: { state: string }; denominator: { state: string; count?: number }; results: { linked: number; unknown: Record<string, number> }; observedTimeRange: { first: string; last: string } }; analysis: { state: string };
+    };
+    assert.equal(unknown.dataQuality.state, 'degraded');
+    assert.deepEqual(unknown.dataQuality.admittedOperations, { state: 'unavailable' });
+    assert.deepEqual(unknown.dataQuality.denominator, { state: 'known', count: 1 });
+    assert.deepEqual(unknown.dataQuality.results, { linked: 0, unknown: { 'result-not-delivered': 1 } });
+    assert.deepEqual(unknown.dataQuality.observedTimeRange, { first: '2026-09-13T09:00:00.000Z', last: '2026-09-13T09:00:00.000Z' });
+    assert.equal(unknown.analysis.state, 'not-run');
+
+    const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    learning.enqueue({ repositoryId, sessionId: 'session-quality', inputHighWater: 2 });
+    const job = learning.claim(repositoryId)!;
+    learning.saveResult(job.id, { episodes: [], findings: [], candidates: [], coverage: [{ detector: 'm6-deterministic@1', status: 'completed', examinedEvents: 2, findings: 0 }], cost: 3 }, job.leaseToken);
+    learning.close();
+    const complete = JSON.parse(runCli(['analysis', 'report', '--repository-id', repositoryId, '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
+      schemaVersion: number; analysis: { state: string; result: string; cost: { completedRuns: number; total: number }; range: { from: number; through: number }; coverage: { required: boolean; detectors: unknown[] } };
+    };
+    assert.equal(complete.schemaVersion, 2);
+    assert.equal(complete.analysis.state, 'completed');
+    assert.equal(complete.analysis.result, 'no-findings');
+    assert.deepEqual(complete.analysis.cost, { completedRuns: 1, total: 3 });
+    assert.deepEqual(complete.analysis.range, { from: 1, through: 2 });
+    assert.deepEqual(complete.analysis.coverage, { required: true, total: 1, truncated: false, detectors: [{ detector: 'm6-deterministic@1', status: 'completed', examinedEvents: 2, findings: 0 }] });
+
+    const global = runCli(['status-global', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout;
+    assert.equal(global.includes(dataDir), false);
+    assert.equal(global.includes('experience.sqlite'), false);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('requires coverage for every completed stream range and does not reuse repository receipts', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-ranges-'));
+  try {
+    const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+    spool.admitWithReceipt({ kind: 'session-start', session: { source: 'codex', id: 'session-a' as never, startedAt: '2026-09-13T10:00:00.000Z', repositoryId: 'repo-a' as never } }, { source: 'codex', receivedAt: '2026-09-13T10:00:00.000Z' });
+    spool.close();
+    const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    learning.enqueue({ repositoryId: 'repo-a', sessionId: 'session-a', inputHighWater: 1 });
+    const first = learning.claim('repo-a')!;
+    learning.saveResult(first.id, { episodes: [], findings: [], candidates: [] }, first.leaseToken);
+    learning.enqueue({ repositoryId: 'repo-a', sessionId: 'session-b', inputHighWater: 1 });
+    const second = learning.claim('repo-a')!;
+    learning.saveResult(second.id, { episodes: [], findings: [], candidates: [], coverage: [{ detector: 'm6-deterministic@1', status: 'completed', examinedEvents: 1, findings: 0 }] }, second.leaseToken);
+    learning.close();
+
+    const reportA = JSON.parse(runCli(['status', '--repository-id', 'repo-a', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as { dataQuality: { receipts: { accounting: string } }; analysis: { state: string; result: string } };
+    const reportB = JSON.parse(runCli(['status', '--repository-id', 'repo-b', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as { dataQuality: { receipts: { accounting: string }; admittedOperations: { state: string } } };
+    assert.equal(reportA.analysis.state, 'incomplete');
+    assert.equal(reportA.analysis.result, 'unavailable');
+    assert.equal(reportA.dataQuality.receipts.accounting, 'unavailable');
+    assert.equal(reportB.dataQuality.receipts.accounting, 'unavailable');
+    assert.deepEqual(reportB.dataQuality.admittedOperations, { state: 'unavailable' });
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('does not call an uncovered completed stream a no-findings analysis', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-uncovered-'));
+  try {
+    const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    learning.enqueue({ repositoryId: 'repo-uncovered', sessionId: 'session-uncovered', inputHighWater: 1 });
+    const job = learning.claim('repo-uncovered')!;
+    learning.saveResult(job.id, { episodes: [], findings: [], candidates: [] }, job.leaseToken);
+    learning.close();
+
+    const report = JSON.parse(runCli(['analysis', 'report', '--repository-id', 'repo-uncovered', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
+      analysis: { state: string; result: string; coverage: { required: boolean; detectors: unknown[] } };
+    };
+    assert.equal(report.analysis.state, 'incomplete');
+    assert.equal(report.analysis.result, 'unavailable');
+    assert.deepEqual(report.analysis.coverage, { required: true, total: 0, truncated: false, detectors: [] });
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('bounds version 2 detector summaries while retaining aggregate high waters', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-bounds-'));
+  try {
+    const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    for (let index = 0; index < 70; index += 1) learning.enqueue({ repositoryId: 'repo-bounded', sessionId: `session-${index}`, detectorVersion: `detector-${index}@1`, inputHighWater: 1 });
+    learning.close();
+    const report = JSON.parse(runCli(['analysis', 'report', '--repository-id', 'repo-bounded', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as { analysis: { detectorVersions: string[]; detectorVersionTotal: number; detectorVersionsTruncated: boolean; desiredThrough: number; coverage: { detectors: unknown[] } } };
+    assert.equal(report.analysis.desiredThrough, 70);
+    assert.equal(report.analysis.detectorVersions.length, 64);
+    assert.equal(report.analysis.detectorVersionTotal, 70);
+    assert.equal(report.analysis.detectorVersionsTruncated, true);
+    assert.equal(report.analysis.coverage.detectors.length, 0);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('uses coverage failures beyond the displayed sample when deriving analysis state', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-coverage-total-'));
+  try {
+    const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    for (let index = 0; index < 65; index += 1) {
+      learning.enqueue({ repositoryId: 'repo-coverage-total', sessionId: `coverage-${index}`, detectorVersion: `coverage-${index}@1`, inputHighWater: 1 });
+      const job = learning.claim('repo-coverage-total')!;
+      learning.saveResult(job.id, { episodes: [], findings: [], candidates: [], coverage: [{ detector: `coverage-${index}@1`, status: index === 64 ? 'failed' : 'completed', examinedEvents: 1, findings: 0 }] }, job.leaseToken);
+    }
+    learning.close();
+    const report = JSON.parse(runCli(['analysis', 'report', '--repository-id', 'repo-coverage-total', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as { analysis: { state: string; coverage: { total: number; truncated: boolean; detectors: unknown[] } } };
+    assert.equal(report.analysis.state, 'failed');
+    assert.equal(report.analysis.coverage.total, 65);
+    assert.equal(report.analysis.coverage.truncated, true);
+    assert.equal(report.analysis.coverage.detectors.length, 64);
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 

@@ -8,6 +8,7 @@ import { CaptureSpool, type CaptureSpoolStatus } from './spool.js';
 
 export interface LearningAdmission {
   enqueueCommittedSession(repositoryId: string, sessionId: string): void;
+  runNext?(options?: { readonly maxEvents?: number; readonly deadlineMs?: number; readonly repositoryId?: string }): unknown;
 }
 
 export interface DrainCaptureSpoolInput {
@@ -20,11 +21,13 @@ export interface DrainCaptureSpoolInput {
 export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolStatus {
   const spool = new CaptureSpool(join(dirname(input.databasePath), 'capture-spool.sqlite'));
   const lockOwner = randomUUID();
+  let ownsDrainLock = false;
   let store: ExperienceStore | undefined;
   try {
     const settings = loadProjectSettings(input.projectRoot ?? process.cwd());
     const lockNow = new Date().toISOString();
     if (!spool.tryAcquireDrainLock(lockOwner, lockNow, settings.captureDeliveryDeadlineMs + 1_000)) return spool.status();
+    ownsDrainLock = true;
     store = new ExperienceStore(input.databasePath);
     const idleDeadline = Date.now() + settings.captureDeliveryDeadlineMs;
     do {
@@ -35,8 +38,12 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
         if (Date.parse(observedAt) > Date.parse(deadlineAt)) spool.recordDelayedDelivery(claimed.deliveryId, deadlineAt, observedAt);
         try {
           persistPassiveCapture(store, claimed.record);
-          admitCommittedSession(store, claimed.record, settings.automaticOperationalLearning !== false ? input.learningAdmission : undefined);
+          const admitted = admitCommittedSession(store, claimed.record, settings.automaticOperationalLearning !== false ? input.learningAdmission : undefined);
           spool.acknowledge(claimed.deliveryId, input.now());
+          if (admitted) {
+            try { input.learningAdmission?.runNext?.({ deadlineMs: Math.min(settings.captureDeliveryDeadlineMs, 250) }); }
+            catch { /* Analysis execution never affects acknowledged capture. */ }
+          }
         } catch (error) {
           if (isRetryableCaptureError(error)) spool.retry(claimed.deliveryId, input.now());
           else if (error instanceof TypeError) spool.quarantine(claimed.deliveryId, 'CORRUPT', input.now());
@@ -50,17 +57,22 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
     return spool.status();
   } finally {
     try { store?.close(); } finally {
-      try { spool.releaseDrainLock(lockOwner); } finally { spool.close(); }
+      try { if (ownsDrainLock) spool.completeDrain(lockOwner); } finally { spool.close(); }
     }
   }
 }
 
-function admitCommittedSession(store: ExperienceStore, record: Parameters<typeof persistPassiveCapture>[1], learningAdmission: LearningAdmission | undefined): void {
-  if (!learningAdmission) return;
+function admitCommittedSession(store: ExperienceStore, record: Parameters<typeof persistPassiveCapture>[1], learningAdmission: LearningAdmission | undefined): boolean {
+  if (!learningAdmission) return false;
   const sessionId = record.kind === 'session-start' ? record.session.id : record.kind === 'session-end' ? record.sessionId : record.event.sessionId;
   const session = store.loadSession(sessionId);
-  if (!session?.repositoryId) return;
-  try { learningAdmission.enqueueCommittedSession(session.repositoryId, session.id); } catch { /* Analysis admission never affects capture delivery. */ }
+  if (!session?.repositoryId) return false;
+  try { learningAdmission.enqueueCommittedSession(session.repositoryId, session.id); return true; } catch { return false; }
+}
+
+export function waitForWorkerCompletion(dataDirectory: string): boolean {
+  const spool = new CaptureSpool(join(dataDirectory, 'capture-spool.sqlite'));
+  try { return spool.isDrainComplete(); } finally { spool.close(); }
 }
 
 function isRetryableCaptureError(error: unknown): boolean {

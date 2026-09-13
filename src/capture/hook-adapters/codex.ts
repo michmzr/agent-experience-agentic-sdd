@@ -12,17 +12,19 @@ export function adaptCodexPassiveHook(payload: unknown, receivedAt: string, repo
   const record = hookRecord(payload);
   switch (record.hook_event_name) {
     case 'SessionStart':
-      if (record.source !== 'startup') return undefined;
+      if (record.source !== 'startup' && record.source !== 'resume') return undefined;
       return Object.freeze({
         kind: 'session-start',
-        session: Object.freeze({ id: sessionId(record.session_id), source: 'codex', startedAt: receivedAt, ...(repositoryId === undefined ? {} : { repositoryId }) })
+        session: Object.freeze({ id: sessionId(record.session_id), source: 'codex', startedAt: receivedAt, ...(repositoryId === undefined ? {} : { repositoryId }) }),
+        lifecycle: lifecycleStart(record, receivedAt)
       });
     case 'SessionEnd':
       return Object.freeze({
         kind: 'session-end',
         source: 'codex',
         sessionId: sessionId(record.session_id),
-        endedAt: receivedAt
+        endedAt: receivedAt,
+        lifecycle: lifecycleEnd(record, receivedAt)
       });
     case 'PreToolUse':
       return technical(record, 'pre-action', receivedAt);
@@ -31,6 +33,41 @@ export function adaptCodexPassiveHook(payload: unknown, receivedAt: string, repo
     default:
       return undefined;
   }
+}
+
+function lifecycleStart(record: Readonly<Record<string, unknown>>, receiptAt: string) {
+  const source = stringField(record.source);
+  if (source !== 'startup' && source !== 'resume') throw rejected();
+  const id = sessionId(record.session_id);
+  return Object.freeze({
+    sourceEventId: `${id}:SessionStart:${source}:${receiptAt}`,
+    source: 'codex' as const,
+    kind: 'start' as const,
+    startOrigin: source,
+    conversationId: id,
+    receiptAt,
+    ...(sourceTimestamp(record) === undefined ? {} : { sourceAt: sourceTimestamp(record) })
+  });
+}
+
+function lifecycleEnd(record: Readonly<Record<string, unknown>>, receiptAt: string) {
+  const id = sessionId(record.session_id);
+  return Object.freeze({
+    sourceEventId: `${id}:SessionEnd:${receiptAt}`,
+    source: 'codex' as const,
+    kind: 'end' as const,
+    conversationId: id,
+    receiptAt,
+    ...(sourceTimestamp(record) === undefined ? {} : { sourceAt: sourceTimestamp(record) })
+  });
+}
+
+function sourceTimestamp(record: Readonly<Record<string, unknown>>): string | undefined {
+  const value = record.timestamp;
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw rejected();
+  assertCanonicalTimestamp(value);
+  return value;
 }
 
 function technical(

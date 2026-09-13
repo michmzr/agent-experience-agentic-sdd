@@ -211,8 +211,11 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
     return service.runOperationalAnalysis(requiredString(parsed.options, 'repository-id'));
   }
   if (command === 'analysis' && subcommand === 'report' && rest.length === 0) {
-    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'session']);
-    return service.operationalAnalysisReport(requiredString(parsed.options, 'repository-id'), optionalString(parsed.options, 'session'));
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'session', 'schema-version']);
+    const schemaVersion = optionalSchemaVersion(parsed.options);
+    return schemaVersion === 2
+      ? service.operationalAnalysisReportV2(requiredString(parsed.options, 'repository-id'))
+      : service.operationalAnalysisReport(requiredString(parsed.options, 'repository-id'), optionalString(parsed.options, 'session'));
   }
   if (command === 'experience' && subcommand === 'inspect' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository']);
@@ -250,10 +253,14 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
     return service.sessionEvidence(rest[0]);
   }
   if (command === 'status-global' && subcommand === undefined && rest.length === 0) {
-    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.statusGlobal(optionalRepositoryId(parsed.options)?.id);
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository', 'schema-version']);
+    const schemaVersion = optionalSchemaVersion(parsed.options); const repository = optionalRepositoryId(parsed.options);
+    return schemaVersion === 2 ? service.statusGlobalV2(repository?.id) : service.statusGlobal(repository?.id);
   }
   if (command === 'status' && subcommand === undefined && rest.length === 0) {
-    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.status(repositorySelection(parsed.options, options.workingDirectory));
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository', 'schema-version']);
+    const schemaVersion = optionalSchemaVersion(parsed.options); const repository = repositorySelection(parsed.options, options.workingDirectory);
+    return schemaVersion === 2 ? service.statusV2(repository) : service.status(repository);
   }
   if (command === 'runtime' && subcommand === 'evaluate' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'input', 'json', 'profile', 'refresh']);
@@ -378,6 +385,12 @@ function assertNoUnknownOptions(options: Map<string, string | true>, allowed: re
 function optionalString(options: Map<string, string | true>, name: string): string | undefined {
   const value = options.get(name); if (value === undefined) return undefined; if (value === true) throw new SyntaxError(`Option requires a value: --${name}.`); return value;
 }
+function optionalSchemaVersion(options: Map<string, string | true>): 2 | undefined {
+  const version = optionalString(options, 'schema-version');
+  if (version === undefined) return undefined;
+  if (version !== '2') throw new SyntaxError('Schema version must be 2.');
+  return 2;
+}
 function requiredString(options: Map<string, string | true>, name: string): string {
   const value = optionalString(options, name); if (value === undefined) throw new SyntaxError(`Option is required: --${name}.`); return value;
 }
@@ -443,13 +456,15 @@ function repositoryId(options: Map<string, string | true>, workingDirectory?: st
   return repositorySelection(options, workingDirectory).id;
 }
 function success(value: unknown, json: boolean, positionals: readonly string[]): CliResult {
+  const version2 = value as { schemaVersion?: number; installation?: { state?: string } };
   const exitCode = (positionals[0] === 'runtime' && positionals[1] === 'evaluate' && (value as { outcome?: string }).outcome === 'BLOCK')
-    || (positionals[0] === 'status' && (value as { status?: string }).status !== 'ready')
+    || (positionals[0] === 'status' && (version2.schemaVersion === 2 ? version2.installation?.state !== 'ready' : (value as { status?: string }).status !== 'ready'))
     || (positionals[0] === 'hooks' && positionals[1] === 'verify' && (value as { status?: string }).status !== 'ready') ? 1 : 0;
   return json ? { exitCode, stdout: `${JSON.stringify(value)}\n`, stderr: '' } : { exitCode, stdout: `${humanOutput(value, positionals)}\n`, stderr: '' };
 }
 function humanOutput(value: unknown, positionals: readonly string[]): string {
   const [command, subcommand] = positionals;
+  if ((command === 'status' || command === 'status-global' || (command === 'analysis' && subcommand === 'report')) && (value as { schemaVersion?: number }).schemaVersion === 2) return formatVersion2Health(value as Version2HealthReport, command, subcommand);
   if (command === 'init') {
     const workspace = value as { kind?: string; id?: string; databasePath?: string };
     return workspace.kind === 'workspace' ? `Initialized workspace ${workspace.id}.` : `Initialized local experience store at ${workspace.databasePath}.`;
@@ -526,6 +541,23 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
     return `Refreshed ${countLabel(result.rules, 'runtime rule')} from trusted commit ${result.trustedCommit}.`;
   }
   return JSON.stringify(value);
+}
+interface Version2HealthReport {
+  readonly installation?: { readonly state: string };
+  readonly delivery?: { readonly state: string };
+  readonly dataQuality?: { readonly state: string; readonly denominator?: { readonly state: string } };
+  readonly analysis?: { readonly state: string; readonly result: string; readonly coverage: { readonly total?: number; readonly truncated?: boolean; readonly detectors: readonly unknown[] } };
+  readonly repositories?: readonly { readonly repository: { readonly id: string }; readonly installation: { readonly state: string }; readonly delivery: { readonly state: string }; readonly dataQuality: { readonly state: string }; readonly analysis: { readonly state: string; readonly result: string } }[];
+}
+function formatVersion2Health(report: Version2HealthReport, command: string | undefined, subcommand: string | undefined): string {
+  if (command === 'analysis' && subcommand === 'report') {
+    const analysis = report.analysis!;
+    return [`Analysis: ${analysis.state}`, `Result: ${analysis.result}`, `Coverage: ${analysis.coverage.total ?? analysis.coverage.detectors.length}${analysis.coverage.truncated ? ' (truncated)' : ''}`].join('\n');
+  }
+  if (command === 'status-global') {
+    return [`Installation: ${report.installation?.state ?? 'unknown'}`, ...(report.repositories ?? []).map(({ repository, installation, delivery, dataQuality, analysis }) => `${repository.id}: installation=${installation.state}; delivery=${delivery.state}; dataQuality=${dataQuality.state}; analysis=${analysis.state}/${analysis.result}`)].join('\n');
+  }
+  return [`Installation: ${report.installation!.state}`, `Delivery: ${report.delivery!.state}`, `Data quality: ${report.dataQuality!.state}`, `Analysis: ${report.analysis!.state}`, `Analysis result: ${report.analysis!.result}`, `Coverage: ${report.analysis!.coverage.total ?? report.analysis!.coverage.detectors.length}${report.analysis!.coverage.truncated ? ' (truncated)' : ''}`].join('\n');
 }
 interface KnowledgeRecord { readonly id: string; readonly state: string; readonly statement: string; readonly evidenceIds: readonly string[]; readonly authoritative?: boolean; }
 function formatRecords(records: readonly { session: { id: string; source: string; startedAt: string; endedAt?: string }; events: readonly { phase: string; occurredAt: string; summary: string; outcome?: string }[] }[]): string {

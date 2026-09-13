@@ -1,107 +1,143 @@
 import type { DatabaseSync } from 'node:sqlite';
-
+import { randomUUID } from 'node:crypto';
 import { openExperienceDatabase } from '../storage/database.js';
 import { createLearningCandidate, createOperationalEpisode, type AnalysisCoverage, type LearningCandidate, type OperationalEpisode, type OperationalFinding } from './contracts.js';
+import type { InstructionContext, ProjectToolConvention } from './project-conventions.js';
 
 const schema = `
-  CREATE TABLE IF NOT EXISTS operational_analysis_jobs (
-    id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, session_id TEXT NOT NULL, input_high_water INTEGER NOT NULL,
-    state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-    UNIQUE(repository_id, session_id, input_high_water)
-  );
-  CREATE TABLE IF NOT EXISTS operational_episodes (
-    id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, session_id TEXT NOT NULL, detector TEXT NOT NULL, state TEXT NOT NULL,
-    evidence_json TEXT NOT NULL, payload_json TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS operational_findings (
-    id TEXT PRIMARY KEY, episode_id TEXT NOT NULL REFERENCES operational_episodes(id), kind TEXT NOT NULL, evidence_json TEXT NOT NULL, statement TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS operational_candidates (
-    id TEXT PRIMARY KEY, episode_id TEXT NOT NULL REFERENCES operational_episodes(id), kind TEXT NOT NULL, state TEXT NOT NULL,
-    statement TEXT NOT NULL, conditions_json TEXT NOT NULL, procedure_json TEXT NOT NULL, invalidation_json TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS operational_candidate_evidence (
-    candidate_id TEXT NOT NULL REFERENCES operational_candidates(id), event_id TEXT NOT NULL, polarity TEXT NOT NULL,
-    PRIMARY KEY(candidate_id, event_id)
-  );
-  CREATE TABLE IF NOT EXISTS operational_analysis_coverage (
-    job_id TEXT NOT NULL REFERENCES operational_analysis_jobs(id), detector TEXT NOT NULL, status TEXT NOT NULL,
-    examined_events INTEGER NOT NULL, findings INTEGER NOT NULL, PRIMARY KEY(job_id, detector)
-  );
-`;
-
-export interface AnalysisJob { readonly id: string; readonly repositoryId: string; readonly sessionId: string; readonly inputHighWater: number; readonly state: 'pending' | 'running' | 'completed' | 'retryable-failure' | 'quarantined-input'; readonly attempts: number; }
-export interface LearningResult { readonly episodes: readonly OperationalEpisode[]; readonly findings: readonly OperationalFinding[]; readonly candidates: readonly LearningCandidate[]; readonly coverage?: readonly AnalysisCoverage[]; }
-export interface OperationalLearningReport { readonly candidates: readonly (Omit<LearningCandidate, 'state'> & { readonly state: 'candidate' | 'disputed' })[]; readonly findings: readonly OperationalFinding[]; readonly episodes: readonly OperationalEpisode[]; readonly coverage: readonly AnalysisCoverage[]; }
+CREATE TABLE IF NOT EXISTS operational_analysis_jobs (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, session_id TEXT NOT NULL, detector_version TEXT NOT NULL DEFAULT 'm6-deterministic@1', input_high_water INTEGER NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, stream_id TEXT, input_from INTEGER NOT NULL DEFAULT 1, input_through INTEGER, lease_token TEXT, lease_expires_at TEXT, next_eligible_at TEXT, input_digest TEXT, cost REAL, UNIQUE(repository_id, session_id, detector_version, input_high_water));
+CREATE TABLE IF NOT EXISTS operational_analysis_streams (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, session_id TEXT NOT NULL, detector_version TEXT NOT NULL, desired_through INTEGER NOT NULL, completed_through INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(repository_id, session_id, detector_version));
+CREATE TABLE IF NOT EXISTS operational_episodes (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, session_id TEXT NOT NULL, detector TEXT NOT NULL, state TEXT NOT NULL, evidence_json TEXT NOT NULL, payload_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS operational_findings (id TEXT PRIMARY KEY, episode_id TEXT NOT NULL REFERENCES operational_episodes(id), kind TEXT NOT NULL, evidence_json TEXT NOT NULL, statement TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS operational_candidates (id TEXT PRIMARY KEY, episode_id TEXT NOT NULL REFERENCES operational_episodes(id), kind TEXT NOT NULL, state TEXT NOT NULL, statement TEXT NOT NULL, conditions_json TEXT NOT NULL, procedure_json TEXT NOT NULL, invalidation_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS operational_candidate_evidence (candidate_id TEXT NOT NULL REFERENCES operational_candidates(id), event_id TEXT NOT NULL, polarity TEXT NOT NULL, PRIMARY KEY(candidate_id, event_id));
+CREATE TABLE IF NOT EXISTS operational_analysis_coverage (job_id TEXT NOT NULL REFERENCES operational_analysis_jobs(id), detector TEXT NOT NULL, status TEXT NOT NULL, examined_events INTEGER NOT NULL, findings INTEGER NOT NULL, PRIMARY KEY(job_id, detector));`;
+const contextSchema = `CREATE TABLE IF NOT EXISTS operational_context_snapshots (repository_id TEXT NOT NULL, session_id TEXT NOT NULL, repository_family_key TEXT NOT NULL, worktree_key TEXT NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY(repository_id, session_id));`;
+const defaultDetector = 'm6-deterministic@1'; const leaseMs = 60_000;
+export interface AnalysisStream { readonly id: string; readonly repositoryId: string; readonly sessionId: string; readonly detectorVersion: string; readonly desiredThrough: number; readonly completedThrough: number; readonly state: AnalysisJob['state']; }
+export interface AnalysisJob { readonly id: string; readonly repositoryId: string; readonly sessionId: string; readonly detectorVersion: string; readonly streamId: string; readonly inputFrom: number; readonly inputThrough: number; readonly inputHighWater: number; readonly state: 'pending' | 'running' | 'completed' | 'retryable-failure' | 'quarantined-input'; readonly attempts: number; readonly leaseToken?: string; readonly leaseExpiresAt?: string; readonly nextEligibleAt?: string; readonly inputDigest?: string; readonly cost?: number; }
+export interface LearningResult { readonly episodes: readonly OperationalEpisode[]; readonly findings: readonly OperationalFinding[]; readonly candidates: readonly LearningCandidate[]; readonly coverage?: readonly AnalysisCoverage[]; readonly inputDigest?: string; readonly cost?: number; }
+export interface OperationalContextSnapshot { readonly repositoryId: string; readonly sessionId: string; readonly repositoryFamilyKey: string; readonly worktreeKey: string; readonly instructions: readonly InstructionContext[]; readonly conventions: readonly ProjectToolConvention[]; readonly sourceAgentKey?: string; readonly runKey?: string; readonly conversationKey?: string; }
+export interface OperationalLearningReport { readonly candidates: readonly (Omit<LearningCandidate, 'state'> & { readonly state: 'candidate' | 'disputed' })[]; readonly findings: readonly OperationalFinding[]; readonly episodes: readonly OperationalEpisode[]; readonly coverage: readonly AnalysisCoverage[]; readonly cost: { readonly completedRuns: number; readonly total: number; }; }
+export interface OperationalAnalysisQuality {
+  readonly streams: { readonly total: number; readonly pending: number; readonly running: number; readonly completed: number; readonly failed: number; readonly quarantined: number; readonly desiredThrough: number; readonly completedThrough: number; };
+  readonly runs: { readonly completed: number; readonly retries: number; readonly firstInput: number; readonly lastInput: number; };
+  readonly detectorVersions: readonly string[];
+  readonly detectorVersionTotal: number;
+  readonly coverage: { readonly uncoveredCompletedRanges: number; readonly total: number; readonly failed: number; readonly incomplete: number; readonly detectors: readonly AnalysisCoverage[]; };
+  readonly findings: number;
+  readonly cost: { readonly completedRuns: number; readonly total: number; };
+}
 
 export class OperationalLearningRepository {
   private readonly database: DatabaseSync;
-  constructor(databasePath?: string, private readonly now: () => string = () => new Date().toISOString()) { this.database = openExperienceDatabase(databasePath); this.database.exec(schema); }
+  constructor(databasePath?: string, private readonly now: () => string = () => new Date().toISOString()) { this.database = openExperienceDatabase(databasePath); this.database.exec(schema); this.database.exec(contextSchema); this.addColumn('stream_id', 'TEXT'); this.addColumn('detector_version', "TEXT NOT NULL DEFAULT 'm6-deterministic@1'"); this.addColumn('input_from', 'INTEGER NOT NULL DEFAULT 1'); this.addColumn('input_through', 'INTEGER'); this.addColumn('lease_token', 'TEXT'); this.addColumn('lease_expires_at', 'TEXT'); this.addColumn('next_eligible_at', 'TEXT'); this.addColumn('input_digest', 'TEXT'); this.addColumn('cost', 'REAL'); this.rebuildJobUniqueness(); this.migrateLegacyJobs(); }
   close(): void { this.database.close(); }
-
-  enqueue(input: { readonly repositoryId: string; readonly sessionId: string; readonly inputHighWater: number }): AnalysisJob {
-    const id = `${input.repositoryId}:${input.sessionId}:${input.inputHighWater}`;
-    const timestamp = this.now();
-    this.database.prepare(`INSERT INTO operational_analysis_jobs (id, repository_id, session_id, input_high_water, state, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?) ON CONFLICT(repository_id, session_id, input_high_water) DO NOTHING`).run(id, input.repositoryId, input.sessionId, input.inputHighWater, timestamp, timestamp);
-    return this.job(this.database.prepare(`SELECT id, repository_id, session_id, input_high_water, state, attempts FROM operational_analysis_jobs WHERE repository_id = ? AND session_id = ? AND input_high_water = ?`).get(input.repositoryId, input.sessionId, input.inputHighWater));
+  preserveContextSnapshot(snapshot: OperationalContextSnapshot): void {
+    const payload = Object.freeze({ repositoryId: snapshot.repositoryId, sessionId: snapshot.sessionId, repositoryFamilyKey: snapshot.repositoryFamilyKey, worktreeKey: snapshot.worktreeKey, instructions: Object.freeze(snapshot.instructions.map((value) => Object.freeze({ ...value }))), conventions: Object.freeze(snapshot.conventions.map((value) => Object.freeze({ ...value }))), ...(snapshot.sourceAgentKey === undefined ? {} : { sourceAgentKey: snapshot.sourceAgentKey }), ...(snapshot.runKey === undefined ? {} : { runKey: snapshot.runKey }), ...(snapshot.conversationKey === undefined ? {} : { conversationKey: snapshot.conversationKey }) });
+    this.database.prepare('INSERT OR IGNORE INTO operational_context_snapshots (repository_id, session_id, repository_family_key, worktree_key, payload_json) VALUES (?, ?, ?, ?, ?)').run(snapshot.repositoryId, snapshot.sessionId, snapshot.repositoryFamilyKey, snapshot.worktreeKey, JSON.stringify(payload));
   }
-
-  claim(repositoryId?: string): AnalysisJob | undefined {
-    this.database.exec('BEGIN IMMEDIATE');
-    try {
-      const row = this.database.prepare(`SELECT id, repository_id, session_id, input_high_water, state, attempts FROM operational_analysis_jobs WHERE state IN ('pending', 'retryable-failure') ${repositoryId === undefined ? '' : 'AND repository_id = ?'} ORDER BY created_at, id LIMIT 1`).get(...(repositoryId === undefined ? [] : [repositoryId]));
-      if (!row) { this.database.exec('COMMIT'); return undefined; }
-      this.database.prepare(`UPDATE operational_analysis_jobs SET state = 'running', attempts = attempts + 1, updated_at = ? WHERE id = ?`).run(this.now(), (row as { id: string }).id);
-      const claimed = this.job(this.database.prepare(`SELECT id, repository_id, session_id, input_high_water, state, attempts FROM operational_analysis_jobs WHERE id = ?`).get((row as { id: string }).id));
-      this.database.exec('COMMIT'); return claimed;
+  contextSnapshotFor(repositoryId: string, sessionId: string): OperationalContextSnapshot | undefined {
+    const row = this.database.prepare('SELECT payload_json FROM operational_context_snapshots WHERE repository_id = ? AND session_id = ?').get(repositoryId, sessionId) as { payload_json: string } | undefined;
+    return row === undefined ? undefined : freezeContext(JSON.parse(row.payload_json) as OperationalContextSnapshot);
+  }
+  enqueue(input: { readonly repositoryId: string; readonly sessionId: string; readonly detectorVersion?: string; readonly inputHighWater: number }): AnalysisStream {
+    if (!Number.isSafeInteger(input.inputHighWater) || input.inputHighWater < 0) throw new TypeError('Analysis high water is invalid.');
+    const detector = input.detectorVersion ?? defaultDetector; const id = streamId(input.repositoryId, input.sessionId, detector); const timestamp = this.now(); const desiredThrough = Math.max(1, input.inputHighWater);
+    this.database.prepare(`INSERT INTO operational_analysis_streams (id, repository_id, session_id, detector_version, desired_through, completed_through, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, 'pending', ?, ?) ON CONFLICT(repository_id, session_id, detector_version) DO UPDATE SET desired_through = MAX(desired_through, excluded.desired_through), state = CASE WHEN MAX(desired_through, excluded.desired_through) > completed_through AND state != 'running' THEN 'pending' ELSE state END, updated_at = excluded.updated_at`).run(id, input.repositoryId, input.sessionId, detector, desiredThrough, timestamp, timestamp);
+    return this.stream(this.database.prepare('SELECT * FROM operational_analysis_streams WHERE id = ?').get(id));
+  }
+  streamsFor(repositoryId: string): readonly AnalysisStream[] { return Object.freeze((this.database.prepare('SELECT * FROM operational_analysis_streams WHERE repository_id = ? ORDER BY id').all(repositoryId) as unknown[]).map((row) => this.stream(row))); }
+  analysisRunsFor(repositoryId: string): readonly AnalysisJob[] { return Object.freeze((this.database.prepare('SELECT * FROM operational_analysis_jobs WHERE repository_id = ? AND stream_id IS NOT NULL ORDER BY created_at, id').all(repositoryId) as unknown[]).map((row) => this.job(row))); }
+  claim(repositoryId?: string, maxEvents = Number.MAX_SAFE_INTEGER): AnalysisJob | undefined {
+    if (!Number.isSafeInteger(maxEvents) || maxEvents < 1) throw new TypeError('Analysis claim limit is invalid.'); this.database.exec('BEGIN IMMEDIATE');
+    try { const timestamp = this.now(); this.database.prepare("UPDATE operational_analysis_jobs SET state = 'retryable-failure', lease_expires_at = NULL, next_eligible_at = ?, updated_at = ? WHERE state = 'running' AND lease_expires_at <= ?").run(timestamp, timestamp, timestamp);
+      const scope = repositoryId === undefined ? [] : [repositoryId]; const filter = repositoryId === undefined ? '' : 'AND repository_id = ?';
+      const retry = this.database.prepare(`SELECT * FROM operational_analysis_jobs WHERE state = 'retryable-failure' AND (next_eligible_at IS NULL OR next_eligible_at <= ?) ${filter} ORDER BY next_eligible_at, created_at, id LIMIT 1`).get(timestamp, ...scope); if (retry) return this.claimExisting(retry, timestamp);
+      const selected = this.database.prepare(`SELECT * FROM operational_analysis_streams WHERE desired_through > completed_through ${filter} AND state != 'quarantined-input' AND NOT EXISTS (SELECT 1 FROM operational_analysis_jobs j WHERE j.stream_id = operational_analysis_streams.id AND j.state IN ('running', 'retryable-failure')) ORDER BY created_at, id LIMIT 1`).get(...scope);
+      if (!selected) { this.database.exec('COMMIT'); return undefined; } const stream = this.stream(selected); const inputFrom = stream.completedThrough + 1; const inputThrough = Math.min(stream.desiredThrough, inputFrom + maxEvents - 1); const id = `${stream.id}:${inputThrough}`;
+      const leaseToken = randomUUID(); this.database.prepare("INSERT INTO operational_analysis_jobs (id, repository_id, session_id, input_high_water, state, attempts, created_at, updated_at, stream_id, detector_version, input_from, input_through, lease_token, lease_expires_at) VALUES (?, ?, ?, ?, 'running', 1, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repository_id, session_id, detector_version, input_high_water) DO UPDATE SET state='running', attempts=operational_analysis_jobs.attempts + 1, lease_token=excluded.lease_token, lease_expires_at=excluded.lease_expires_at, next_eligible_at=NULL, updated_at=excluded.updated_at").run(id, stream.repositoryId, stream.sessionId, inputThrough, timestamp, timestamp, stream.id, stream.detectorVersion, inputFrom, inputThrough, leaseToken, expiry(timestamp));
+      this.database.prepare("UPDATE operational_analysis_streams SET state = 'running', updated_at = ? WHERE id = ?").run(timestamp, stream.id); const result = this.job(this.database.prepare('SELECT * FROM operational_analysis_jobs WHERE id = ?').get(id)); this.database.exec('COMMIT'); return result;
     } catch (error) { this.database.exec('ROLLBACK'); throw error; }
   }
-
-  retry(jobId: string, reason: 'execution-failure' | 'timeout' | 'invalid-input' = 'execution-failure'): void {
-    const job = this.jobById(jobId);
-    if (!job || job.state !== 'running') throw new TypeError('Analysis job is not running.');
-    const state = reason === 'invalid-input' || job.attempts >= 4 ? 'quarantined-input' : 'retryable-failure';
-    this.database.prepare(`UPDATE operational_analysis_jobs SET state = ?, updated_at = ? WHERE id = ?`).run(state, this.now(), jobId);
+  retry(jobId: string, reason: 'execution-failure' | 'timeout' | 'invalid-input' = 'execution-failure', leaseToken?: string): void { this.database.exec('BEGIN IMMEDIATE'); try { const job = this.fencedJob(jobId, leaseToken); const timestamp = this.now(); const state = reason === 'invalid-input' || job.attempts >= 4 ? 'quarantined-input' : 'retryable-failure'; const updated = this.database.prepare('UPDATE operational_analysis_jobs SET state = ?, lease_token = NULL, lease_expires_at = NULL, next_eligible_at = ?, updated_at = ? WHERE id = ? AND lease_token = ?').run(state, state === 'retryable-failure' ? retryEligibleAt(timestamp, job.attempts) : null, timestamp, jobId, leaseToken!); if (updated.changes !== 1) throw new TypeError('Analysis job lease is stale.'); this.database.prepare('UPDATE operational_analysis_streams SET state = ?, updated_at = ? WHERE id = ?').run(state, timestamp, job.streamId); this.database.exec('COMMIT'); } catch (error) { this.database.exec('ROLLBACK'); throw error; } }
+  jobById(id: string): AnalysisJob | undefined { const row = this.database.prepare('SELECT * FROM operational_analysis_jobs WHERE id = ?').get(id); return row === undefined ? undefined : this.job(row); }
+  saveResult(jobId: string, result: LearningResult, leaseToken?: string): void { this.database.exec('BEGIN IMMEDIATE'); try { const job = this.fencedJob(jobId, leaseToken);
+    for (const raw of result.episodes) { const episode = createOperationalEpisode(raw); if (episode.repositoryId !== job.repositoryId || episode.sessionId !== job.sessionId) throw new TypeError('Episode scope conflicts with job.'); this.database.prepare('INSERT INTO operational_episodes (id, repository_id, session_id, detector, state, evidence_json, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET state=excluded.state, evidence_json=excluded.evidence_json, payload_json=excluded.payload_json').run(episode.id, job.repositoryId, job.sessionId, episode.detector, episode.state, JSON.stringify(episode.evidenceEventIds), JSON.stringify(episode)); }
+    for (const finding of result.findings) this.database.prepare('INSERT INTO operational_findings (id, episode_id, kind, evidence_json, statement) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING').run(finding.id, finding.episodeId, finding.kind, JSON.stringify(finding.evidenceEventIds), finding.statement);
+    for (const raw of result.candidates) { const candidate = createLearningCandidate(raw); this.database.prepare("INSERT INTO operational_candidates (id, episode_id, kind, state, statement, conditions_json, procedure_json, invalidation_json) VALUES (?, ?, ?, 'candidate', ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING").run(candidate.id, candidate.episodeId, candidate.kind, candidate.statement, JSON.stringify(candidate.conditions), JSON.stringify(candidate.procedure), JSON.stringify(candidate.invalidationConditions)); for (const eventId of candidate.evidenceEventIds) this.database.prepare("INSERT OR IGNORE INTO operational_candidate_evidence (candidate_id, event_id, polarity) VALUES (?, ?, 'confirms')").run(candidate.id, eventId); }
+    for (const coverage of result.coverage ?? []) this.database.prepare('INSERT INTO operational_analysis_coverage (job_id, detector, status, examined_events, findings) VALUES (?, ?, ?, ?, ?) ON CONFLICT(job_id, detector) DO UPDATE SET status=excluded.status, examined_events=excluded.examined_events, findings=excluded.findings').run(jobId, coverage.detector, coverage.status, coverage.examinedEvents, coverage.findings);
+    this.database.prepare("UPDATE operational_analysis_jobs SET state='completed', lease_token=NULL, lease_expires_at=NULL, input_digest=?, cost=?, updated_at=? WHERE id=? AND lease_token=?").run(result.inputDigest ?? null, result.cost ?? null, this.now(), jobId, leaseToken!); this.database.prepare("UPDATE operational_analysis_streams SET completed_through=MAX(completed_through, ?), state=CASE WHEN desired_through > ? THEN 'pending' ELSE 'completed' END, updated_at=? WHERE id=?").run(job.inputThrough, job.inputThrough, this.now(), job.streamId); this.database.exec('COMMIT');
+  } catch (error) { this.database.exec('ROLLBACK'); throw error; } }
+  contradict(candidateId: string, eventId: string): void { this.database.prepare("INSERT OR IGNORE INTO operational_candidate_evidence (candidate_id, event_id, polarity) VALUES (?, ?, 'contradicts')").run(candidateId, eventId); this.database.prepare("UPDATE operational_candidates SET state='disputed' WHERE id=?").run(candidateId); }
+  report(repositoryId: string): OperationalLearningReport { const episodes = (this.database.prepare('SELECT payload_json FROM operational_episodes WHERE repository_id=? ORDER BY id').all(repositoryId) as Array<{ payload_json: string }>).map(({ payload_json }) => JSON.parse(payload_json) as OperationalEpisode); const findings = (this.database.prepare('SELECT f.id, f.episode_id, f.kind, f.evidence_json, f.statement FROM operational_findings f JOIN operational_episodes e ON e.id=f.episode_id WHERE e.repository_id=? ORDER BY f.id').all(repositoryId) as Array<{ id: string; episode_id: string; kind: OperationalFinding['kind']; evidence_json: string; statement: string }>).map((r) => Object.freeze({ id:r.id, episodeId:r.episode_id, kind:r.kind, evidenceEventIds:Object.freeze(JSON.parse(r.evidence_json) as string[]), statement:r.statement })); const candidates = (this.database.prepare('SELECT c.id,c.episode_id,c.kind,c.state,c.statement,c.conditions_json,c.procedure_json,c.invalidation_json FROM operational_candidates c JOIN operational_episodes e ON e.id=c.episode_id WHERE e.repository_id=? ORDER BY c.id').all(repositoryId) as Array<{ id:string; episode_id:string; kind:LearningCandidate['kind']; state:'candidate'|'disputed'; statement:string; conditions_json:string; procedure_json:string; invalidation_json:string }>).map((r) => Object.freeze({ id:r.id,episodeId:r.episode_id,kind:r.kind,state:r.state,statement:r.statement,conditions:Object.freeze(JSON.parse(r.conditions_json) as string[]),procedure:Object.freeze(JSON.parse(r.procedure_json) as string[]),evidenceEventIds:Object.freeze((this.database.prepare('SELECT event_id FROM operational_candidate_evidence WHERE candidate_id=? ORDER BY event_id').all(r.id) as Array<{event_id:string}>).map(({event_id})=>event_id)),invalidationConditions:Object.freeze(JSON.parse(r.invalidation_json) as string[]) })); const coverage=(this.database.prepare('SELECT c.detector,c.status,c.examined_events,c.findings FROM operational_analysis_coverage c JOIN operational_analysis_jobs j ON j.id=c.job_id WHERE j.repository_id=? ORDER BY c.detector,j.id').all(repositoryId) as Array<{detector:string;status:AnalysisCoverage['status'];examined_events:number;findings:number}>).map((r)=>Object.freeze({detector:r.detector,status:r.status,examinedEvents:r.examined_events,findings:r.findings})); const totals=this.database.prepare("SELECT COUNT(*) AS completed_runs, COALESCE(SUM(cost), 0) AS total FROM operational_analysis_jobs WHERE repository_id=? AND state='completed'").get(repositoryId) as {completed_runs:number;total:number}; return Object.freeze({episodes:Object.freeze(episodes),findings:Object.freeze(findings),candidates:Object.freeze(candidates),coverage:Object.freeze(coverage),cost:Object.freeze({completedRuns:totals.completed_runs,total:totals.total})}); }
+  quality(repositoryId: string): OperationalAnalysisQuality {
+    const streams = this.database.prepare(`SELECT COUNT(*) AS total,
+      SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END) AS running,
+      SUM(CASE WHEN state = 'completed' THEN 1 ELSE 0 END) AS completed,
+      SUM(CASE WHEN state = 'retryable-failure' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN state = 'quarantined-input' THEN 1 ELSE 0 END) AS quarantined,
+      COALESCE(SUM(desired_through), 0) AS desired_through, COALESCE(SUM(completed_through), 0) AS completed_through
+      FROM operational_analysis_streams WHERE repository_id = ?`).get(repositoryId) as { total: number; pending: number | null; running: number | null; completed: number | null; failed: number | null; quarantined: number | null; desired_through: number; completed_through: number };
+    const runs = this.database.prepare(`SELECT SUM(CASE WHEN state = 'completed' THEN 1 ELSE 0 END) AS completed,
+      COALESCE(SUM(CASE WHEN attempts > 1 THEN attempts - 1 ELSE 0 END), 0) AS retries,
+      COALESCE(MIN(input_from), 0) AS first_input, COALESCE(MAX(input_through), 0) AS last_input
+      FROM operational_analysis_jobs WHERE repository_id = ? AND stream_id IS NOT NULL`).get(repositoryId) as { completed: number | null; retries: number; first_input: number; last_input: number };
+    const detectorVersionTotal = Number((this.database.prepare('SELECT COUNT(DISTINCT detector_version) AS count FROM operational_analysis_streams WHERE repository_id = ?').get(repositoryId) as { count: number }).count);
+    const detectorVersions = (this.database.prepare('SELECT detector_version FROM operational_analysis_streams WHERE repository_id = ? GROUP BY detector_version ORDER BY detector_version LIMIT 64').all(repositoryId) as Array<{ detector_version: string }>).map(({ detector_version }) => detector_version);
+    const coverageTotals = this.database.prepare(`SELECT COUNT(*) AS total,
+      SUM(CASE WHEN c.status = 'failed' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN c.status = 'incomplete' THEN 1 ELSE 0 END) AS incomplete
+      FROM operational_analysis_coverage c JOIN operational_analysis_jobs j ON j.id = c.job_id WHERE j.repository_id = ?`).get(repositoryId) as { total: number; failed: number | null; incomplete: number | null };
+    const coverage = (this.database.prepare(`SELECT c.detector, c.status, c.examined_events, c.findings FROM operational_analysis_coverage c
+      JOIN operational_analysis_jobs j ON j.id = c.job_id WHERE j.repository_id = ? ORDER BY c.job_id, c.detector LIMIT 64`).all(repositoryId) as Array<{ detector: string; status: AnalysisCoverage['status']; examined_events: number; findings: number }>)
+      .map((row) => Object.freeze({ detector: row.detector, status: row.status, examinedEvents: row.examined_events, findings: row.findings }));
+    const uncoveredCompletedRanges = Number((this.database.prepare(`SELECT COUNT(*) AS count FROM operational_analysis_jobs j
+      JOIN operational_analysis_streams s ON s.id = j.stream_id
+      WHERE j.repository_id = ? AND j.state = 'completed' AND s.state = 'completed'
+        AND NOT EXISTS (SELECT 1 FROM operational_analysis_coverage c WHERE c.job_id = j.id AND c.detector = j.detector_version AND c.status = 'completed')`).get(repositoryId) as { count: number }).count);
+    const findings = Number((this.database.prepare('SELECT COUNT(*) AS count FROM operational_findings f JOIN operational_episodes e ON e.id = f.episode_id WHERE e.repository_id = ?').get(repositoryId) as { count: number }).count);
+    const cost = this.database.prepare("SELECT COUNT(*) AS completed_runs, COALESCE(SUM(cost), 0) AS total FROM operational_analysis_jobs WHERE repository_id=? AND state='completed'").get(repositoryId) as { completed_runs: number; total: number };
+    return Object.freeze({ streams: Object.freeze({ total: streams.total, pending: streams.pending ?? 0, running: streams.running ?? 0, completed: streams.completed ?? 0, failed: streams.failed ?? 0, quarantined: streams.quarantined ?? 0, desiredThrough: streams.desired_through, completedThrough: streams.completed_through }), runs: Object.freeze({ completed: runs.completed ?? 0, retries: runs.retries, firstInput: runs.first_input, lastInput: runs.last_input }), detectorVersions: Object.freeze(detectorVersions), detectorVersionTotal, coverage: Object.freeze({ uncoveredCompletedRanges, total: coverageTotals.total, failed: coverageTotals.failed ?? 0, incomplete: coverageTotals.incomplete ?? 0, detectors: Object.freeze(coverage) }), findings, cost: Object.freeze({ completedRuns: cost.completed_runs, total: cost.total }) });
   }
-
-  jobById(id: string): AnalysisJob | undefined {
-    const row = this.database.prepare(`SELECT id, repository_id, session_id, input_high_water, state, attempts FROM operational_analysis_jobs WHERE id = ?`).get(id);
-    return row === undefined ? undefined : this.job(row);
-  }
-
-  saveResult(jobId: string, result: LearningResult): void {
+  private claimExisting(row: unknown, timestamp: string): AnalysisJob { const job=this.job(row); this.database.prepare("UPDATE operational_analysis_jobs SET state='running', attempts=attempts+1, lease_token=?, lease_expires_at=?, next_eligible_at=NULL, updated_at=? WHERE id=?").run(randomUUID(),expiry(timestamp),timestamp,job.id); this.database.prepare("UPDATE operational_analysis_streams SET state='running', updated_at=? WHERE id=?").run(timestamp,job.streamId); const claimed=this.job(this.database.prepare('SELECT * FROM operational_analysis_jobs WHERE id=?').get(job.id)); this.database.exec('COMMIT'); return claimed; }
+  private migrateLegacyJobs(): void {
+    const rows = this.database.prepare('SELECT id, repository_id, session_id, input_high_water, state, created_at, updated_at FROM operational_analysis_jobs WHERE stream_id IS NULL ORDER BY repository_id, session_id, input_high_water, id').all() as Array<{ id: string; repository_id: string; session_id: string; input_high_water: number; state: AnalysisJob['state']; created_at: string; updated_at: string }>;
+    if (!rows.length) return;
     this.database.exec('BEGIN IMMEDIATE');
     try {
-      const job = this.job(this.database.prepare(`SELECT id, repository_id, session_id, input_high_water, state, attempts FROM operational_analysis_jobs WHERE id = ?`).get(jobId));
-      if (job.state !== 'running') throw new TypeError('Analysis job is not running.');
-      for (const rawEpisode of result.episodes) {
-        const episode = createOperationalEpisode(rawEpisode);
-        if (episode.repositoryId !== job.repositoryId || episode.sessionId !== job.sessionId) throw new TypeError('Episode scope conflicts with job.');
-        this.database.prepare(`INSERT INTO operational_episodes (id, repository_id, session_id, detector, state, evidence_json, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET state = excluded.state, evidence_json = excluded.evidence_json, payload_json = excluded.payload_json`).run(episode.id, job.repositoryId, job.sessionId, episode.detector, episode.state, JSON.stringify(episode.evidenceEventIds), JSON.stringify(episode));
+      const timestamp = this.now();
+      const groups = new Map<string, typeof rows>();
+      for (const row of rows) { const key = `${row.repository_id}\u0000${row.session_id}`; groups.set(key, [...(groups.get(key) ?? []), row]); }
+      for (const group of groups.values()) {
+        const first = group[0]!; const detector = defaultDetector; const id = streamId(first.repository_id, first.session_id, detector);
+        const existing = this.database.prepare('SELECT * FROM operational_analysis_streams WHERE id = ?').get(id);
+        const existingStream = existing === undefined ? undefined : this.stream(existing);
+        const desiredThrough = Math.max(existingStream?.desiredThrough ?? 0, ...group.map(({ input_high_water }) => input_high_water));
+        const completedThrough = Math.max(existingStream?.completedThrough ?? 0, ...group.filter(({ state }) => state === 'completed').map(({ input_high_water }) => input_high_water));
+        const active = group.filter(({ state, input_high_water }) => input_high_water > completedThrough && (state === 'pending' || state === 'retryable-failure' || state === 'running'));
+        const activeThrough = active.length ? Math.max(...active.map(({ input_high_water }) => input_high_water)) : undefined;
+        const streamState = existingStream?.state === 'running' ? 'running' : desiredThrough > completedThrough ? 'pending' : 'completed';
+        this.database.prepare("INSERT INTO operational_analysis_streams (id, repository_id, session_id, detector_version, desired_through, completed_through, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET desired_through = excluded.desired_through, completed_through = excluded.completed_through, state = excluded.state, updated_at = excluded.updated_at").run(id, first.repository_id, first.session_id, detector, desiredThrough, completedThrough, streamState, first.created_at, timestamp);
+        for (const row of group) {
+          const selected = row.input_high_water === activeThrough && (row.state === 'pending' || row.state === 'retryable-failure' || row.state === 'running');
+          const state = selected ? 'retryable-failure' : row.state === 'completed' ? 'completed' : 'completed';
+          this.database.prepare('UPDATE operational_analysis_jobs SET stream_id = ?, detector_version = ?, input_from = ?, input_through = ?, state = ?, lease_expires_at = NULL, next_eligible_at = ?, updated_at = ? WHERE id = ?').run(id, detector, row.input_high_water > completedThrough ? completedThrough + 1 : 1, row.input_high_water, state, selected ? timestamp : null, timestamp, row.id);
+        }
       }
-      for (const finding of result.findings) this.database.prepare(`INSERT INTO operational_findings (id, episode_id, kind, evidence_json, statement) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`).run(finding.id, finding.episodeId, finding.kind, JSON.stringify(finding.evidenceEventIds), finding.statement);
-      for (const rawCandidate of result.candidates) {
-        const candidate = createLearningCandidate(rawCandidate);
-        this.database.prepare(`INSERT INTO operational_candidates (id, episode_id, kind, state, statement, conditions_json, procedure_json, invalidation_json) VALUES (?, ?, ?, 'candidate', ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`).run(candidate.id, candidate.episodeId, candidate.kind, candidate.statement, JSON.stringify(candidate.conditions), JSON.stringify(candidate.procedure), JSON.stringify(candidate.invalidationConditions));
-        for (const eventId of candidate.evidenceEventIds) this.database.prepare(`INSERT OR IGNORE INTO operational_candidate_evidence (candidate_id, event_id, polarity) VALUES (?, ?, 'confirms')`).run(candidate.id, eventId);
-      }
-      for (const coverage of result.coverage ?? []) {
-        this.database.prepare(`INSERT INTO operational_analysis_coverage (job_id, detector, status, examined_events, findings) VALUES (?, ?, ?, ?, ?) ON CONFLICT(job_id, detector) DO UPDATE SET status = excluded.status, examined_events = excluded.examined_events, findings = excluded.findings`).run(jobId, coverage.detector, coverage.status, coverage.examinedEvents, coverage.findings);
-      }
-      this.database.prepare(`UPDATE operational_analysis_jobs SET state = 'completed', updated_at = ? WHERE id = ?`).run(this.now(), jobId);
       this.database.exec('COMMIT');
     } catch (error) { this.database.exec('ROLLBACK'); throw error; }
   }
-
-  contradict(candidateId: string, eventId: string): void { this.database.prepare(`INSERT OR IGNORE INTO operational_candidate_evidence (candidate_id, event_id, polarity) VALUES (?, ?, 'contradicts')`).run(candidateId, eventId); this.database.prepare(`UPDATE operational_candidates SET state = 'disputed' WHERE id = ?`).run(candidateId); }
-
-  report(repositoryId: string): OperationalLearningReport {
-    const episodes = (this.database.prepare(`SELECT payload_json FROM operational_episodes WHERE repository_id = ? ORDER BY id`).all(repositoryId) as Array<{ payload_json: string }>).map(({ payload_json }) => JSON.parse(payload_json) as OperationalEpisode);
-    const findings = (this.database.prepare(`SELECT f.id, f.episode_id, f.kind, f.evidence_json, f.statement FROM operational_findings f JOIN operational_episodes e ON e.id = f.episode_id WHERE e.repository_id = ? ORDER BY f.id`).all(repositoryId) as Array<{ id: string; episode_id: string; kind: OperationalFinding['kind']; evidence_json: string; statement: string }>).map((row) => Object.freeze({ id: row.id, episodeId: row.episode_id, kind: row.kind, evidenceEventIds: Object.freeze(JSON.parse(row.evidence_json) as string[]), statement: row.statement }));
-    const candidates = (this.database.prepare(`SELECT c.id, c.episode_id, c.kind, c.state, c.statement, c.conditions_json, c.procedure_json, c.invalidation_json FROM operational_candidates c JOIN operational_episodes e ON e.id = c.episode_id WHERE e.repository_id = ? ORDER BY c.id`).all(repositoryId) as Array<{ id: string; episode_id: string; kind: LearningCandidate['kind']; state: 'candidate' | 'disputed'; statement: string; conditions_json: string; procedure_json: string; invalidation_json: string }>).map((row) => Object.freeze({ id: row.id, episodeId: row.episode_id, kind: row.kind, state: row.state, statement: row.statement, conditions: Object.freeze(JSON.parse(row.conditions_json) as string[]), procedure: Object.freeze(JSON.parse(row.procedure_json) as string[]), evidenceEventIds: Object.freeze((this.database.prepare(`SELECT event_id FROM operational_candidate_evidence WHERE candidate_id = ? ORDER BY event_id`).all(row.id) as Array<{ event_id: string }>).map(({ event_id }) => event_id)), invalidationConditions: Object.freeze(JSON.parse(row.invalidation_json) as string[]) }));
-    const coverage = (this.database.prepare(`SELECT c.detector, c.status, c.examined_events, c.findings FROM operational_analysis_coverage c JOIN operational_analysis_jobs j ON j.id = c.job_id WHERE j.repository_id = ? ORDER BY c.detector, j.id`).all(repositoryId) as Array<{ detector: string; status: AnalysisCoverage['status']; examined_events: number; findings: number }>).map((row) => Object.freeze({ detector: row.detector, status: row.status, examinedEvents: row.examined_events, findings: row.findings }));
-    return Object.freeze({ episodes: Object.freeze(episodes), findings: Object.freeze(findings), candidates: Object.freeze(candidates), coverage: Object.freeze(coverage) });
-  }
-
-  private job(row: unknown): AnalysisJob { if (!row) throw new TypeError('Analysis job was not found.'); const value = row as { id: string; repository_id: string; session_id: string; input_high_water: number; state: AnalysisJob['state']; attempts: number }; return Object.freeze({ id: value.id, repositoryId: value.repository_id, sessionId: value.session_id, inputHighWater: value.input_high_water, state: value.state, attempts: value.attempts }); }
+  private rebuildJobUniqueness(): void { const sql = (this.database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='operational_analysis_jobs'").get() as { sql: string }).sql; if (!sql.includes('UNIQUE(repository_id, session_id, input_high_water)')) return; this.database.exec('PRAGMA foreign_keys = OFF;'); try { this.database.exec("CREATE TABLE operational_analysis_jobs_v2 (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, session_id TEXT NOT NULL, detector_version TEXT NOT NULL DEFAULT 'm6-deterministic@1', input_high_water INTEGER NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, stream_id TEXT, input_from INTEGER NOT NULL DEFAULT 1, input_through INTEGER, lease_token TEXT, lease_expires_at TEXT, next_eligible_at TEXT, input_digest TEXT, cost REAL, UNIQUE(repository_id, session_id, detector_version, input_high_water)); INSERT INTO operational_analysis_jobs_v2 SELECT id, repository_id, session_id, detector_version, input_high_water, state, attempts, created_at, updated_at, stream_id, input_from, input_through, lease_token, lease_expires_at, next_eligible_at, input_digest, cost FROM operational_analysis_jobs; DROP TABLE operational_analysis_jobs; ALTER TABLE operational_analysis_jobs_v2 RENAME TO operational_analysis_jobs;"); } finally { this.database.exec('PRAGMA foreign_keys = ON;'); } }
+  private addColumn(column:string, definition:string):void { const columns=this.database.prepare('PRAGMA table_info(operational_analysis_jobs)').all() as Array<{name:string}>; if (!columns.some(({name})=>name===column)) this.database.exec(`ALTER TABLE operational_analysis_jobs ADD COLUMN ${column} ${definition}`); }
+  private stream(row:unknown):AnalysisStream { const v=row as {id:string;repository_id:string;session_id:string;detector_version:string;desired_through:number;completed_through:number;state:AnalysisJob['state']}; return Object.freeze({id:v.id,repositoryId:v.repository_id,sessionId:v.session_id,detectorVersion:v.detector_version,desiredThrough:v.desired_through,completedThrough:v.completed_through,state:v.state}); }
+  private fencedJob(id:string, leaseToken:string|undefined):AnalysisJob { const job=this.job(this.database.prepare('SELECT * FROM operational_analysis_jobs WHERE id=?').get(id)); if (job.state !== 'running' || !leaseToken || job.leaseToken !== leaseToken) throw new TypeError('Analysis job lease is stale.'); return job; }
+  private job(row:unknown):AnalysisJob { if(!row) throw new TypeError('Analysis job was not found.'); const v=row as {id:string;repository_id:string;session_id:string;detector_version?:string;stream_id?:string;input_from?:number;input_through?:number;input_high_water:number;state:AnalysisJob['state'];attempts:number;lease_token?:string;lease_expires_at?:string;next_eligible_at?:string;input_digest?:string;cost?:number}; const detector=v.detector_version??defaultDetector; const through=v.input_through??v.input_high_water; return Object.freeze({id:v.id,repositoryId:v.repository_id,sessionId:v.session_id,detectorVersion:detector,streamId:v.stream_id??streamId(v.repository_id,v.session_id,detector),inputFrom:v.input_from??1,inputThrough:through,inputHighWater:through,state:v.state,attempts:v.attempts,...(v.lease_token?{leaseToken:v.lease_token}:{}),...(v.lease_expires_at?{leaseExpiresAt:v.lease_expires_at}:{}),...(v.next_eligible_at?{nextEligibleAt:v.next_eligible_at}:{}),...(v.input_digest?{inputDigest:v.input_digest}:{}),...(v.cost===null||v.cost===undefined?{}:{cost:v.cost})}); }
+}
+function streamId(repositoryId:string, sessionId:string, detector:string):string{return `${repositoryId}:${sessionId}:${detector}`;}
+function expiry(timestamp:string):string{return new Date(Date.parse(timestamp)+leaseMs).toISOString();}
+function retryEligibleAt(timestamp:string, attempts:number):string{return new Date(Date.parse(timestamp)+Math.min(60_000, 1_000 * 2 ** Math.max(0, attempts - 1))).toISOString();}
+function freezeContext(value: OperationalContextSnapshot): OperationalContextSnapshot {
+  return Object.freeze({ ...value, instructions: Object.freeze(value.instructions.map((instruction) => Object.freeze({ ...instruction }))), conventions: Object.freeze(value.conventions.map((convention) => Object.freeze({ ...convention }))) });
 }

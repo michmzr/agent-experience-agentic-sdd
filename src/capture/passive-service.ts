@@ -1,15 +1,18 @@
 import type { AgentSource, Session, SessionId } from '../domain/types.js';
-import type { IncrementalAppendResult, IncrementalCaptureAppend, NormalizedCaptureEvent } from './contracts.js';
+import type { IncrementalAppendResult, IncrementalCaptureAppend, LifecycleSignal, NormalizedCaptureEvent } from './contracts.js';
 
 /** The only records accepted by runtime-independent passive capture. */
 export type PassiveCaptureRecord =
-  | { readonly kind: 'session-start'; readonly session: Session }
-  | { readonly kind: 'session-end'; readonly source: AgentSource; readonly sessionId: SessionId; readonly endedAt: string }
+  | { readonly kind: 'session-start'; readonly session: Session; readonly lifecycle?: LifecycleSignal }
+  | { readonly kind: 'session-end'; readonly source: AgentSource; readonly sessionId: SessionId; readonly endedAt: string; readonly lifecycle?: LifecycleSignal }
   | { readonly kind: 'technical'; readonly event: NormalizedCaptureEvent; readonly session?: Session };
 
 export interface PassiveCaptureStore {
   appendIncremental(input: IncrementalCaptureAppend): IncrementalAppendResult;
   endSession(source: AgentSource, id: SessionId, endedAt: string): IncrementalAppendResult;
+  recordLifecycleSignal?(signal: LifecycleSignal): IncrementalAppendResult;
+  appendLifecycleTechnical?(event: NormalizedCaptureEvent): IncrementalAppendResult;
+  applyLifecycle?(input: { readonly lifecycle: LifecycleSignal; readonly session?: Session; readonly end?: { readonly source: AgentSource; readonly sessionId: SessionId; readonly endedAt: string } }): IncrementalAppendResult;
 }
 
 export interface PassiveCaptureServiceOptions {
@@ -44,15 +47,42 @@ export function createPassiveCaptureService(options: PassiveCaptureServiceOption
 
 export function persistPassiveCapture(store: PassiveCaptureStore, record: PassiveCaptureRecord): IncrementalAppendResult {
   switch (record.kind) {
-    case 'session-start':
-      return store.appendIncremental({ session: record.session });
-    case 'session-end':
-      return store.endSession(record.source, record.sessionId, record.endedAt);
-    case 'technical':
-      return store.appendIncremental({
-        ...(record.session === undefined ? {} : { session: record.session }),
-        event: record.event
-      });
+    case 'session-start': {
+      if (record.lifecycle !== undefined && store.applyLifecycle !== undefined) {
+        return store.applyLifecycle({
+          lifecycle: record.lifecycle,
+          ...(record.lifecycle.startOrigin === 'startup' ? { session: record.session } : {})
+        });
+      }
+      if (record.lifecycle === undefined || store.recordLifecycleSignal === undefined) return store.appendIncremental({ session: record.session });
+      const session = record.lifecycle.kind === 'start' && record.lifecycle.startOrigin === 'startup'
+        ? store.appendIncremental({ session: record.session })
+        : { inserted: false };
+      const lifecycle = store.recordLifecycleSignal(record.lifecycle);
+      return Object.freeze({ inserted: session.inserted || lifecycle.inserted });
+    }
+    case 'session-end': {
+      if (record.lifecycle !== undefined && store.applyLifecycle !== undefined) {
+        return store.applyLifecycle({ lifecycle: record.lifecycle, end: { source: record.source, sessionId: record.sessionId, endedAt: record.endedAt } });
+      }
+      if (record.lifecycle === undefined || store.recordLifecycleSignal === undefined) return store.endSession(record.source, record.sessionId, record.endedAt);
+      const lifecycle = store.recordLifecycleSignal(record.lifecycle);
+      const session = store.endSession(record.source, record.sessionId, record.endedAt);
+      return Object.freeze({ inserted: lifecycle.inserted || session.inserted });
+    }
+    case 'technical': {
+      try {
+        return store.appendIncremental({
+          ...(record.session === undefined ? {} : { session: record.session }),
+          event: record.event
+        });
+      } catch (error) {
+        if (error instanceof TypeError && /after its session end/i.test(error.message) && store.appendLifecycleTechnical !== undefined) {
+          return store.appendLifecycleTechnical(record.event);
+        }
+        throw error;
+      }
+    }
   }
 }
 

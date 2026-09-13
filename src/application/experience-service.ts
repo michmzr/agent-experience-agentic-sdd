@@ -18,6 +18,7 @@ import { ExperienceStore, type KnowledgeScope, type RetrievalFilter, type Retrie
 import { projectCapturedSessionEvidence } from '../evidence/capture-projection.js';
 import { sourceEvidenceCapabilities } from '../evidence/capabilities.js';
 import { SessionEvidenceRepository } from '../evidence/repository.js';
+import { OperationalLearningRepository, type OperationalAnalysisQuality } from '../learning/repository.js';
 import { OperationalLearningService } from '../learning/service.js';
 import type { SessionId } from '../domain/types.js';
 import {
@@ -152,6 +153,30 @@ export class ExperienceService {
     } finally { store.close(); }
   }
 
+  statusV2(input: { id: string; root?: string }) {
+    const legacy = this.status(input);
+    return this.qualityReport(input.id, legacy);
+  }
+
+  statusGlobalV2(repositoryId?: string) {
+    const legacy = this.statusGlobal(repositoryId);
+    const repositories = legacy.repositories.map((repository) => {
+      const health = this.qualityReport(repository.repository.id, repository);
+      const { version: _version, schemaVersion: _schemaVersion, ...dimensions } = health;
+      return Object.freeze({ repository: Object.freeze({ id: repository.repository.id }), ...dimensions });
+    });
+    return Object.freeze({
+      version: 2 as const,
+      schemaVersion: 2 as const,
+      installation: Object.freeze({ state: legacy.status === 'ready' ? 'ready' as const : 'not-ready' as const }),
+      repositories: Object.freeze(repositories)
+    });
+  }
+
+  operationalAnalysisReportV2(repositoryId: string) {
+    return Object.freeze({ version: 2 as const, schemaVersion: 2 as const, analysis: this.analysisQuality(repositoryId) });
+  }
+
   private repositoryStatus(repository: { id: string; root?: string; observedAt: string; selectedSources?: readonly ('codex' | 'cursor')[] }, entrypoint: string, database = { path: this.databasePath, available: existsSync(this.databasePath) }) {
     const selectedSources = repository.selectedSources ?? [];
     const cli = { entrypoint, available: existsSync(entrypoint) };
@@ -210,6 +235,7 @@ export class ExperienceService {
     const episodeIds = new Set(scopedEpisodes.map(({ id }) => id));
     return Object.freeze({
       version: 1 as const,
+      cost: report.cost,
       coverage: report.coverage,
       findings: Object.freeze(report.findings.filter((finding) => episodeIds.has(finding.episodeId)).map(({ id, episodeId, kind, evidenceEventIds, statement }) => Object.freeze({ id, episodeId, kind, evidenceEventIds, statement }))),
       hypotheses: Object.freeze(scopedEpisodes.filter(({ hypothesis }) => hypothesis !== undefined).map(({ id, state, evidenceEventIds, hypothesis }) => Object.freeze({ id, state, evidenceEventIds, hypothesis }))),
@@ -222,6 +248,63 @@ export class ExperienceService {
   captureStatus() {
     const spool = new CaptureSpool(join(this.dataDirectory, 'capture-spool.sqlite'));
     try { return spool.status(); } finally { spool.close(); }
+  }
+
+  private qualityReport(repositoryId: string, legacy: ReturnType<ExperienceService['status']>) {
+    const spool = this.spoolQuality();
+    const evidence = this.evidenceQuality(repositoryId);
+    const analysis = this.analysisQuality(repositoryId);
+    const installation = legacy.status === 'ready' ? 'ready' as const : 'not-ready' as const;
+    const receiptScopeUnavailable = spool !== undefined;
+    const dataState = receiptScopeUnavailable
+      ? 'unknown' as const
+      : evidence.operations === 0
+        ? 'not-applicable' as const
+        : evidence.unknownTotal > 0
+          ? 'degraded' as const
+          : 'sufficient' as const;
+    return Object.freeze({
+      version: 2 as const,
+      schemaVersion: 2 as const,
+      installation: Object.freeze({ state: installation }),
+      delivery: Object.freeze(spool === undefined
+        ? { state: 'unknown' as const }
+        : { state: spool.status.failedAdmission > 0 || spool.status.quarantined > 0 || spool.status.delayedDelivery.count > 0 ? 'degraded' as const : spool.status.pending > 0 || spool.status.claimed > 0 ? 'backlogged' as const : 'healthy' as const, pending: spool.status.pending, claimed: spool.status.claimed, committed: spool.status.committed, quarantined: spool.status.quarantined, failedAdmission: spool.status.failedAdmission }),
+      dataQuality: Object.freeze({
+        state: dataState,
+        admittedOperations: Object.freeze({ state: 'unavailable' as const }),
+        receipts: Object.freeze({ accounting: 'unavailable' as const }),
+        results: Object.freeze({ linked: evidence.linked, unknown: Object.freeze(evidence.unknown) }),
+        skips: Object.freeze({ state: 'unavailable' as const }),
+        denominator: Object.freeze(evidence.operations === 0 ? { state: 'unavailable' as const } : { state: 'known' as const, count: evidence.operations }),
+        ...(evidence.firstObservedAt === undefined ? {} : { observedTimeRange: Object.freeze({ first: evidence.firstObservedAt, last: evidence.lastObservedAt! }) })
+      }),
+      analysis
+    });
+  }
+
+  private spoolQuality() {
+    const path = join(this.dataDirectory, 'capture-spool.sqlite');
+    if (!existsSync(path)) return undefined;
+    const spool = new CaptureSpool(path);
+    try {
+      const status = spool.status(); const receipts = spool.receiptReport();
+      const skipped = Object.fromEntries(Object.entries(receipts.byDisposition).filter(([disposition]) => disposition !== 'accepted' && disposition !== 'duplicate'));
+      return Object.freeze({ status, accounting: receipts.accounting, receipts: Object.freeze({ accounting: receipts.accounting, total: receipts.receipts.length, accepted: receipts.byDisposition.accepted }), skips: Object.freeze({ total: Object.values(skipped).reduce((total, value) => total + value, 0), byDisposition: Object.freeze(skipped) }) });
+    } finally { spool.close(); }
+  }
+
+  private evidenceQuality(repositoryId: string) {
+    if (!existsSync(this.databasePath)) return Object.freeze({ operations: 0, linked: 0, unknownTotal: 0, unknown: {}, firstObservedAt: undefined, lastObservedAt: undefined });
+    const store = this.openStore();
+    try { return store.repositoryQuality(repositoryId); } finally { store.close(); }
+  }
+
+  private analysisQuality(repositoryId: string) {
+    const empty = Object.freeze({ state: 'not-run' as const, detectorVersions: Object.freeze([]), detectorVersionTotal: 0, detectorVersionsTruncated: false, desiredThrough: 0, completedThrough: 0, backlog: 0, range: Object.freeze({ from: 0, through: 0 }), retries: 0, cost: Object.freeze({ completedRuns: 0, total: 0 }), coverage: Object.freeze({ required: true as const, total: 0, truncated: false, detectors: Object.freeze([]) }), result: 'unavailable' as const });
+    if (!existsSync(this.databasePath)) return empty;
+    const repository = new OperationalLearningRepository(this.databasePath);
+    try { return reportAnalysisQuality(repository.quality(repositoryId)); } finally { repository.close(); }
   }
 
   cursorCaptureDiagnostics(directory: string = process.cwd()): CursorCaptureDiagnosticsReport {
@@ -282,6 +365,34 @@ function configuredWorkspaceMatches(root: string | undefined, id: string): boole
   if (root === undefined) return false;
   try { return resolveConfiguredWorkspaceRoot(root)?.id === id; }
   catch { return false; }
+}
+
+function reportAnalysisQuality(quality: OperationalAnalysisQuality) {
+  const streams = quality.streams;
+  const backlog = Math.max(0, streams.desiredThrough - streams.completedThrough);
+  const coverageComplete = streams.total > 0 && streams.completed > 0 && quality.coverage.uncoveredCompletedRanges === 0;
+  const state = streams.total === 0 ? 'not-run'
+    : streams.quarantined > 0 ? 'quarantined'
+      : streams.running > 0 ? 'running'
+    : streams.failed > 0 || quality.coverage.failed > 0 ? 'failed'
+          : streams.pending > 0 ? 'pending'
+            : !coverageComplete || quality.coverage.incomplete > 0 ? 'incomplete'
+              : 'completed';
+  const completed = state === 'completed';
+  return Object.freeze({
+    state,
+    detectorVersions: quality.detectorVersions,
+    detectorVersionTotal: quality.detectorVersionTotal,
+    detectorVersionsTruncated: quality.detectorVersionTotal > quality.detectorVersions.length,
+    desiredThrough: streams.desiredThrough,
+    completedThrough: streams.completedThrough,
+    backlog,
+    range: Object.freeze({ from: quality.runs.firstInput, through: quality.runs.lastInput }),
+    retries: quality.runs.retries,
+    cost: quality.cost,
+    coverage: Object.freeze({ required: true as const, total: quality.coverage.total, truncated: quality.coverage.total > quality.coverage.detectors.length, detectors: quality.coverage.detectors }),
+    result: completed && coverageComplete ? (quality.findings > 0 ? 'findings' as const : 'no-findings' as const) : 'unavailable' as const
+  });
 }
 
 export class DomainError extends Error {

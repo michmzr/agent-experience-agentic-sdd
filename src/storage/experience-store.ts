@@ -25,9 +25,14 @@ import { applyTransition, reconcileImportedKnowledgeLifecycle } from '../domain/
 import { validateImport, validateIncrementalEvidence } from '../domain/validation.js';
 import type {
   CaptureEnforcementSnapshot,
+  CaptureConversation,
+  CaptureRun,
   CapturedEventRecord,
   IncrementalAppendResult,
   IncrementalCaptureAppend,
+  LifecycleSignal,
+  NormalizedCaptureEvent,
+  RecordedLifecycleSignal,
   RevalidationProposal
 } from '../capture/contracts.js';
 import { validateNormalizedCaptureEvent } from '../capture/normalization.js';
@@ -131,6 +136,51 @@ interface RepositoryRow {
   selected_sources_json: string;
 }
 
+interface ConversationRow {
+  id: string;
+  source: Session['source'];
+  first_receipt_at: string;
+  identifier_provenance: 'hook-session-id';
+}
+
+interface CaptureRunRow {
+  id: string;
+  conversation_id: string;
+  origin: CaptureRun['origin'];
+  state: CaptureRun['state'];
+  receipt_started_at: string;
+  source_started_at: string | null;
+  receipt_ended_at: string | null;
+  source_ended_at: string | null;
+}
+
+interface LifecycleSignalRow {
+  source: Session['source'];
+  source_event_id: string;
+  conversation_id: string;
+  kind: LifecycleSignal['kind'];
+  start_origin: LifecycleSignal['startOrigin'] | null;
+  receipt_at: string;
+  source_at: string | null;
+  resolution: RecordedLifecycleSignal['resolution'];
+  resolved_run_id: string | null;
+}
+
+interface CaptureRunEventRow {
+  event_id: string;
+  source: CapturedEventRecord['source'];
+  source_event_id: string;
+  conversation_id: string;
+  run_id: string | null;
+  phase: CapturedEventRecord['phase'];
+  occurred_at: string;
+  signature_json: string;
+  summary: string;
+  capture_outcome: CapturedEventRecord['outcome'] | null;
+  exit_status: number | null;
+  related_event_id: string | null;
+}
+
 export type KnowledgeScope = 'global' | 'repository';
 
 export interface RepositoryRegistration {
@@ -141,11 +191,24 @@ export interface RepositoryRegistration {
 }
 
 export interface RepositoryRecord { readonly session: Session; readonly events: readonly CapturedEventRecord[]; }
+export interface LifecycleApplication {
+  readonly lifecycle: LifecycleSignal;
+  readonly session?: Session;
+  readonly end?: { readonly source: Session['source']; readonly sessionId: SessionId; readonly endedAt: string };
+}
 export interface RepositoryStatistics {
   readonly sessions: number; readonly events: number; readonly knowledge: number;
   readonly firstRecordedAt?: string; readonly lastRecordedAt?: string;
   readonly sources: Readonly<Record<Session['source'], number>>;
   readonly phases: Readonly<Record<CapturedEventRecord['phase'], number>>;
+}
+export interface RepositoryQuality {
+  readonly operations: number;
+  readonly linked: number;
+  readonly unknownTotal: number;
+  readonly unknown: Readonly<Record<string, number>>;
+  readonly firstObservedAt?: string;
+  readonly lastObservedAt?: string;
 }
 
 export interface RetrievalFilter {
@@ -299,6 +362,60 @@ const repositoryRegistryMigration = `
 `;
 const repositorySourcesMigration = `ALTER TABLE repositories ADD COLUMN selected_sources_json TEXT NOT NULL DEFAULT '[]';`;
 
+const conversationLifecycleMigration = `
+  CREATE TABLE IF NOT EXISTS capture_conversations (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL CHECK (source IN ('codex', 'claude-code', 'cursor')),
+    first_receipt_at TEXT NOT NULL,
+    identifier_provenance TEXT NOT NULL CHECK (identifier_provenance = 'hook-session-id')
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS capture_runs (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES capture_conversations(id) ON DELETE RESTRICT,
+    origin TEXT NOT NULL CHECK (origin IN ('startup', 'resume', 'unknown')),
+    state TEXT NOT NULL CHECK (state IN ('open', 'ended', 'unresolved')),
+    receipt_started_at TEXT NOT NULL,
+    source_started_at TEXT,
+    receipt_ended_at TEXT,
+    source_ended_at TEXT
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS lifecycle_signals (
+    source TEXT NOT NULL CHECK (source IN ('codex', 'claude-code', 'cursor')),
+    source_event_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL REFERENCES capture_conversations(id) ON DELETE RESTRICT,
+    kind TEXT NOT NULL CHECK (kind IN ('start', 'end')),
+    start_origin TEXT CHECK (start_origin IN ('startup', 'resume')),
+    receipt_at TEXT NOT NULL,
+    source_at TEXT,
+    resolution TEXT NOT NULL CHECK (resolution IN ('resolved', 'unresolved')),
+    resolved_run_id TEXT REFERENCES capture_runs(id) ON DELETE RESTRICT,
+    PRIMARY KEY (source, source_event_id)
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS capture_event_lifecycle (
+    event_id TEXT PRIMARY KEY REFERENCES capture_events(event_id) ON DELETE RESTRICT,
+    conversation_id TEXT NOT NULL REFERENCES capture_conversations(id) ON DELETE RESTRICT,
+    run_id TEXT REFERENCES capture_runs(id) ON DELETE RESTRICT
+  ) STRICT;
+`;
+
+const resumedTechnicalEventMigration = `
+  CREATE TABLE IF NOT EXISTS capture_run_events (
+    event_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL CHECK (source IN ('codex', 'claude-code', 'cursor')),
+    source_event_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL REFERENCES capture_conversations(id) ON DELETE RESTRICT,
+    run_id TEXT REFERENCES capture_runs(id) ON DELETE RESTRICT,
+    phase TEXT NOT NULL CHECK (phase IN ('pre-intent', 'pre-action', 'post-result')),
+    occurred_at TEXT NOT NULL,
+    signature_json TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    capture_outcome TEXT CHECK (capture_outcome IN ('succeeded', 'failed', 'unknown')),
+    exit_status INTEGER,
+    related_event_id TEXT,
+    UNIQUE (source, source_event_id)
+  ) STRICT;
+`;
+
 export class ExperienceStore {
   private readonly database: DatabaseSync;
 
@@ -381,6 +498,27 @@ export class ExperienceStore {
     return Object.freeze({ sessions, events, knowledge, ...(bounds.first ? { firstRecordedAt: bounds.first } : {}), ...(bounds.last ? { lastRecordedAt: bounds.last } : {}), sources: Object.freeze(sources), phases: Object.freeze(phases) });
   }
 
+  repositoryQuality(repositoryId: string): RepositoryQuality {
+    const row = this.database.prepare(`WITH requests AS (
+      SELECT ce.source, ce.source_event_id, e.occurred_at
+      FROM capture_events ce JOIN events e ON e.id = ce.event_id JOIN sessions s ON s.id = e.session_id
+      WHERE s.repository_id = ? AND ce.phase = 'pre-action'
+    ), matched AS (
+      SELECT r.source_event_id, p.exit_status, p.occurred_at
+      FROM requests r LEFT JOIN capture_events pc ON pc.source = r.source AND pc.related_event_id = r.source_event_id AND pc.phase = 'post-result'
+      LEFT JOIN events p ON p.id = pc.event_id
+    ) SELECT COUNT(*) AS operations,
+      SUM(CASE WHEN last_at IS NOT NULL THEN 1 ELSE 0 END) AS linked,
+      SUM(CASE WHEN last_at IS NULL THEN 1 ELSE 0 END) AS missing_results,
+      SUM(CASE WHEN last_at IS NOT NULL AND exit_status IS NULL THEN 1 ELSE 0 END) AS source_field_absent,
+      MIN(first_at) AS first_at, MAX(last_at) AS last_at
+      FROM (SELECT r.source_event_id, r.occurred_at AS first_at, m.occurred_at AS last_at, m.exit_status FROM requests r LEFT JOIN matched m ON m.source_event_id = r.source_event_id)`).get(repositoryId) as { operations: number; linked: number | null; missing_results: number | null; source_field_absent: number | null; first_at: string | null; last_at: string | null };
+    const unknown: Record<string, number> = {};
+    if ((row.missing_results ?? 0) > 0) unknown['result-not-delivered'] = row.missing_results!;
+    if ((row.source_field_absent ?? 0) > 0) unknown['source-field-absent'] = row.source_field_absent!;
+    return Object.freeze({ operations: row.operations, linked: row.linked ?? 0, unknownTotal: Object.values(unknown).reduce((total, count) => total + count, 0), unknown: Object.freeze(unknown), ...(row.first_at === null ? {} : { firstObservedAt: row.first_at, lastObservedAt: row.last_at ?? row.first_at }) });
+  }
+
   loadSession(id: SessionId): Session | undefined {
     const row = this.database.prepare(`
       SELECT id, source, started_at, ended_at, repository_id, workspace_id, user_id
@@ -429,6 +567,154 @@ export class ExperienceStore {
       this.database.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  recordLifecycleSignal(signal: LifecycleSignal): IncrementalAppendResult {
+    return this.applyLifecycle({ lifecycle: signal });
+  }
+
+  applyLifecycle(input: LifecycleApplication): IncrementalAppendResult {
+    if (!input || typeof input !== 'object') throw new TypeError('Lifecycle application is invalid.');
+    assertLifecycleSignal(input.lifecycle);
+    const signal = input.lifecycle;
+    assertLifecycleSignal(signal);
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      let legacyInserted = false;
+      if (input.session !== undefined) {
+        if (signal.kind !== 'start' || signal.startOrigin !== 'startup' || input.session.id !== signal.conversationId || input.session.source !== signal.source) {
+          throw new TypeError('Lifecycle startup session does not match its signal.');
+        }
+        legacyInserted = this.insertOrVerifySession(input.session);
+      }
+      if (input.end !== undefined) {
+        if (signal.kind !== 'end' || input.end.sessionId !== signal.conversationId || input.end.source !== signal.source) {
+          throw new TypeError('Lifecycle session end does not match its signal.');
+        }
+        assertCanonicalTimestamp(input.end.endedAt);
+        const current = this.loadSession(input.end.sessionId);
+        if (current === undefined || current.source !== input.end.source) throw new TypeError('Cannot end a missing session.');
+        if (current.endedAt === undefined) {
+          if (Date.parse(input.end.endedAt) < Date.parse(current.startedAt)) throw new TypeError('Session end cannot precede its start.');
+          const eventRows = this.database.prepare('SELECT occurred_at FROM events WHERE session_id = ?').all(input.end.sessionId) as Array<{ occurred_at: string }>;
+          const latestEventAt = eventRows.reduce<string | undefined>((latest, row) => {
+            if (latest === undefined || Date.parse(row.occurred_at) > Date.parse(latest)) return row.occurred_at;
+            return latest;
+          }, undefined);
+          if (latestEventAt !== undefined && Date.parse(input.end.endedAt) < Date.parse(latestEventAt)) {
+            throw new TypeError('Session end cannot precede its latest event.');
+          }
+          this.database.prepare('UPDATE sessions SET ended_at = ? WHERE id = ?').run(input.end.endedAt, input.end.sessionId);
+          legacyInserted = true;
+        }
+      }
+      const conversation = this.database.prepare('SELECT id, source, first_receipt_at, identifier_provenance FROM capture_conversations WHERE id = ?').get(signal.conversationId) as ConversationRow | undefined;
+      if (conversation === undefined) {
+        this.database.prepare(`INSERT INTO capture_conversations (id, source, first_receipt_at, identifier_provenance)
+          VALUES (?, ?, ?, 'hook-session-id')`).run(signal.conversationId, signal.source, signal.receiptAt);
+      } else if (conversation.source !== signal.source) {
+        throw new TypeError('Lifecycle conversation source conflicts with the stored conversation.');
+      }
+      const duplicate = this.database.prepare(`SELECT source, source_event_id, conversation_id, kind, start_origin, receipt_at, source_at, resolution, resolved_run_id
+        FROM lifecycle_signals WHERE source = ? AND source_event_id = ?`).get(signal.source, signal.sourceEventId) as LifecycleSignalRow | undefined;
+      if (duplicate !== undefined) {
+        if (duplicate.conversation_id !== signal.conversationId || duplicate.kind !== signal.kind || duplicate.start_origin !== (signal.startOrigin ?? null) || duplicate.receipt_at !== signal.receiptAt || duplicate.source_at !== (signal.sourceAt ?? null)) {
+          throw new TypeError('Conflicting duplicate lifecycle signal identity.');
+        }
+        this.database.exec('COMMIT');
+        return Object.freeze({ inserted: legacyInserted });
+      }
+
+      const openRuns = this.database.prepare(`SELECT id, conversation_id, origin, state, receipt_started_at, source_started_at, receipt_ended_at, source_ended_at
+      FROM capture_runs WHERE conversation_id = ? AND state = 'open' ORDER BY receipt_started_at, id`).all(signal.conversationId) as unknown as CaptureRunRow[];
+      let resolution: RecordedLifecycleSignal['resolution'] = 'unresolved';
+      let resolvedRunId: string | undefined;
+      if (signal.kind === 'start' && openRuns.length === 0) {
+        const runId = `${signal.conversationId}:run:${this.nextRunOrdinal(signal.conversationId)}`;
+        this.database.prepare(`INSERT INTO capture_runs (id, conversation_id, origin, state, receipt_started_at, source_started_at, receipt_ended_at, source_ended_at)
+          VALUES (?, ?, ?, 'open', ?, ?, NULL, NULL)`).run(runId, signal.conversationId, signal.startOrigin ?? 'unknown', signal.receiptAt, signal.sourceAt ?? null);
+        resolution = 'resolved';
+        resolvedRunId = runId;
+      } else if (signal.kind === 'end' && openRuns.length === 1 && sourceTimeDoesNotPrecedeRun(signal, openRuns[0]!)) {
+        const run = openRuns[0]!;
+        this.database.prepare(`UPDATE capture_runs SET state = 'ended', receipt_ended_at = ?, source_ended_at = ? WHERE id = ?`)
+          .run(signal.receiptAt, signal.sourceAt ?? null, run.id);
+        resolution = 'resolved';
+        resolvedRunId = run.id;
+      }
+      this.database.prepare(`INSERT INTO lifecycle_signals
+        (source, source_event_id, conversation_id, kind, start_origin, receipt_at, source_at, resolution, resolved_run_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(signal.source, signal.sourceEventId, signal.conversationId, signal.kind, signal.startOrigin ?? null, signal.receiptAt, signal.sourceAt ?? null, resolution, resolvedRunId ?? null);
+      this.database.exec('COMMIT');
+      return Object.freeze({ inserted: true });
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  loadConversation(id: string): CaptureConversation | undefined {
+    const row = this.database.prepare('SELECT id, source, first_receipt_at, identifier_provenance FROM capture_conversations WHERE id = ?').get(id) as ConversationRow | undefined;
+    return row === undefined ? undefined : conversationFromRow(row);
+  }
+
+  listConversationRuns(conversationId: string): readonly CaptureRun[] {
+    const rows = this.database.prepare(`SELECT id, conversation_id, origin, state, receipt_started_at, source_started_at, receipt_ended_at, source_ended_at
+      FROM capture_runs WHERE conversation_id = ? ORDER BY receipt_started_at, id`).all(conversationId) as unknown as CaptureRunRow[];
+    return Object.freeze(rows.map(captureRunFromRow));
+  }
+
+  listLifecycleSignals(conversationId: string): readonly RecordedLifecycleSignal[] {
+    const rows = this.database.prepare(`SELECT source, source_event_id, conversation_id, kind, start_origin, receipt_at, source_at, resolution, resolved_run_id
+      FROM lifecycle_signals WHERE conversation_id = ? ORDER BY receipt_at, rowid`).all(conversationId) as unknown as LifecycleSignalRow[];
+    return Object.freeze(rows.map(lifecycleSignalFromRow));
+  }
+
+  conversationForLegacySession(sessionId: SessionId): CaptureConversation | undefined {
+    return this.loadConversation(sessionId);
+  }
+
+  appendLifecycleTechnical(event: NormalizedCaptureEvent): IncrementalAppendResult {
+    const normalized = validateNormalizedCaptureEvent(event);
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const session = this.loadSession(normalized.sessionId);
+      if (session === undefined || session.source !== normalized.source || session.endedAt === undefined) {
+        throw new TypeError('Lifecycle technical capture requires an ended matching session.');
+      }
+      const conversation = this.loadConversation(normalized.sessionId);
+      if (conversation === undefined || conversation.source !== normalized.source) throw new TypeError('Lifecycle technical capture requires a matching conversation.');
+      const duplicate = this.database.prepare(`SELECT event_id, source, source_event_id, conversation_id, run_id, phase, occurred_at, signature_json, summary,
+        capture_outcome, exit_status, related_event_id FROM capture_run_events WHERE source = ? AND source_event_id = ?`)
+        .get(normalized.source, normalized.sourceEventId) as CaptureRunEventRow | undefined;
+      if (duplicate !== undefined) {
+        if (JSON.stringify(captureRunEventFromRow(duplicate)) !== JSON.stringify(normalized)) throw new TypeError('Conflicting duplicate lifecycle technical identity.');
+        this.database.exec('COMMIT');
+        return Object.freeze({ inserted: false });
+      }
+      const run = this.database.prepare(`SELECT id, origin FROM capture_runs WHERE conversation_id = ? AND state = 'open'
+        ORDER BY receipt_started_at DESC, id DESC LIMIT 1`).get(normalized.sessionId) as { id: string; origin: CaptureRun['origin'] } | undefined;
+      if (run?.origin !== 'resume') throw new TypeError('Lifecycle technical capture requires an open resolved resume run.');
+      if (normalized.phase === 'post-result') this.assertLifecyclePostResultLink(normalized, conversation.id, run.id);
+      this.database.prepare(`INSERT INTO capture_run_events
+        (event_id, source, source_event_id, conversation_id, run_id, phase, occurred_at, signature_json, summary, capture_outcome, exit_status, related_event_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(normalized.id, normalized.source, normalized.sourceEventId, conversation.id, run.id, normalized.phase, normalized.occurredAt,
+          JSON.stringify(normalized.signature), normalized.summary, normalized.outcome ?? null, normalized.exitStatus ?? null, normalized.relatedEventId ?? null);
+      this.database.exec('COMMIT');
+      return Object.freeze({ inserted: true });
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  listConversationTechnicalEvents(conversationId: string): readonly CapturedEventRecord[] {
+    const rows = this.database.prepare(`SELECT event_id, source, source_event_id, conversation_id, run_id, phase, occurred_at, signature_json, summary,
+      capture_outcome, exit_status, related_event_id FROM capture_run_events WHERE conversation_id = ? ORDER BY occurred_at, rowid`)
+      .all(conversationId) as unknown as CaptureRunEventRow[];
+    return Object.freeze(rows.map(captureRunEventFromRow));
   }
 
   import(record: ExperienceImport): void {
@@ -517,6 +803,7 @@ export class ExperienceStore {
         } else {
           this.assertPostResultLink(event);
           this.insertCaptureEvent(event);
+          this.linkCaptureEventToLifecycle(event);
           inserted = true;
         }
         if (duplicate !== undefined) this.assertPostResultLink(event);
@@ -785,6 +1072,26 @@ export class ExperienceStore {
         this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(12, new Date().toISOString());
       }
       if (!applied.has(13)) { this.database.exec(repositorySourcesMigration); this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(13, new Date().toISOString()); }
+      if (!applied.has(14)) {
+        this.database.exec(conversationLifecycleMigration);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(14, new Date().toISOString());
+      }
+      if (!applied.has(15)) {
+        this.database.exec(resumedTechnicalEventMigration);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(15, new Date().toISOString());
+      }
+      if (!applied.has(16)) {
+        ensureCaptureRunOriginMigration(this.database);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(16, new Date().toISOString());
+      } else {
+        ensureCaptureRunOriginMigration(this.database);
+      }
+      if (!applied.has(17)) {
+        ensureLifecycleStartOriginMigration(this.database);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(17, new Date().toISOString());
+      } else {
+        ensureLifecycleStartOriginMigration(this.database);
+      }
       this.database.exec('COMMIT');
     } catch (error) {
       this.database.exec('ROLLBACK');
@@ -811,6 +1118,31 @@ export class ExperienceStore {
       WHERE ce.source = ? AND ce.source_event_id = ?
     `).get(source, sourceEventId) as unknown as CaptureRow | undefined;
     return row === undefined ? undefined : captureFromRow(row);
+  }
+
+  private nextRunOrdinal(conversationId: string): number {
+    return Number((this.database.prepare('SELECT COUNT(*) AS count FROM capture_runs WHERE conversation_id = ?').get(conversationId) as { count: number }).count) + 1;
+  }
+
+  private linkCaptureEventToLifecycle(event: CapturedEventRecord): void {
+    const conversation = this.database.prepare('SELECT id FROM capture_conversations WHERE id = ? AND source = ?').get(event.sessionId, event.source) as { id: string } | undefined;
+    if (conversation === undefined) return;
+    const run = this.database.prepare(`SELECT id FROM capture_runs WHERE conversation_id = ? AND state = 'open'
+      ORDER BY receipt_started_at DESC, id DESC LIMIT 1`).get(conversation.id) as { id: string } | undefined;
+    this.database.prepare(`INSERT OR IGNORE INTO capture_event_lifecycle (event_id, conversation_id, run_id) VALUES (?, ?, ?)`)
+      .run(event.id, conversation.id, run?.id ?? null);
+  }
+
+  private assertLifecyclePostResultLink(event: CapturedEventRecord, conversationId: string, runId: string | undefined): void {
+    if (event.relatedEventId === undefined) throw new TypeError('Lifecycle post-result capture requires a related pre-action.');
+    const related = this.database.prepare(`SELECT phase, signature_json, conversation_id, run_id, occurred_at FROM capture_run_events
+      WHERE source = ? AND source_event_id = ?`).get(event.source, event.relatedEventId) as {
+        phase: string; signature_json: string; conversation_id: string; run_id: string | null; occurred_at: string;
+      } | undefined;
+    if (related === undefined || related.phase !== 'pre-action' || related.conversation_id !== conversationId || related.run_id !== (runId ?? null)
+      || related.signature_json !== JSON.stringify(event.signature) || Date.parse(event.occurredAt) < Date.parse(related.occurred_at)) {
+      throw new TypeError('Lifecycle post-result capture requires its matching related pre-action.');
+    }
   }
 
   private insertSession(session: Session | undefined, event: CapturedEventRecord): void {
@@ -1419,6 +1751,78 @@ function assertTransitionAfterEvent(
   if (event !== undefined && transition !== undefined && transition.occurredAt < event.occurredAt) {
     throw new TypeError('Incremental event cannot occur after its lifecycle transition.');
   }
+}
+
+function assertLifecycleSignal(signal: LifecycleSignal): void {
+  if (!signal || typeof signal !== 'object') throw new TypeError('Lifecycle signal is invalid.');
+  const value = signal as unknown as Record<string, unknown>;
+  const allowed = ['sourceEventId', 'source', 'conversationId', 'kind', 'startOrigin', 'receiptAt', 'sourceAt'];
+  assertOnlyIncrementalKeys(value, allowed);
+  if (signal.source !== 'codex' && signal.source !== 'claude-code' && signal.source !== 'cursor') throw new TypeError('Lifecycle signal source is invalid.');
+  if (signal.kind !== 'start' && signal.kind !== 'end') throw new TypeError('Lifecycle signal kind is invalid.');
+  if (signal.startOrigin !== undefined && (signal.kind !== 'start' || (signal.startOrigin !== 'startup' && signal.startOrigin !== 'resume'))) {
+    throw new TypeError('Lifecycle signal start origin is invalid.');
+  }
+  for (const [name, identifier] of [['source event id', signal.sourceEventId], ['conversation id', signal.conversationId]] as const) {
+    if (typeof identifier !== 'string' || !canonicalIncrementalIdentifier.test(identifier)) throw new TypeError(`Lifecycle ${name} is invalid.`);
+    assertSnapshotIdentifierSafe(identifier, `lifecycle ${name}`);
+  }
+  assertCanonicalTimestamp(signal.receiptAt);
+  if (signal.sourceAt !== undefined) assertCanonicalTimestamp(signal.sourceAt);
+}
+
+function sourceTimeDoesNotPrecedeRun(signal: LifecycleSignal, run: CaptureRunRow): boolean {
+  return signal.sourceAt === undefined || run.source_started_at === null || Date.parse(signal.sourceAt) >= Date.parse(run.source_started_at);
+}
+
+function conversationFromRow(row: ConversationRow): CaptureConversation {
+  return Object.freeze({ id: row.id, source: row.source, firstReceiptAt: row.first_receipt_at, identifierProvenance: row.identifier_provenance });
+}
+
+function captureRunFromRow(row: CaptureRunRow): CaptureRun {
+  return Object.freeze({
+    id: row.id, conversationId: row.conversation_id, origin: row.origin, state: row.state,
+    receiptStartedAt: row.receipt_started_at,
+    ...(row.source_started_at === null ? {} : { sourceStartedAt: row.source_started_at }),
+    ...(row.receipt_ended_at === null ? {} : { receiptEndedAt: row.receipt_ended_at }),
+    ...(row.source_ended_at === null ? {} : { sourceEndedAt: row.source_ended_at })
+  });
+}
+
+function ensureCaptureRunOriginMigration(database: DatabaseSync): void {
+  const columns = new Set((database.prepare("PRAGMA table_info('capture_runs')").all() as Array<{ name: string }>).map(({ name }) => name));
+  if (!columns.has('origin')) database.exec("ALTER TABLE capture_runs ADD COLUMN origin TEXT NOT NULL DEFAULT 'unknown'");
+}
+
+function ensureLifecycleStartOriginMigration(database: DatabaseSync): void {
+  const columns = new Set((database.prepare("PRAGMA table_info('lifecycle_signals')").all() as Array<{ name: string }>).map(({ name }) => name));
+  if (!columns.has('start_origin')) database.exec("ALTER TABLE lifecycle_signals ADD COLUMN start_origin TEXT CHECK (start_origin IN ('startup', 'resume'))");
+}
+
+function lifecycleSignalFromRow(row: LifecycleSignalRow): RecordedLifecycleSignal {
+  return Object.freeze({
+    source: row.source, sourceEventId: row.source_event_id, conversationId: row.conversation_id,
+    kind: row.kind, ...(row.start_origin === null ? {} : { startOrigin: row.start_origin }), receiptAt: row.receipt_at,
+    ...(row.source_at === null ? {} : { sourceAt: row.source_at }),
+    resolution: row.resolution,
+    ...(row.resolved_run_id === null ? {} : { resolvedRunId: row.resolved_run_id })
+  });
+}
+
+function captureRunEventFromRow(row: CaptureRunEventRow): CapturedEventRecord {
+  return Object.freeze({
+    id: row.event_id,
+    source: row.source,
+    sourceEventId: row.source_event_id,
+    sessionId: row.conversation_id as SessionId,
+    phase: row.phase,
+    occurredAt: row.occurred_at,
+    signature: JSON.parse(row.signature_json) as CapturedEventRecord['signature'],
+    summary: row.summary,
+    ...(row.capture_outcome === null ? {} : { outcome: row.capture_outcome }),
+    ...(row.exit_status === null ? {} : { exitStatus: row.exit_status }),
+    ...(row.related_event_id === null ? {} : { relatedEventId: row.related_event_id })
+  });
 }
 
 interface CheckedPage {

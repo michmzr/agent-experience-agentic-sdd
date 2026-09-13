@@ -75,7 +75,11 @@ test('maps session start and end without transcript or user identity fields', ()
     prompt: 'private prompt text'
   }, preTime), {
     kind: 'session-start',
-    session: { id: 'session-1', source: 'codex', startedAt: preTime }
+    session: { id: 'session-1', source: 'codex', startedAt: preTime },
+    lifecycle: {
+      sourceEventId: 'session-1:SessionStart:startup:2026-08-26T08:00:00.000Z',
+      source: 'codex', kind: 'start', startOrigin: 'startup', conversationId: 'session-1', receiptAt: preTime
+    }
   });
 
   assert.deepEqual(adaptPassiveHook('cursor', {
@@ -91,7 +95,7 @@ test('maps session start and end without transcript or user identity fields', ()
   });
 });
 
-test('ignores Codex non-startup lifecycle starts without changing immutable session state', () => {
+test('accepts Codex startup and resume lifecycle starts without changing immutable session state', () => {
   const startup = adaptPassiveHook('codex', {
     session_id: 'session-1',
     hook_event_name: 'SessionStart',
@@ -99,10 +103,31 @@ test('ignores Codex non-startup lifecycle starts without changing immutable sess
   }, preTime);
   assert.deepEqual(startup, {
     kind: 'session-start',
-    session: { id: 'session-1', source: 'codex', startedAt: preTime }
+    session: { id: 'session-1', source: 'codex', startedAt: preTime },
+    lifecycle: {
+      sourceEventId: 'session-1:SessionStart:startup:2026-08-26T08:00:00.000Z',
+      source: 'codex', kind: 'start', startOrigin: 'startup', conversationId: 'session-1', receiptAt: preTime
+    }
   });
 
-  for (const source of ['resume', 'compact', 'clear']) {
+  assert.deepEqual(adaptPassiveHook('codex', {
+    session_id: 'session-1',
+    hook_event_name: 'SessionStart',
+    source: 'resume',
+    timestamp: '2026-08-26T07:59:59.000Z'
+  }, postTime), {
+    kind: 'session-start',
+    session: { id: 'session-1', source: 'codex', startedAt: postTime },
+    lifecycle: {
+      sourceEventId: 'session-1:SessionStart:resume:2026-08-26T08:00:01.000Z',
+      source: 'codex', kind: 'start', startOrigin: 'resume',
+      conversationId: 'session-1',
+      receiptAt: postTime,
+      sourceAt: '2026-08-26T07:59:59.000Z'
+    }
+  });
+
+  for (const source of ['compact', 'clear']) {
     assert.equal(adaptPassiveHook('codex', {
       session_id: 'session-1',
       hook_event_name: 'SessionStart',
@@ -111,7 +136,7 @@ test('ignores Codex non-startup lifecycle starts without changing immutable sess
   }
 });
 
-test('ignores Codex resume after session end instead of reopening the session', () => {
+test('maps Codex lifecycle end with receipt and optional source timestamps', () => {
   assert.deepEqual(adaptPassiveHook('codex', {
     session_id: 'session-1',
     hook_event_name: 'SessionEnd'
@@ -119,14 +144,14 @@ test('ignores Codex resume after session end instead of reopening the session', 
     kind: 'session-end',
     source: 'codex',
     sessionId: 'session-1',
-    endedAt: postTime
+    endedAt: postTime,
+    lifecycle: {
+      sourceEventId: 'session-1:SessionEnd:2026-08-26T08:00:01.000Z',
+      source: 'codex', kind: 'end',
+      conversationId: 'session-1',
+      receiptAt: postTime
+    }
   });
-
-  assert.equal(adaptPassiveHook('codex', {
-    session_id: 'session-1',
-    hook_event_name: 'SessionStart',
-    source: 'resume'
-  }, '2026-08-26T08:00:02.000Z'), undefined);
 });
 
 test('correlates pre and post tool hooks with stable source identities', () => {

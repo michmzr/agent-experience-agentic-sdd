@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { CaptureSpool } from '../src/capture/spool.js';
-import { drainCaptureSpool } from '../src/capture/spool-drain.js';
+import { drainCaptureSpool, waitForWorkerCompletion } from '../src/capture/spool-drain.js';
 import type { PassiveCaptureRecord } from '../src/capture/passive-service.js';
 
 function dataDirectory(): string {
@@ -49,6 +49,85 @@ test('durably admits a sanitized record once and reports pending status', () => 
     spool.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+test('accounts for privacy-bounded capture receipt dispositions without retaining raw payload markers', () => {
+  const dataDir = dataDirectory();
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  try {
+    spool.recordReceipt({ source: 'codex', receivedAt: '2026-09-12T08:00:00.000Z', disposition: 'privacy-redaction', correlationInput: 'private-marker-must-not-persist' });
+    spool.recordReceipt({ source: 'codex', receivedAt: '2026-09-12T08:00:01.000Z', disposition: 'unsupported-tool' });
+    const report = spool.receiptReport();
+    assert.equal(report.accounting, 'available');
+    assert.equal(report.byDisposition['privacy-redaction'], 1);
+    assert.equal(report.byDisposition['unsupported-tool'], 1);
+    assert.match(report.receipts[0]!.correlationKey, /^[a-f0-9]{64}$/);
+    assert.equal(JSON.stringify(report).includes('private-marker-must-not-persist'), false);
+    spool.markReceiptAccountingUnavailable();
+    assert.equal(spool.receiptReport().accounting, 'unavailable');
+  } finally {
+    spool.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('keeps admission atomic with its accepted receipt and marks accounting unavailable on injected receipt failure', () => {
+  const dataDir = dataDirectory();
+  const path = join(dataDir, 'capture-spool.sqlite');
+  const failing = new CaptureSpool(path, { failReceiptPersistence: true });
+  try {
+    assert.throws(() => failing.admitWithReceipt(sessionStart(), { source: 'codex', receivedAt: '2026-09-12T08:00:00.000Z' }), /receipt/i);
+    assert.equal(failing.status().admitted, 0);
+    assert.equal(failing.receiptReport().accounting, 'unavailable');
+  } finally { failing.close(); }
+  const spool = new CaptureSpool(path);
+  try {
+    assert.equal(spool.admitWithReceipt(sessionStart(), { source: 'codex', receivedAt: '2026-09-12T08:00:01.000Z' }).status, 'admitted');
+    assert.equal(spool.receiptReport().byDisposition.accepted, 1);
+  } finally { spool.close(); rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('accounts for delivery retry and quarantine dispositions', () => {
+  const dataDir = dataDirectory();
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  try {
+    const delivery = spool.admitWithReceipt(sessionStart(), { source: 'codex', receivedAt: '2026-09-12T08:00:00.000Z' });
+    spool.claim('2026-09-12T08:00:00.000Z', 1);
+    spool.retry(delivery.deliveryId, '2026-09-12T08:00:01.000Z');
+    spool.quarantine(delivery.deliveryId, 'CORRUPT', '2026-09-12T08:00:02.000Z');
+    const receipts = spool.receiptReport().byDisposition;
+    assert.equal(receipts['delivery-retry'], 1);
+    assert.equal(receipts.quarantine, 1);
+  } finally { spool.close(); rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('bounds retained and reported receipts deterministically', () => {
+  const dataDir = dataDirectory();
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'), { maxReceipts: 2 });
+  try {
+    spool.recordReceipt({ source: 'codex', receivedAt: '2026-09-12T08:00:00.000Z', disposition: 'accepted' });
+    spool.recordReceipt({ source: 'codex', receivedAt: '2026-09-12T08:00:01.000Z', disposition: 'duplicate' });
+    spool.recordReceipt({ source: 'codex', receivedAt: '2026-09-12T08:00:02.000Z', disposition: 'delivery-retry' });
+    const report = spool.receiptReport();
+    assert.deepEqual(report.receipts.map(({ receivedAt }) => receivedAt), ['2026-09-12T08:00:01.000Z', '2026-09-12T08:00:02.000Z']);
+    assert.equal(report.byDisposition.accepted, 0);
+    assert.equal(report.byDisposition['delivery-retry'], 1);
+  } finally { spool.close(); rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('rolls back a retry when its receipt cannot persist and marks accounting unavailable', () => {
+  const dataDir = dataDirectory();
+  const path = join(dataDir, 'capture-spool.sqlite');
+  const admitted = new CaptureSpool(path);
+  const delivery = admitted.admit(sessionStart(), '2026-09-12T08:00:00.000Z');
+  admitted.close();
+  const spool = new CaptureSpool(path, { failReceiptPersistence: true });
+  try {
+    spool.claim('2026-09-12T08:00:00.000Z', 1);
+    assert.throws(() => spool.retry(delivery.deliveryId, '2026-09-12T08:00:01.000Z'), /receipt/i);
+    assert.equal(spool.status().claimed, 1);
+    assert.equal(spool.receiptReport().accounting, 'unavailable');
+  } finally { spool.close(); rmSync(dataDir, { recursive: true, force: true }); }
 });
 
 test('reclaims expired claims and acknowledges a committed delivery once', () => {
@@ -138,6 +217,7 @@ test('quarantines a corrupt stored record without blocking later records', () =>
     const [claimed] = spool.claim('2026-09-07T08:00:01.000Z', 10);
     assert.equal(claimed?.record.kind, 'session-start');
     assert.equal(spool.status().quarantined, 1);
+    assert.equal(spool.receiptReport().byDisposition.quarantine, 1);
   } finally {
     spool.close();
     rmSync(dataDir, { recursive: true, force: true });
@@ -202,4 +282,31 @@ test('can disable automatic operational learning without disabling capture', () 
     rmSync(dataDir, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('publishes worker completion only after the drain releases its lock', () => {
+  const dataDir = dataDirectory();
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  try {
+    spool.admit(sessionStart(), '2026-09-12T10:00:00.000Z');
+    assert.equal(waitForWorkerCompletion(dataDir), false);
+    drainCaptureSpool({ databasePath, now: () => '2026-09-12T10:00:01.000Z' });
+    assert.equal(waitForWorkerCompletion(dataDir), true);
+    assert.equal(spool.tryAcquireDrainLock('post-completion', '2026-09-12T10:00:02.000Z', 1_000), true);
+  } finally { spool.close(); rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('a concurrent drain contender cannot publish completion and a successor fences predecessor completion', () => {
+  const dataDir = dataDirectory();
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const owner = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  try {
+    assert.equal(owner.tryAcquireDrainLock('owner', new Date().toISOString(), 60_000), true);
+    drainCaptureSpool({ databasePath, now: () => '2026-09-12T10:00:01.000Z' });
+    assert.equal(waitForWorkerCompletion(dataDir), false);
+    assert.equal(owner.completeDrain('owner'), true);
+    assert.equal(owner.tryAcquireDrainLock('successor', new Date().toISOString(), 60_000), true);
+    assert.equal(waitForWorkerCompletion(dataDir), false);
+  } finally { owner.releaseDrainLock('owner'); owner.close(); rmSync(dataDir, { recursive: true, force: true }); }
 });

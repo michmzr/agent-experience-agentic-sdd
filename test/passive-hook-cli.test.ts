@@ -145,14 +145,14 @@ test('fails open with bounded generic diagnostics for invalid and private input'
   const marker = 'classified-private-value';
   const dataDirectories: string[] = [];
   try {
-    for (const hookInput of [
-      '{not-json',
-      JSON.stringify({
+    for (const [hookInput, disposition] of [
+      ['{not-json', 'malformed-envelope'],
+      [JSON.stringify({
         session_id: 'session-1', cwd: '/work/repo', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'tool-1',
         tool_input: { command: `curl --token=${marker}` }
-      }),
-      'x'.repeat(65_537)
-    ]) {
+      }), 'privacy-redaction'],
+      ['x'.repeat(65_537), 'malformed-envelope']
+    ] as const) {
       const dataDir = temporaryDataDirectory();
       dataDirectories.push(dataDir);
       const result = await runCliAsync(
@@ -163,6 +163,11 @@ test('fails open with bounded generic diagnostics for invalid and private input'
       assert.equal(result.stdout, '');
       assert.match(result.stderr, /^AEL_CAPTURE_[A-Z_]+: Passive capture skipped\.\n$/);
       assert.equal(result.stderr.includes(marker), false);
+      const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+      try {
+        assert.equal(spool.receiptReport().byDisposition[disposition], 1);
+        assert.equal(JSON.stringify(spool.receiptReport()).includes(marker), false);
+      } finally { spool.close(); }
     }
   } finally {
     for (const dataDir of dataDirectories) rmSync(dataDir, { recursive: true, force: true });
