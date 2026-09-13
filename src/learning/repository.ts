@@ -1,7 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { openExperienceDatabase } from '../storage/database.js';
-import { createLearningCandidate, createOperationalEpisode, type AnalysisCoverage, type LearningCandidate, type OperationalEpisode, type OperationalFinding } from './contracts.js';
+import { createLearningCandidate, createOperationalEpisode, type AnalysisCoverage, type EpisodeEvidence, type LearningCandidate, type OperationalEpisode, type OperationalFinding } from './contracts.js';
 import type { InstructionContext, ProjectToolConvention } from './project-conventions.js';
 
 const schema = `
@@ -17,7 +17,7 @@ const contextSecretSchema = `CREATE TABLE IF NOT EXISTS operational_context_secr
 const defaultDetector = 'm6-deterministic@1'; const leaseMs = 60_000;
 export interface AnalysisStream { readonly id: string; readonly repositoryId: string; readonly sessionId: string; readonly detectorVersion: string; readonly desiredThrough: number; readonly completedThrough: number; readonly state: AnalysisJob['state']; }
 export interface AnalysisJob { readonly id: string; readonly repositoryId: string; readonly sessionId: string; readonly detectorVersion: string; readonly streamId: string; readonly inputFrom: number; readonly inputThrough: number; readonly inputHighWater: number; readonly state: 'pending' | 'running' | 'completed' | 'retryable-failure' | 'quarantined-input'; readonly attempts: number; readonly leaseToken?: string; readonly leaseExpiresAt?: string; readonly nextEligibleAt?: string; readonly inputDigest?: string; readonly cost?: number; }
-export interface LearningResult { readonly episodes: readonly OperationalEpisode[]; readonly findings: readonly OperationalFinding[]; readonly candidates: readonly LearningCandidate[]; readonly coverage?: readonly AnalysisCoverage[]; readonly inputDigest?: string; readonly cost?: number; }
+export interface LearningResult { readonly episodes: readonly OperationalEpisode[]; readonly findings: readonly OperationalFinding[]; readonly candidates: readonly LearningCandidate[]; readonly episodeEvidence?: readonly EpisodeEvidence[]; readonly coverage?: readonly AnalysisCoverage[]; readonly inputDigest?: string; readonly cost?: number; }
 export interface OperationalContextSnapshot { readonly repositoryId: string; readonly sessionId: string; readonly repositoryFamilyKey: string; readonly worktreeKey: string; readonly instructions: readonly InstructionContext[]; readonly conventions: readonly ProjectToolConvention[]; readonly sourceAgentKey?: string; readonly runKey?: string; readonly conversationKey?: string; }
 export interface OperationalLearningReport { readonly candidates: readonly (Omit<LearningCandidate, 'state'> & { readonly state: 'candidate' | 'disputed' })[]; readonly findings: readonly OperationalFinding[]; readonly episodes: readonly OperationalEpisode[]; readonly coverage: readonly AnalysisCoverage[]; readonly cost: { readonly completedRuns: number; readonly total: number; }; }
 export interface OperationalAnalysisQuality {

@@ -8,6 +8,7 @@ export type EpisodeState = 'unresolved' | 'outcome-observed' | 'solution-support
 export type FindingKind = 'repository-tool-convention' | 'command-repair' | 'ambiguous-repair';
 export type EpisodeEvidenceKind = 'tool-request' | 'tool-result' | 'task-verification' | 'agent-claim' | 'user-instruction' | 'task-transition' | 'instruction-context' | 'analyzer-inference';
 export type EpisodeEvidenceState = 'observed' | 'succeeded' | 'failed' | 'closed';
+export type EpisodeEvidenceReasonClass = 'failure' | 'instruction' | 'superseded' | 'verification';
 
 export interface EpisodeEvidence {
   readonly id: string;
@@ -15,6 +16,8 @@ export interface EpisodeEvidence {
   readonly state: EpisodeEvidenceState;
   readonly decisionKey?: string;
   readonly scopeKey?: string;
+  readonly reasonClass?: EpisodeEvidenceReasonClass;
+  readonly detectorVersion?: string;
   readonly evidenceIds: readonly string[];
 }
 
@@ -65,6 +68,9 @@ export function createEpisodeEvidence(value: EpisodeEvidence): EpisodeEvidence {
   if (!episodeEvidenceStates.has(value.state)) throw new TypeError('Evidence state is invalid.');
   optionalIdentifier(value.decisionKey, 'Evidence decision key');
   optionalIdentifier(value.scopeKey, 'Evidence scope key');
+  if (value.reasonClass !== undefined && !episodeEvidenceReasonClasses.has(value.reasonClass)) throw new TypeError('Evidence reason class is invalid.');
+  if (value.kind === 'analyzer-inference') assertIdentifier(value.detectorVersion ?? '', 'Evidence detector version');
+  else if (value.detectorVersion !== undefined) throw new TypeError('Evidence detector version is invalid.');
   const evidenceIds = freezeIdentifiers(value.evidenceIds, 'Episode evidence');
   return Object.freeze({
     id: value.id,
@@ -72,6 +78,8 @@ export function createEpisodeEvidence(value: EpisodeEvidence): EpisodeEvidence {
     state: value.state,
     ...(value.decisionKey === undefined ? {} : { decisionKey: value.decisionKey }),
     ...(value.scopeKey === undefined ? {} : { scopeKey: value.scopeKey }),
+    ...(value.reasonClass === undefined ? {} : { reasonClass: value.reasonClass }),
+    ...(value.detectorVersion === undefined ? {} : { detectorVersion: value.detectorVersion }),
     evidenceIds
   });
 }
@@ -152,7 +160,9 @@ const episodeEvidenceKinds = new Set<EpisodeEvidenceKind>([
 
 const episodeEvidenceStates = new Set<EpisodeEvidenceState>(['observed', 'succeeded', 'failed', 'closed']);
 
-const episodeEvidenceFields = new Set<keyof EpisodeEvidence>(['id', 'kind', 'state', 'decisionKey', 'scopeKey', 'evidenceIds']);
+const episodeEvidenceReasonClasses = new Set<EpisodeEvidenceReasonClass>(['failure', 'instruction', 'superseded', 'verification']);
+
+const episodeEvidenceFields = new Set<keyof EpisodeEvidence>(['id', 'kind', 'state', 'decisionKey', 'scopeKey', 'reasonClass', 'detectorVersion', 'evidenceIds']);
 
 function assertEpisodeEvidenceFields(value: EpisodeEvidence): void {
   for (const field of Reflect.ownKeys(value)) {

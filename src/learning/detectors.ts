@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import type { CapturedEventRecord } from '../capture/contracts.js';
-import { createLearningCandidate, createOperationalEpisode, type LearningCandidate, type OperationalEpisode, type OperationalFinding } from './contracts.js';
+import { createLearningCandidate, createOperationalEpisode, type EpisodeEvidence, type LearningCandidate, type OperationalEpisode, type OperationalFinding } from './contracts.js';
 import type { ProjectToolConvention } from './project-conventions.js';
 
 const detectorVersion = 'm6-deterministic@1';
@@ -11,6 +11,7 @@ export interface DetectorInput {
   readonly sessionId: string;
   readonly events: readonly CapturedEventRecord[];
   readonly conventions: readonly ProjectToolConvention[];
+  readonly episodeEvidence?: readonly EpisodeEvidence[];
 }
 
 export interface DetectorResult {

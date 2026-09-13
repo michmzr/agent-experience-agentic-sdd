@@ -47,6 +47,7 @@ const toolResult: EpisodeEvidence = {
   kind: 'tool-result',
   state: 'failed',
   decisionKey: 'decision-install',
+  reasonClass: 'failure',
   evidenceIds: ['capture-result-1']
 };
 
@@ -70,6 +71,7 @@ const inference: EpisodeEvidence = {
   id: 'evidence-inference-1',
   kind: 'analyzer-inference',
   state: 'observed',
+  detectorVersion: 'typed-evidence@1',
   decisionKey: 'decision-install',
   evidenceIds: ['evidence-tool-request-1', 'evidence-tool-result-1']
 };
@@ -103,5 +105,9 @@ test('rejects malformed, duplicate, free-text, and dependency-free episode evide
   assert.throws(() => createEpisodeEvidence({ ...toolRequest, evidenceIds: ['capture-request-1', 'capture-request-1'] }), /duplicate/i);
   assert.throws(() => createEpisodeEvidence({ ...toolRequest, scopeKey: '' }), /scope/i);
   assert.throws(() => createEpisodeEvidence({ ...toolRequest, freeText: 'raw command output' } as EpisodeEvidence), /field/i);
+  assert.throws(() => createEpisodeEvidence({ ...toolResult, reasonClass: 'raw command output' as never }), /reason/i);
+  assert.throws(() => createEpisodeEvidence({ ...inference, detectorVersion: '' }), /detector/i);
+  const { detectorVersion: _detectorVersion, ...inferenceWithoutDetector } = inference;
+  assert.throws(() => createEpisodeEvidence(inferenceWithoutDetector), /detector/i);
   assert.throws(() => createEpisodeEvidence({ ...inference, evidenceIds: [] }), /evidence/i);
 });
