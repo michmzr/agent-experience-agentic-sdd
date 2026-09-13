@@ -192,9 +192,11 @@ test('suppresses a gap only for a successful criterion linked to the same closur
   const result = detectOperationalEpisodes({
     repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
     episodeEvidence: [
-      evidence({ id: 'closure', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['criterion-succeeded'] }),
-      evidence({ id: 'criterion-failed', kind: 'task-verification', state: 'failed', decisionKey: 'issue-9', scopeKey: 'repository' }),
-      evidence({ id: 'criterion-succeeded', kind: 'task-verification', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository' })
+      evidence({ id: 'closure', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['implementation'] }),
+      evidence({ id: 'implementation', kind: 'tool-result', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository' }),
+      evidence({ id: 'check-execution', kind: 'tool-request', state: 'observed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['implementation'] }),
+      evidence({ id: 'check-result', kind: 'tool-result', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['check-execution'] }),
+      evidence({ id: 'criterion-succeeded', kind: 'task-verification', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['check-result'] })
     ]
   });
   assert.equal(result.episodes.some((item) => item.kind === 'verification-gap'), false);
@@ -204,14 +206,51 @@ test('does not let an unrelated successful criterion suppress a failed linked ve
   const result = detectOperationalEpisodes({
     repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
     episodeEvidence: [
-      evidence({ id: 'closure', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['criterion-failed'] }),
-      evidence({ id: 'criterion-failed', kind: 'task-verification', state: 'failed', decisionKey: 'issue-9', scopeKey: 'repository' }),
+      evidence({ id: 'closure', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['implementation'] }),
+      evidence({ id: 'implementation', kind: 'tool-result', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository' }),
+      evidence({ id: 'check-execution', kind: 'tool-request', state: 'observed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['implementation'] }),
+      evidence({ id: 'check-result', kind: 'tool-result', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['check-execution'] }),
+      evidence({ id: 'criterion-failed', kind: 'task-verification', state: 'failed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['check-result'] }),
       evidence({ id: 'stale-success', kind: 'task-verification', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository' })
     ]
   });
   const gap = result.episodes.find((item): item is VerificationGapEpisode => item.kind === 'verification-gap');
   assert.equal(gap?.criterionEvidenceId, 'criterion-failed');
   assert.equal(gap?.criterionState, 'unmet');
+});
+
+test('does not attach same-kind evidence outside the closure dependency chain', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'closure', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['implementation'] }),
+      evidence({ id: 'implementation', kind: 'tool-result', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository' }),
+      evidence({ id: 'unrelated-request', kind: 'tool-request', state: 'observed', decisionKey: 'issue-9', scopeKey: 'repository' }),
+      evidence({ id: 'unrelated-result', kind: 'tool-result', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['unrelated-request'] }),
+      evidence({ id: 'unrelated-criterion', kind: 'task-verification', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['unrelated-result'] })
+    ]
+  });
+  const gap = result.episodes.find((item): item is VerificationGapEpisode => item.kind === 'verification-gap');
+  assert.equal(gap?.implementationEvidenceId, 'implementation');
+  assert.equal(gap?.checkExecutionEvidenceId, undefined);
+  assert.equal(gap?.checkResultEvidenceId, undefined);
+  assert.equal(gap?.criterionEvidenceId, undefined);
+  assert.equal(gap?.criterionState, 'unknown');
+});
+
+test('keeps implementation and check-result roles distinct when a result references a check request', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'closure', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['implementation', 'check-execution'] }),
+      evidence({ id: 'implementation', kind: 'tool-result', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['check-execution'] }),
+      evidence({ id: 'check-execution', kind: 'tool-request', state: 'observed', decisionKey: 'issue-9', scopeKey: 'repository' })
+    ]
+  });
+  const gap = result.episodes.find((item): item is VerificationGapEpisode => item.kind === 'verification-gap');
+  assert.equal(gap?.implementationEvidenceId, 'implementation');
+  assert.equal(gap?.checkResultEvidenceId, undefined);
+  assert.equal(new Set(gap?.evidenceEventIds).size, gap?.evidenceEventIds.length);
 });
 
 test('does not treat a tool result as an agent claim or a repeated acceptance', () => {

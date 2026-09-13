@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import { ExperienceService } from '../src/application/experience-service.js';
 import { runCli } from '../src/cli.js';
+import { OperationalLearningRepository } from '../src/learning/repository.js';
 import { OperationalLearningService } from '../src/learning/service.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 
@@ -50,4 +51,28 @@ test('rejects an analysis command without repository selection', () => {
   const result = runCli(['analysis', 'report', '--json']);
   assert.equal(result.exitCode, 2);
   assert.equal(result.stdout.includes('credential-like-marker'), false);
+});
+
+test('exposes report-safe typed evidence and episodes through the versioned analysis report', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-typed-analysis-report-'));
+  try {
+    const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    learning.enqueue({ repositoryId: 'repo-typed', sessionId: 'session-typed', inputHighWater: 1 });
+    const job = learning.claim();
+    learning.saveResult(job!.id, {
+      episodeEvidence: [{ id: 'semantic-closure', kind: 'task-transition', state: 'closed', decisionKey: 'release-approval', scopeKey: 'production-rollout', evidenceIds: ['semantic-closure'] }],
+      episodes: [{ id: 'semantic-gap', kind: 'verification-gap', repositoryId: 'repo-typed', sessionId: 'session-typed', detector: 'm9-typed-evidence@1', state: 'unresolved', evidenceEventIds: ['semantic-closure'], closureEvidenceId: 'semantic-closure', criterionState: 'unknown' }],
+      findings: [], candidates: []
+    }, job!.leaseToken);
+    learning.close();
+
+    const result = runCli(['analysis', 'report', '--repository-id', 'repo-typed', '--schema-version', '2', '--data-dir', dataDir, '--json']);
+    assert.equal(result.exitCode, 0);
+    const report = JSON.parse(result.stdout) as { typed: { evidence: Array<{ id: string }>; episodes: Array<{ kind: string; closureEvidenceId?: string }> } };
+    assert.equal(report.typed.episodes[0]?.kind, 'verification-gap');
+    assert.equal(report.typed.episodes[0]?.closureEvidenceId, report.typed.evidence[0]?.id);
+    assert.equal(result.stdout.includes('semantic-closure'), false);
+    assert.equal(result.stdout.includes('release-approval'), false);
+    assert.equal(result.stdout.includes('production-rollout'), false);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });

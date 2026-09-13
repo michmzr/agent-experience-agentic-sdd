@@ -98,11 +98,12 @@ function typedEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 
   }
 
   for (const closure of evidence.filter((item) => item.kind === 'task-transition' && item.state === 'closed')) {
-    const related = closure.evidenceIds.map((id) => byEvidenceId.get(id)).filter((item): item is EpisodeEvidence => item !== undefined && item.id !== closure.id);
-    const implementation = related.find((item) => item.kind === 'tool-result');
-    const checkExecution = related.find((item) => item.kind === 'tool-request');
-    const checkResult = related.find((item) => item.kind === 'tool-result' && checkExecution !== undefined && item.evidenceIds.includes(checkExecution.id));
-    const criterion = evidence.filter((item) => item.kind === 'task-verification' && closure.evidenceIds.includes(item.id) && item.decisionKey === closure.decisionKey && item.scopeKey === closure.scopeKey).sort(byVerificationStateThenId)[0];
+    const matchesClosure = (item: EpisodeEvidence): boolean => item.decisionKey === closure.decisionKey && item.scopeKey === closure.scopeKey;
+    const directlyLinked = closure.evidenceIds.map((id) => byEvidenceId.get(id)).filter((item): item is EpisodeEvidence => item !== undefined && item.id !== closure.id && matchesClosure(item));
+    const implementation = directlyLinked.find((item) => item.kind === 'tool-result');
+    const checkExecution = implementation === undefined ? undefined : evidence.find((item) => item.kind === 'tool-request' && matchesClosure(item) && item.evidenceIds.includes(implementation.id));
+    const checkResult = checkExecution === undefined ? undefined : evidence.find((item) => item.kind === 'tool-result' && item.id !== implementation?.id && matchesClosure(item) && item.evidenceIds.includes(checkExecution.id));
+    const criterion = checkResult === undefined ? undefined : evidence.filter((item) => item.kind === 'task-verification' && matchesClosure(item) && item.evidenceIds.includes(checkResult.id)).sort(byVerificationStateThenId)[0];
     const criterionState = criterion === undefined ? 'unknown' : criterion.state === 'failed' ? 'unmet' : criterion.state === 'succeeded' ? 'met' : 'unknown';
     if (criterionState === 'met') continue;
     const evidenceEventIds = [closure.id, ...(implementation === undefined ? [] : [implementation.id]), ...(checkExecution === undefined ? [] : [checkExecution.id]), ...(checkResult === undefined ? [] : [checkResult.id]), ...(criterion === undefined ? [] : [criterion.id])];

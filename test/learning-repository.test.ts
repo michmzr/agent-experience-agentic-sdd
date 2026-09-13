@@ -45,9 +45,36 @@ test('persists typed evidence before its dependent episode across restart', () =
 
   const reopened = new OperationalLearningRepository(databasePath);
   const report = reopened.report('repo-1');
-  assert.deepEqual(report.episodeEvidence.map(({ id, kind }) => ({ id, kind })), [{ id: 'closure-1', kind: 'task-transition' }]);
+  assert.deepEqual(report.episodeEvidence.map(({ kind }) => kind), ['task-transition']);
+  assert.notEqual(report.episodeEvidence[0]?.id, 'closure-1');
   assert.equal(report.episodes[0] !== undefined && 'kind' in report.episodes[0] ? report.episodes[0].kind : undefined, 'verification-gap');
   reopened.close();
+});
+
+test('pseudonymizes semantic typed evidence and preserves public references', () => {
+  const repository = new OperationalLearningRepository(path());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const claimed = repository.claim();
+  repository.saveResult(claimed!.id, {
+    episodeEvidence: [{ id: 'semantic-closure', kind: 'task-transition', state: 'closed', decisionKey: 'release-approval', scopeKey: 'production-rollout', evidenceIds: ['semantic-closure'] }],
+    episodes: [{ id: 'semantic-gap', kind: 'verification-gap', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm9-typed-evidence@1', state: 'unresolved', evidenceEventIds: ['semantic-closure'], closureEvidenceId: 'semantic-closure', criterionState: 'unknown' }],
+    findings: [{ id: 'semantic-finding', episodeId: 'semantic-finding', kind: 'insufficient-evidence', evidenceEventIds: ['semantic-closure'], statement: 'Missing task verification.' }], candidates: []
+  }, claimed!.leaseToken);
+
+  const report = repository.report('repo-1');
+  const serialized = JSON.stringify(report);
+  for (const raw of ['semantic-closure', 'semantic-gap', 'semantic-finding', 'release-approval', 'production-rollout']) assert.equal(serialized.includes(raw), false);
+  const evidence = report.episodeEvidence[0]!;
+  const episode = report.episodes.find((item) => 'kind' in item && item.kind === 'verification-gap');
+  const finding = report.findings.find(({ kind }) => kind === 'insufficient-evidence');
+  assert.notEqual(evidence.id, 'semantic-closure');
+  assert.notEqual(evidence.decisionKey, 'release-approval');
+  assert.notEqual(evidence.scopeKey, 'production-rollout');
+  assert.equal(episode !== undefined && 'closureEvidenceId' in episode ? episode.closureEvidenceId : undefined, evidence.id);
+  assert.equal(episode?.evidenceEventIds[0], evidence.id);
+  assert.equal(finding?.evidenceEventIds[0], evidence.id);
+  assert.equal(finding?.id, finding?.episodeId);
+  repository.close();
 });
 
 test('rejects forged evidence and discriminated references outside the job scope', () => {
@@ -119,7 +146,9 @@ test('allows an identical evidence retry within one scope but rejects a changed 
     episodeEvidence: [{ ...evidence, state: 'observed' }], episodes: [], findings: [], candidates: []
   }, second!.leaseToken), /payload/i);
   repository.saveResult(second!.id, { episodeEvidence: [evidence], episodes: [], findings: [], candidates: [] }, second!.leaseToken);
-  assert.deepEqual(repository.report('repo-1').episodeEvidence, [evidence]);
+  const report = repository.report('repo-1');
+  assert.equal(report.episodeEvidence[0]?.kind, evidence.kind);
+  assert.notEqual(report.episodeEvidence[0]?.id, evidence.id);
   repository.close();
 });
 
@@ -135,7 +164,7 @@ test('rejects unsafe evidence before persistence and returns only report-safe ev
   }, claimed!.leaseToken);
   const report = repository.report('repo-1');
   assert.equal(JSON.stringify(report.episodeEvidence).includes('/Users/'), false);
-  assert.deepEqual(report.episodeEvidence.map(({ id }) => id), ['safe-evidence']);
+  assert.notEqual(report.episodeEvidence[0]?.id, 'safe-evidence');
   repository.close();
 });
 
