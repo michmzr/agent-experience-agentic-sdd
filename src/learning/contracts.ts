@@ -1,3 +1,5 @@
+import type { CapturedEventRecord, NormalizedCaptureEvent } from '../capture/contracts.js';
+import { validateNormalizedCaptureEvent } from '../capture/normalization.js';
 import type { LessonKind } from '../domain/types.js';
 
 const identifierPattern = /^[A-Za-z0-9._:@/-]{1,512}$/;
@@ -6,6 +8,33 @@ const textLimit = 2_048;
 export type AnalysisJobState = 'pending' | 'running' | 'completed' | 'retryable-failure' | 'quarantined-input';
 export type EpisodeState = 'unresolved' | 'outcome-observed' | 'solution-supported';
 export type FindingKind = 'repository-tool-convention' | 'command-repair' | 'ambiguous-repair';
+
+export interface DetectorCheckpoint {
+  readonly version: 1;
+  readonly pendingEvents: readonly CapturedEventRecord[];
+}
+
+export function emptyDetectorCheckpoint(): DetectorCheckpoint {
+  return Object.freeze({ version: 1, pendingEvents: Object.freeze([]) });
+}
+
+export function validateDetectorCheckpoint(value: unknown, sessionId: string): DetectorCheckpoint {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Detector checkpoint is invalid.');
+  const record = value as Record<string, unknown>;
+  if (record.version !== 1 || !Array.isArray(record.pendingEvents) || record.pendingEvents.length > 128 ||
+    Object.keys(record).some((key) => key !== 'version' && key !== 'pendingEvents')) {
+    throw new TypeError('Detector checkpoint is invalid.');
+  }
+  const identities = new Set<string>();
+  const pendingEvents = record.pendingEvents.map((item) => {
+    const event = validateNormalizedCaptureEvent(item as NormalizedCaptureEvent);
+    if (event.sessionId !== sessionId) throw new TypeError('Detector checkpoint event session is outside its stream scope.');
+    if (identities.has(event.id)) throw new TypeError('Detector checkpoint contains duplicate event identity.');
+    identities.add(event.id);
+    return event;
+  });
+  return Object.freeze({ version: 1, pendingEvents: Object.freeze(pendingEvents) });
+}
 
 export interface AnalysisCoverage {
   readonly detector: string;

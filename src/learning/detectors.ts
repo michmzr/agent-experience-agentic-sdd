@@ -1,7 +1,16 @@
 import { createHash } from 'node:crypto';
 
 import type { CapturedEventRecord } from '../capture/contracts.js';
-import { createLearningCandidate, createOperationalEpisode, type LearningCandidate, type OperationalEpisode, type OperationalFinding } from './contracts.js';
+import {
+  createLearningCandidate,
+  createOperationalEpisode,
+  emptyDetectorCheckpoint,
+  validateDetectorCheckpoint,
+  type DetectorCheckpoint,
+  type LearningCandidate,
+  type OperationalEpisode,
+  type OperationalFinding
+} from './contracts.js';
 import type { ProjectToolConvention } from './project-conventions.js';
 
 const detectorVersion = 'm6-deterministic@1';
@@ -11,12 +20,14 @@ export interface DetectorInput {
   readonly sessionId: string;
   readonly events: readonly CapturedEventRecord[];
   readonly conventions: readonly ProjectToolConvention[];
+  readonly checkpoint?: DetectorCheckpoint;
 }
 
 export interface DetectorResult {
   readonly episodes: readonly OperationalEpisode[];
   readonly findings: readonly OperationalFinding[];
   readonly candidates: readonly LearningCandidate[];
+  readonly checkpoint: DetectorCheckpoint;
 }
 
 interface Operation {
@@ -25,12 +36,19 @@ interface Operation {
 }
 
 export function detectOperationalEpisodes(input: DetectorInput): DetectorResult {
+  const previous = validateDetectorCheckpoint(input.checkpoint ?? emptyDetectorCheckpoint(), input.sessionId);
+  const events = [...previous.pendingEvents, ...input.events].sort(byEvent);
   const convention = conventionEpisodes(input);
-  const repairs = repairEpisodes(input);
+  const repairs = repairEpisodes({ ...input, events });
+  const checkpoint = validateDetectorCheckpoint({
+    version: 1,
+    pendingEvents: repairs.pendingEvents.slice(-128)
+  }, input.sessionId);
   return Object.freeze({
     episodes: Object.freeze([...convention.episodes, ...repairs.episodes].sort(byId)),
     findings: Object.freeze([...repairs.findings].sort(byId)),
-    candidates: Object.freeze([...convention.candidates, ...repairs.candidates].sort(byId))
+    candidates: Object.freeze([...convention.candidates, ...repairs.candidates].sort(byId)),
+    checkpoint
   });
 }
 
@@ -57,13 +75,13 @@ function conventionEpisodes(input: DetectorInput): Pick<DetectorResult, 'episode
   return { episodes, candidates };
 }
 
-function repairEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 'findings' | 'candidates'> {
+function repairEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 'findings' | 'candidates'> & { readonly pendingEvents: readonly CapturedEventRecord[] } {
   const operations = operationsFrom(input.events);
   const episodes: OperationalEpisode[] = [];
   const findings: OperationalFinding[] = [];
   const candidates: LearningCandidate[] = [];
   for (const failed of operations.filter(({ result }) => result?.outcome === 'failed')) {
-    const replacement = operations.find((item) => item.request.occurredAt > failed.request.occurredAt && sameIntent(failed.request, item.request) && changedCommand(failed.request, item.request));
+    const replacement = replacementFor(failed, operations);
     if (replacement === undefined) continue;
     const evidenceEventIds = [failed.request.id, failed.result!.id, replacement.request.id, ...(replacement.result ? [replacement.result.id] : [])];
     const episodeId = stableId('episode', input.repositoryId, input.sessionId, detectorVersion, ...evidenceEventIds);
@@ -75,7 +93,17 @@ function repairEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' |
     episodes.push(createOperationalEpisode({ id: episodeId, repositoryId: input.repositoryId, sessionId: input.sessionId, detector: detectorVersion, state: 'outcome-observed', evidenceEventIds, attemptedOperation: command(failed.request), changedOperation: command(replacement.request), hypothesis: 'A source-declared task verification was not observed.' }));
     findings.push(finding(episodeId, evidenceEventIds, 'The changed command has no source-declared task verification.'));
   }
-  return { episodes, findings, candidates };
+  const pendingEvents = operations.flatMap((operation) => {
+    if (operation.result === undefined) return [operation.request];
+    if (operation.result.outcome === 'failed' && replacementFor(operation, operations) === undefined) return [operation.request, operation.result];
+    return [];
+  }).sort(byEvent);
+  return { episodes, findings, candidates, pendingEvents };
+}
+
+function replacementFor(failed: Operation, operations: readonly Operation[]): Operation | undefined {
+  return operations.find((item) => item.result !== undefined && item.request.occurredAt > failed.request.occurredAt &&
+    sameIntent(failed.request, item.request) && changedCommand(failed.request, item.request));
 }
 
 function operationsFrom(events: readonly CapturedEventRecord[]): readonly Operation[] {
@@ -111,4 +139,8 @@ function stableId(...parts: readonly string[]): string {
 
 function byId<T extends { readonly id: string }>(left: T, right: T): number {
   return left.id.localeCompare(right.id);
+}
+
+function byEvent(left: CapturedEventRecord, right: CapturedEventRecord): number {
+  return left.occurredAt.localeCompare(right.occurredAt) || left.id.localeCompare(right.id);
 }
