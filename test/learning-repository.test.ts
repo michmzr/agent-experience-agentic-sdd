@@ -106,6 +106,17 @@ test('rejects typed evidence IDs that are already owned by another repository sc
   second.close();
 });
 
+test('rejects insufficient-evidence findings that reference evidence outside the claimed job scope', () => {
+  const repository = new OperationalLearningRepository(path());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const claimed = repository.claim();
+  assert.throws(() => repository.saveResult(claimed!.id, {
+    episodeEvidence: [], episodes: [], candidates: [],
+    findings: [{ id: 'finding-1', episodeId: 'finding-1', kind: 'insufficient-evidence', evidenceEventIds: ['forged-evidence'], statement: 'Missing linked decision evidence.' }]
+  }, claimed!.leaseToken), /finding evidence.*scope/i);
+  repository.close();
+});
+
 test('rejects a typed episode whose evidence was not persisted for the job scope', () => {
   const repository = new OperationalLearningRepository(path());
   const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });

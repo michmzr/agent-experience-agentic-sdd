@@ -147,8 +147,9 @@ export function createTypedFinding(value: TypedInsufficientFinding): TypedInsuff
   assertFindingFields(value);
   assertIdentifier(value.id, 'Finding identity'); assertIdentifier(value.episodeId, 'Finding episode identity');
   if (value.kind !== 'insufficient-evidence') throw new TypeError('Finding kind is invalid.');
-  if (!Array.isArray(value.evidenceEventIds) || value.evidenceEventIds.length < 1) throw new TypeError('Finding evidence is invalid.');
-  for (const id of value.evidenceEventIds) assertIdentifier(id, 'Finding evidence identity');
+  if (!Array.isArray(value.evidenceEventIds) || value.evidenceEventIds.length < 1 || value.evidenceEventIds.length > 128) throw new TypeError('Finding evidence is invalid.');
+  const evidenceIds = new Set<string>();
+  for (const id of value.evidenceEventIds) { assertIdentifier(id, 'Finding evidence identity'); if (evidenceIds.has(id)) throw new TypeError('Finding evidence contains duplicate identity.'); evidenceIds.add(id); }
   if (typeof value.statement !== 'string' || value.statement.trim() !== value.statement || value.statement.length < 1 || value.statement.length > 2_048) throw new TypeError('Finding statement is invalid.');
   return Object.freeze({ id: value.id, episodeId: value.episodeId, kind: value.kind, evidenceEventIds: Object.freeze([...value.evidenceEventIds]), statement: value.statement });
 }

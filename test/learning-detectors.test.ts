@@ -171,6 +171,8 @@ test('rejects malformed typed episode and insufficient-evidence payloads at runt
   assert.throws(() => createTypedEpisode({ ...base, kind: 'repeated-acceptance', firstAcceptanceEvidenceId: 'approval-1', repeatedAcceptanceEvidenceId: 'approval-2', scopeKey: '', evidenceEventIds: ['approval-1', 'approval-2'] }), /scope/i);
   assert.throws(() => createTypedEpisode({ ...base, kind: 'correction', originalDecisionEvidenceId: 'decision-1', changedDecisionEvidenceId: 'decision-2', evidenceEventIds: ['decision-1'] }), /evidence/i);
   assert.throws(() => createTypedFinding({ id: 'finding-1', episodeId: 'episode-1', kind: 'insufficient-evidence', evidenceEventIds: [], statement: 'Missing relation.' }), /evidence/i);
+  assert.throws(() => createTypedFinding({ id: 'finding-1', episodeId: 'episode-1', kind: 'insufficient-evidence', evidenceEventIds: ['evidence-1', 'evidence-1'], statement: 'Missing relation.' }), /duplicate/i);
+  assert.throws(() => createTypedFinding({ id: 'finding-1', episodeId: 'episode-1', kind: 'insufficient-evidence', evidenceEventIds: Array.from({ length: 129 }, (_, index) => `evidence-${index}`), statement: 'Missing relation.' }), /evidence/i);
 });
 
 test('derives a verification gap for closure with no recorded criterion', () => {
