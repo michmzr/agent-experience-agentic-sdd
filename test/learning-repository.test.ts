@@ -129,3 +129,27 @@ test('migrates legacy analysis jobs into idempotent streams and recoverable runs
     assert.equal(reopened.analysisRunsFor('repo-1').length, 4);
   } finally { reopened.close(); }
 });
+
+test('merges legacy jobs with an existing completed stream without rerunning covered input', () => {
+  const databasePath = path();
+  const seeded = new OperationalLearningRepository(databasePath, () => '2026-09-12T10:00:00.000Z');
+  try {
+    seeded.enqueue({ repositoryId: 'repo-1', sessionId: 'session-mixed', inputHighWater: 7 });
+    const run = seeded.claim();
+    seeded.saveResult(run!.id, { episodes: [], findings: [], candidates: [] });
+  } finally { seeded.close(); }
+  const legacy = new DatabaseSync(databasePath);
+  try {
+    legacy.prepare('INSERT INTO operational_analysis_jobs (id, repository_id, session_id, input_high_water, state, attempts, created_at, updated_at, stream_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)').run('legacy-covered-5', 'repo-1', 'session-mixed', 5, 'pending', 0, '2026-09-12T09:00:00.000Z', '2026-09-12T09:00:00.000Z');
+    legacy.prepare('INSERT INTO operational_analysis_jobs (id, repository_id, session_id, input_high_water, state, attempts, created_at, updated_at, stream_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)').run('legacy-new-9', 'repo-1', 'session-mixed', 9, 'pending', 0, '2026-09-12T09:01:00.000Z', '2026-09-12T09:01:00.000Z');
+  } finally { legacy.close(); }
+
+  const migrated = new OperationalLearningRepository(databasePath, () => '2026-09-12T10:00:00.000Z');
+  try {
+    assert.deepEqual(migrated.streamsFor('repo-1').map(({ desiredThrough, completedThrough, state }) => ({ desiredThrough, completedThrough, state })), [{ desiredThrough: 9, completedThrough: 7, state: 'pending' }]);
+    assert.equal(migrated.jobById('legacy-covered-5')?.state, 'completed');
+    assert.equal(migrated.jobById('legacy-new-9')?.state, 'retryable-failure');
+    const claimed = migrated.claim();
+    assert.deepEqual({ inputFrom: claimed?.inputFrom, inputThrough: claimed?.inputThrough }, { inputFrom: 8, inputThrough: 9 });
+  } finally { migrated.close(); }
+});

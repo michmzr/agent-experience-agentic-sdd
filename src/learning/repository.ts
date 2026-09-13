@@ -61,12 +61,14 @@ export class OperationalLearningRepository {
       for (const row of rows) { const key = `${row.repository_id}\u0000${row.session_id}`; groups.set(key, [...(groups.get(key) ?? []), row]); }
       for (const group of groups.values()) {
         const first = group[0]!; const detector = defaultDetector; const id = streamId(first.repository_id, first.session_id, detector);
-        const desiredThrough = Math.max(...group.map(({ input_high_water }) => input_high_water));
-        const completedThrough = Math.max(0, ...group.filter(({ state }) => state === 'completed').map(({ input_high_water }) => input_high_water));
+        const existing = this.database.prepare('SELECT * FROM operational_analysis_streams WHERE id = ?').get(id);
+        const existingStream = existing === undefined ? undefined : this.stream(existing);
+        const desiredThrough = Math.max(existingStream?.desiredThrough ?? 0, ...group.map(({ input_high_water }) => input_high_water));
+        const completedThrough = Math.max(existingStream?.completedThrough ?? 0, ...group.filter(({ state }) => state === 'completed').map(({ input_high_water }) => input_high_water));
         const active = group.filter(({ state, input_high_water }) => input_high_water > completedThrough && (state === 'pending' || state === 'retryable-failure' || state === 'running'));
         const activeThrough = active.length ? Math.max(...active.map(({ input_high_water }) => input_high_water)) : undefined;
-        const streamState = activeThrough === undefined ? 'completed' : 'pending';
-        this.database.prepare("INSERT INTO operational_analysis_streams (id, repository_id, session_id, detector_version, desired_through, completed_through, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING").run(id, first.repository_id, first.session_id, detector, desiredThrough, completedThrough, streamState, first.created_at, timestamp);
+        const streamState = existingStream?.state === 'running' ? 'running' : desiredThrough > completedThrough ? 'pending' : 'completed';
+        this.database.prepare("INSERT INTO operational_analysis_streams (id, repository_id, session_id, detector_version, desired_through, completed_through, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET desired_through = excluded.desired_through, completed_through = excluded.completed_through, state = excluded.state, updated_at = excluded.updated_at").run(id, first.repository_id, first.session_id, detector, desiredThrough, completedThrough, streamState, first.created_at, timestamp);
         for (const row of group) {
           const selected = row.input_high_water === activeThrough && (row.state === 'pending' || row.state === 'retryable-failure' || row.state === 'running');
           const state = selected ? 'retryable-failure' : row.state === 'completed' ? 'completed' : 'completed';
