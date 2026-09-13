@@ -60,7 +60,11 @@ export async function runAnalysisCoordinator(
       const status = repository.status();
       if (claimable > 0 || status.activeRunningCount > 0 || active.size > 0) idleSince = now;
 
-      const launchCount = Math.min(settings.maxProcesses - active.size, claimable);
+      // Global running jobs include children inherited from an expired coordinator lease. Local active promises
+      // reserve additional slots while their job leases may not yet be visible. Counting both is deliberately
+      // conservative because a status snapshot cannot distinguish local jobs from predecessor jobs.
+      const occupied = status.activeRunningCount + active.size;
+      const launchCount = Math.min(Math.max(0, settings.maxProcesses - occupied), claimable);
       for (let index = 0; index < launchCount; index += 1) {
         let child: Promise<number>;
         try { child = host.spawnChild(dataDirectory); }

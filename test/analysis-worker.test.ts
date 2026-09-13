@@ -183,6 +183,28 @@ test('uses ten-second fenced leases and permits takeover only after expiry', asy
   assert.deepEqual(await takeover, { status: 'idle-timeout' });
 });
 
+test('lease takeover counts predecessor children against the global process cap', async () => {
+  const setup = harness({ pending: 5, maxProcesses: 3 });
+  const predecessor = runAnalysisCoordinator('/data', setup.settings, setup.repository, setup.host, 'owner-1');
+  await waitUntil(() => setup.children.length === 3);
+
+  setup.advanceTime(10_000);
+  const successor = runAnalysisCoordinator('/data', setup.settings, setup.repository, setup.host, 'owner-2');
+  const childrenAtTakeover = setup.children.length;
+
+  let finished = 0;
+  while (finished < 5) {
+    await waitUntil(() => setup.children.length > finished);
+    setup.children[finished]!.finish();
+    finished += 1;
+    await nextTurn();
+  }
+  assert.deepEqual(await predecessor, { status: 'lease-held' });
+  assert.deepEqual(await successor, { status: 'idle-timeout' });
+  assert.equal(childrenAtTakeover, 3);
+  assert.equal(setup.maximumActive(), 3);
+});
+
 test('recovers expired jobs before counting work and starts a child for the recovered job', async () => {
   const setup = harness({ expired: 1 });
   const running = runAnalysisCoordinator('/data', setup.settings, setup.repository, setup.host, 'owner');
