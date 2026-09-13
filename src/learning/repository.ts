@@ -104,13 +104,21 @@ export class OperationalLearningRepository {
     const timestamp = this.now();
     this.database.exec('BEGIN IMMEDIATE');
     try {
-      const isNewStream = this.streamRow(input.repositoryId, input.sessionId, version) === undefined;
+      const previousStream = this.streamRow(input.repositoryId, input.sessionId, version);
+      const isNewStream = previousStream === undefined;
       this.database.prepare(`INSERT INTO operational_analysis_streams
         (repository_id, session_id, detector_set_version, committed_high_water, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(repository_id, session_id, detector_set_version) DO UPDATE SET
         committed_high_water = MAX(committed_high_water, excluded.committed_high_water), updated_at = excluded.updated_at`)
         .run(input.repositoryId, input.sessionId, version, input.inputHighWater, timestamp, timestamp);
       const stream = this.streamRow(input.repositoryId, input.sessionId, version)!;
+      const quarantined = this.database.prepare(`SELECT 1 FROM operational_analysis_jobs WHERE repository_id = ? AND session_id = ?
+        AND detector_set_version = ? AND state = 'quarantined-input' AND input_high_water >= ?`)
+        .get(input.repositoryId, input.sessionId, version, stream.processed_high_water);
+      if (quarantined && previousStream !== undefined && input.inputHighWater <= previousStream.committed_high_water) {
+        this.database.exec('COMMIT');
+        return undefined;
+      }
       const pending = this.database.prepare(`SELECT id FROM operational_analysis_jobs WHERE repository_id = ? AND session_id = ?
         AND detector_set_version = ? AND state IN ('pending', 'retryable-failure')`).get(input.repositoryId, input.sessionId, version) as { id: string } | undefined;
       let job: AnalysisJob | undefined;
@@ -148,10 +156,16 @@ export class OperationalLearningRepository {
   claim(repositoryId?: string): AnalysisJob | undefined {
     this.database.exec('BEGIN IMMEDIATE');
     try {
-      const row = this.database.prepare(`SELECT j.* FROM operational_analysis_jobs j WHERE j.state IN ('pending', 'retryable-failure')
+      // A later range retains the unprocessed prefix and must wait for explicit quarantine recovery.
+      const row = this.database.prepare(`SELECT j.* FROM operational_analysis_jobs j
+        JOIN operational_analysis_streams s ON s.repository_id = j.repository_id AND s.session_id = j.session_id
+          AND s.detector_set_version = j.detector_set_version WHERE j.state IN ('pending', 'retryable-failure')
         ${repositoryId === undefined ? '' : 'AND j.repository_id = ?'} AND NOT EXISTS (
           SELECT 1 FROM operational_analysis_jobs running WHERE running.repository_id = j.repository_id AND running.session_id = j.session_id
-          AND running.detector_set_version = j.detector_set_version AND running.state = 'running') ORDER BY j.created_at, j.id LIMIT 1`).get(...(repositoryId === undefined ? [] : [repositoryId]));
+          AND running.detector_set_version = j.detector_set_version AND running.state = 'running') AND NOT EXISTS (
+          SELECT 1 FROM operational_analysis_jobs blocked WHERE blocked.repository_id = j.repository_id AND blocked.session_id = j.session_id
+          AND blocked.detector_set_version = j.detector_set_version AND blocked.state = 'quarantined-input'
+          AND blocked.input_high_water >= s.processed_high_water) ORDER BY j.created_at, j.id LIMIT 1`).get(...(repositoryId === undefined ? [] : [repositoryId]));
       if (!row) { this.database.exec('COMMIT'); return undefined; }
       this.database.prepare(`UPDATE operational_analysis_jobs SET state = 'running', attempts = attempts + 1, updated_at = ? WHERE id = ?`).run(this.now(), (row as { id: string }).id);
       const claimed = this.job(this.database.prepare(`SELECT * FROM operational_analysis_jobs WHERE id = ?`).get((row as { id: string }).id));

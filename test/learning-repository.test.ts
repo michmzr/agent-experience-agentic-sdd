@@ -333,3 +333,65 @@ test('retries a timed-out job as an execution failure', () => {
   assert.equal(repository.jobById(job.id)?.state, 'retryable-failure');
   repository.close();
 });
+
+for (const reason of ['execution-failure', 'invalid-input'] as const) {
+  test(`unchanged admission preserves ${reason} quarantine and higher input waits behind its unprocessed prefix`, () => {
+    const databasePath = path();
+    let repository = new OperationalLearningRepository(databasePath);
+    const input = { repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 4 };
+    const original = repository.enqueue(input);
+    assert.ok(original);
+    const attempts = reason === 'invalid-input' ? 1 : 4;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      assert.equal(repository.claim()?.id, original.id);
+      repository.retry(original.id, reason);
+    }
+    const quarantined = repository.jobById(original.id);
+    assert.equal(quarantined?.state, 'quarantined-input');
+    assert.equal(quarantined?.attempts, attempts);
+    assert.equal(repository.enqueue(input), undefined);
+    assert.equal(repository.jobsForStream('repo-1', 'session-1').length, 1);
+    assert.equal(repository.claim(), undefined);
+
+    const successor = repository.enqueue({ ...input, inputHighWater: 8 });
+    assert.ok(successor, 'higher committed demand remains durable behind the quarantine');
+    assert.equal(successor.inputLowWater, 0, 'the quarantined prefix must not be skipped');
+    assert.equal(successor.processedHighWater, 0);
+    assert.equal(successor.inputHighWater, 8);
+    assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 0);
+    assert.equal(repository.stream('repo-1', 'session-1')?.committedHighWater, 8);
+    assert.deepEqual(repository.jobById(original.id), quarantined);
+    assert.equal(repository.enqueue({ ...input, inputHighWater: 8 }), undefined);
+    assert.equal(repository.claim(), undefined, 'a successor cannot restart an unresolved quarantined prefix');
+    repository.close();
+    repository = new OperationalLearningRepository(databasePath);
+    assert.equal(repository.claim(), undefined);
+    assert.deepEqual(repository.jobById(original.id), quarantined);
+    assert.equal(repository.jobById(successor.id)?.attempts, 0);
+    repository.close();
+  });
+}
+
+test('a successor queued before quarantine remains blocked while another stream can be claimed', () => {
+  const repository = new OperationalLearningRepository(path());
+  const input = { repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 2 };
+  const completed = repository.enqueue(input);
+  assert.ok(completed);
+  repository.claim();
+  repository.saveResult(completed.id, { episodes: [], findings: [], candidates: [] });
+  const running = repository.enqueue({ ...input, inputHighWater: 4 });
+  assert.ok(running);
+  repository.claim();
+  const successor = repository.enqueue({ ...input, inputHighWater: 8 });
+  assert.ok(successor);
+  repository.retry(running.id, 'invalid-input');
+  assert.equal(repository.claim(), undefined);
+  assert.equal(repository.jobById(successor.id)?.inputLowWater, 2);
+  assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 2);
+  assert.equal(repository.enqueue({ ...input, inputHighWater: 9 })?.id, successor.id);
+  assert.equal(repository.claim(), undefined);
+  const independent = repository.enqueue({ ...input, detectorSetVersion: 'm6-deterministic@2' });
+  assert.ok(independent);
+  assert.equal(repository.claim()?.id, independent.id);
+  repository.close();
+});
