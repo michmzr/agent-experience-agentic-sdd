@@ -354,6 +354,37 @@ test('durable worker slots count a linked running job once and refill after rele
   repository.close();
 });
 
+test('status counts live reserved children including unclaimed slots without double counting linked jobs', () => {
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const repository = new OperationalLearningRepository(path(), () => new Date(millis).toISOString());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 1 });
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-2', inputHighWater: 1 });
+  const coordinator = repository.acquireCoordinatorLease({ ownerId: 'coordinator', leaseMs: 60_000 })!;
+  const linked = repository.reserveWorkerSlot({ ...coordinator, leaseMs: 30_000, maxProcesses: 3 })!;
+  assert.ok(repository.claim({ ownerId: 'child-1', leaseMs: 30_000, workerSlot: linked }));
+  assert.ok(repository.reserveWorkerSlot({ ...coordinator, leaseMs: 30_000, maxProcesses: 3 }));
+  assert.equal(repository.status({ repositoryId: 'missing' }).activeRunningCount, 2,
+    'active child count stays global when job metrics are filtered');
+  millis += 30_000;
+  assert.equal(repository.status().activeRunningCount, 0);
+  repository.close();
+});
+
+test('a worker slot claim rejects stale tokens and atomically links the current token', () => {
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const repository = new OperationalLearningRepository(path(), () => new Date(millis).toISOString());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 1 });
+  const coordinator = repository.acquireCoordinatorLease({ ownerId: 'coordinator', leaseMs: 60_000 })!;
+  const slot = repository.reserveWorkerSlot({ ...coordinator, leaseMs: 30_000, maxProcesses: 1 })!;
+  assert.throws(() => repository.claim({ ownerId: 'child', leaseMs: 30_000,
+    workerSlot: { ...slot, attempt: slot.attempt + 1 } }), /slot is not current/);
+  const claimed = repository.claim({ ownerId: 'child', leaseMs: 30_000, workerSlot: slot });
+  assert.ok(claimed);
+  assert.equal(repository.status().activeRunningCount, 1);
+  assert.throws(() => repository.claim({ ownerId: 'other-child', leaseMs: 30_000, workerSlot: slot }), /slot is not current/);
+  repository.close();
+});
+
 test('worker slot renewal is token-fenced and expired reservations are reclaimable', () => {
   let millis = Date.parse('2026-09-13T10:00:00.000Z');
   const repository = new OperationalLearningRepository(path(), () => new Date(millis).toISOString());

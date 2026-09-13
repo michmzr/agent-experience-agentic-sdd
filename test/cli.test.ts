@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { runCli, runCliAsync } from '../src/cli.js';
+import { OperationalLearningRepository } from '../src/learning/repository.js';
 import { initializeGitRepository } from './helpers/git-repository.js';
 
 test('returns an error for an unknown command', () => {
@@ -23,6 +24,80 @@ test('exposes the repository observability command forms', () => {
     const result = runCli(args);
     assert.notEqual(result.exitCode, 2, result.stderr);
   }
+});
+
+test('reports filtered analysis metrics with global worker configuration and live children', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-analysis-status-'));
+  try {
+    writeFileSync(join(dataDir, 'analysis-worker.json'), JSON.stringify({ version: 1, maxProcesses: 5, idleTimeoutMs: 1_234 }));
+    const repository = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    repository.enqueue({ repositoryId: 'repo-a', sessionId: 'session-a', inputHighWater: 2 });
+    repository.enqueue({ repositoryId: 'repo-b', sessionId: 'session-b', inputHighWater: 1 });
+    const job = repository.claim({ ownerId: 'manual', leaseMs: 60_000, repositoryId: 'repo-a' })!;
+    repository.retry(job.id, { ownerId: 'manual', attempt: job.attempts, reason: 'execution-failure' });
+    const coordinator = repository.acquireCoordinatorLease({ ownerId: 'coordinator', leaseMs: 60_000 })!;
+    repository.reserveWorkerSlot({ ...coordinator, leaseMs: 30_000, maxProcesses: 5 });
+    repository.close();
+
+    const result = runCli(['analysis', 'status', '--repository-id', 'repo-b', '--session', 'session-b', '--data-dir', dataDir, '--json']);
+    assert.equal(result.exitCode, 0, result.stderr);
+    const status = JSON.parse(result.stdout);
+    assert.deepEqual(status.workerConfig, { version: 1, maxProcesses: 5, idleTimeoutMs: 1_234 });
+    assert.equal(status.activeChildren, 1);
+    assert.equal(status.jobs.pending, 1);
+    assert.equal(status.jobs['retryable-failure'], 0);
+    assert.equal(status.totalAttempts, 0);
+    assert.equal(status.totalRetries, 0);
+    assert.equal(status.failureCounts['execution-failure'], 0);
+    assert.equal(status.coordinatorLease.ownerId, 'coordinator');
+    assert.equal(typeof status.oldestOutstandingAgeMs, 'number');
+    assert.equal(status.nextRetryAt, null);
+    assert.equal(status.eventsLoaded, 0);
+    assert.equal(status.uniqueAcknowledgedEvents, 0);
+    assert.equal(status.rereadRatio, 0);
+
+    const human = runCli(['analysis', 'status', '--data-dir', dataDir]);
+    assert.equal(human.exitCode, 0, human.stderr);
+    assert.match(human.stdout, /Scheduled retries: 1/);
+    assert.match(human.stdout, /Failure attempts: execution-failure=1/);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('bounds analysis worker configuration and internal argument errors without affecting passive capture', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-analysis-config-'));
+  const marker = 'private-worker-token';
+  try {
+    writeFileSync(join(dataDir, 'analysis-worker.json'), `{\"version\":1,\"maxProcesses\":99,\"idleTimeoutMs\":300000,\"private\":\"${marker}\"}`);
+    const worker = await runCliAsync(['analysis', 'worker', '--data-dir', dataDir]);
+    assert.equal(worker.exitCode, 1);
+    assert.equal(worker.stdout, '');
+    assert.match(worker.stderr, /^ANALYSIS_CONFIGURATION_ERROR: Analysis worker configuration is invalid\.\n$/);
+    assert.equal(worker.stderr.includes(marker), false);
+
+    const status = runCli(['analysis', 'status', '--data-dir', dataDir, '--json']);
+    assert.equal(status.exitCode, 1);
+    assert.deepEqual(JSON.parse(status.stdout), { error: {
+      code: 'ANALYSIS_CONFIGURATION_ERROR', message: 'Analysis worker configuration is invalid.'
+    } });
+    assert.equal(status.stdout.includes(marker), false);
+
+    const invalidChild = await runCliAsync(['analysis', 'worker-child', '--data-dir', dataDir,
+      '--worker-slot-id', marker, '--worker-slot-owner', 'owner', '--worker-slot-attempt', 'not-an-integer']);
+    assert.equal(invalidChild.exitCode, 2);
+    assert.equal(invalidChild.stdout, '');
+    assert.match(invalidChild.stderr, /^INVALID_SYNTAX: Analysis worker arguments are invalid\.\n$/);
+    assert.equal(invalidChild.stderr.includes(marker), false);
+
+    const lostWatchdog = await runCliAsync(['analysis', 'worker-watchdog', '--data-dir', dataDir,
+      '--worker-slot-id', '00000000-0000-4000-8000-000000000000', '--worker-slot-owner', 'owner', '--worker-slot-attempt', '1']);
+    assert.equal(lostWatchdog.exitCode, 1);
+    assert.equal(lostWatchdog.stdout, '');
+    assert.equal(lostWatchdog.stderr, 'ANALYSIS_WORKER_FAILED: Analysis worker failed.\n');
+
+    const capture = await runCliAsync(['capture', 'hook', '--source', 'codex', '--data-dir', dataDir], { hookInput: '{}'});
+    assert.equal(capture.exitCode, 0);
+    assert.equal(capture.stdout, '');
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 
 test('accepts a Git top-level repository path and rejects a nested path', () => {

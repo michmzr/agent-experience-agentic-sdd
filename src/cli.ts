@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 
 import { DomainError, errorMessage, ExperienceService } from './application/experience-service.js';
 import { MAX_HOOK_INPUT_BYTES, type PassiveHookSource } from './capture/hook-adapters/contracts.js';
@@ -17,6 +17,9 @@ import { resolveRepository, resolveRepositoryRoot } from './repository/local-rep
 import { resolveConfiguredWorkspaceRoot } from './capture/diagnostic-scope.js';
 import { installHooks, parseHookSelection, type HookSelectionPrompt, verifyInstalledHooks } from './cli/hook-installation.js';
 import { AelSkillError, inspectAelSkill, installAelSkill, uninstallAelSkill, updateAelSkill, validateAelSkill, type AelSkillLocation, type AelSkillScope } from './skill/ael-skill.js';
+import { OperationalLearningRepository, type AnalysisStatus, type AnalysisWorkerSlotFence } from './learning/repository.js';
+import { createProductionAnalysisWatchdogHost, createProductionAnalysisWorkerHost, runAnalysisCoordinator, runAnalysisWorkerWatchdog } from './learning/worker.js';
+import { loadAnalysisWorkerSettings } from './learning/worker-settings.js';
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string; }
 export interface RunCliAsyncOptions {
@@ -60,6 +63,7 @@ export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workin
 export async function runCliAsync(args: string[], options: RunCliAsyncOptions = {}): Promise<CliResult> {
   if (isCaptureHookCommand(args)) return runCaptureHookCli(args, options);
   if (args[0] === 'hooks' && args[1] === 'verify') return runHookReadinessCli(args);
+  if (isInternalAnalysisWorkerCommand(args)) return runInternalAnalysisWorkerCli(args, options);
   if (args[0] !== 'review') return runCli(args, options);
   try {
     const parsed = parseArguments(args); const json = parsed.options.has('json');
@@ -95,6 +99,74 @@ export async function runCliAsync(args: string[], options: RunCliAsyncOptions = 
     const diagnostic = syntax ? toDiagnostic(error, 'INVALID_SYNTAX') : { code: 'REVIEW_ERROR', message: 'Review failed.' };
     return args.includes('--json') ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' } : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${diagnostic.code}: ${diagnostic.message}\n` };
   }
+}
+
+function isInternalAnalysisWorkerCommand(args: readonly string[]): boolean {
+  return args[0] === 'analysis' && ['worker', 'worker-watchdog', 'worker-child'].includes(args[1] ?? '');
+}
+
+async function runInternalAnalysisWorkerCli(args: string[], options: RunCliAsyncOptions): Promise<CliResult> {
+  let repository: OperationalLearningRepository | undefined;
+  try {
+    const parsed = parseArguments(args);
+    const [, subcommand, ...rest] = parsed.positionals;
+    if (rest.length !== 0) throw new SyntaxError('Analysis worker arguments are invalid.');
+    const dataDirectory = internalDataDirectory(parsed.options);
+    const entrypoint = options.cliEntrypoint ?? fileURLToPath(import.meta.url);
+    if (subcommand === 'worker') {
+      assertNoUnknownOptions(parsed.options, ['data-dir']);
+      let settings;
+      try { settings = loadAnalysisWorkerSettings(dataDirectory); }
+      catch { return internalFailure(1, 'ANALYSIS_CONFIGURATION_ERROR', 'Analysis worker configuration is invalid.'); }
+      repository = new OperationalLearningRepository(join(dataDirectory, 'experience.sqlite'));
+      await runAnalysisCoordinator(dataDirectory, settings, repository, createProductionAnalysisWorkerHost(entrypoint));
+      return internalSuccess();
+    }
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'worker-slot-id', 'worker-slot-owner', 'worker-slot-attempt']);
+    const slot = internalWorkerSlot(parsed.options);
+    if (subcommand === 'worker-watchdog') {
+      repository = new OperationalLearningRepository(join(dataDirectory, 'experience.sqlite'));
+      const result = await runAnalysisWorkerWatchdog(dataDirectory, { ...slot, leaseExpiresAt: '', jobId: null }, repository,
+        createProductionAnalysisWatchdogHost(entrypoint));
+      if (result.status === 'completed' && result.exitCode === 0) return internalSuccess();
+      return internalFailure(1, 'ANALYSIS_WORKER_FAILED', 'Analysis worker failed.');
+    }
+    if (subcommand === 'worker-child') {
+      const result = new ExperienceService({ dataDir: dataDirectory }).runNextOperationalAnalysis(slot);
+      return result.status === 'idle' || result.status === 'completed'
+        ? internalSuccess()
+        : internalFailure(1, 'ANALYSIS_WORKER_FAILED', 'Analysis worker failed.');
+    }
+    throw new SyntaxError('Analysis worker arguments are invalid.');
+  } catch (error) {
+    if (error instanceof SyntaxError) return internalFailure(2, 'INVALID_SYNTAX', 'Analysis worker arguments are invalid.');
+    return internalFailure(1, 'ANALYSIS_WORKER_ERROR', 'Analysis worker failed.');
+  } finally {
+    try { repository?.close(); } catch { /* Preserve the bounded command result. */ }
+  }
+}
+
+function internalDataDirectory(options: Map<string, string | true>): string {
+  const value = requiredString(options, 'data-dir');
+  if (!isAbsolute(value) || value.length > 4_096 || value.includes('\0')) throw new SyntaxError('Analysis worker arguments are invalid.');
+  return value;
+}
+
+function internalWorkerSlot(options: Map<string, string | true>): AnalysisWorkerSlotFence {
+  const slotId = requiredString(options, 'worker-slot-id');
+  const ownerId = requiredString(options, 'worker-slot-owner');
+  const rawAttempt = requiredString(options, 'worker-slot-attempt');
+  const attempt = Number(rawAttempt);
+  const validIdentity = (value: string) => /^[A-Za-z0-9._:@/-]{1,512}$/.test(value);
+  if (!validIdentity(slotId) || !validIdentity(ownerId) || !/^[1-9][0-9]*$/.test(rawAttempt) || !Number.isSafeInteger(attempt)) {
+    throw new SyntaxError('Analysis worker arguments are invalid.');
+  }
+  return Object.freeze({ slotId, ownerId, attempt });
+}
+
+function internalSuccess(): CliResult { return { exitCode: 0, stdout: '', stderr: '' }; }
+function internalFailure(exitCode: number, code: string, message: string): CliResult {
+  return { exitCode, stdout: '', stderr: `${code}: ${message}\n` };
 }
 
 function formatIngestionDiagnostic(value: SessionIngestionDiagnostic): string {
@@ -213,6 +285,13 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   if (command === 'analysis' && subcommand === 'report' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'session']);
     return service.operationalAnalysisReport(requiredString(parsed.options, 'repository-id'), optionalString(parsed.options, 'session'));
+  }
+  if (command === 'analysis' && subcommand === 'status' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'session']);
+    return service.operationalAnalysisStatus({
+      ...(optionalString(parsed.options, 'repository-id') === undefined ? {} : { repositoryId: optionalString(parsed.options, 'repository-id') }),
+      ...(optionalString(parsed.options, 'session') === undefined ? {} : { sessionId: optionalString(parsed.options, 'session') })
+    });
   }
   if (command === 'experience' && subcommand === 'inspect' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository']);
@@ -481,6 +560,10 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
     const status = value as { status: string; database: { path: string; available: boolean }; cli: { entrypoint: string; available: boolean }; repositories: Array<{ status: string; repository: { id: string; root?: string }; selectedSources: readonly string[]; sources: readonly { source: string; status: string; code?: string }[] }> };
     return [`AEL: ${status.status}`, `CLI: ${status.cli.available ? 'available' : 'unavailable'} (${status.cli.entrypoint})`, `Database: ${status.database.available ? 'available' : 'unavailable'} (${status.database.path})`, status.repositories.length ? status.repositories.map((repository) => formatRepositoryStatus(repository)).join('\n\n') : 'No registered repositories.'].join('\n');
   }
+  if (command === 'analysis' && subcommand === 'status') return formatAnalysisStatus(value as AnalysisStatus & {
+    readonly workerConfig: { readonly maxProcesses: number; readonly idleTimeoutMs: number };
+    readonly activeChildren: number;
+  });
   if (command === 'export') {
     const knowledge = (value as { knowledge: KnowledgeRecord[] }).knowledge;
     return `Exported ${countLabel(knowledge.length, 'knowledge entry')}.${knowledge.length ? `\n${formatKnowledgeList(knowledge)}` : ''}`;
@@ -555,6 +638,29 @@ function formatRepositoryStatus(status: { status: string; repository: { id: stri
 function formatCaptureDiagnostics(report: { scope: { kind: string; id: string }; counts: Record<string, number> }): string {
   return [`Scope: ${report.scope.kind} ${report.scope.id}`, ...Object.keys(report.counts).sort().map((category) => `${category}: ${report.counts[category]}`)].join('\n');
 }
+function formatAnalysisStatus(status: AnalysisStatus & {
+  readonly workerConfig: { readonly maxProcesses: number; readonly idleTimeoutMs: number };
+  readonly activeChildren: number;
+}): string {
+  const queue = Object.entries(status.jobs).map(([state, count]) => `${state}=${count}`).join(', ');
+  const failures = Object.entries(status.failureCounts).map(([reason, count]) => `${reason}=${count}`).join(', ');
+  const diagnostics = Object.entries(status.diagnostics).map(([code, count]) => `${code}=${count}`).join(', ');
+  return [
+    `Worker config: maxProcesses=${status.workerConfig.maxProcesses}, idleTimeoutMs=${status.workerConfig.idleTimeoutMs}`,
+    `Coordinator lease: ${status.coordinatorLease === null ? 'none' : `active (attempt ${status.coordinatorLease.attempt}, expires ${status.coordinatorLease.leaseExpiresAt})`}`,
+    `Active children: ${status.activeChildren}`,
+    `Queue: ${queue}`,
+    `Oldest outstanding age ms: ${status.oldestOutstandingAgeMs ?? 'none'}`,
+    `Next retry: ${status.nextRetryAt ?? 'none'}`,
+    `Attempts: ${status.totalAttempts}`,
+    `Scheduled retries: ${status.totalRetries}`,
+    `Events loaded: ${status.eventsLoaded}`,
+    `Unique acknowledged events: ${status.uniqueAcknowledgedEvents}`,
+    `Reread ratio: ${status.rereadRatio}`,
+    `Failure attempts: ${failures}`,
+    `Worker diagnostics: ${diagnostics}`
+  ].join('\n');
+}
 function formatKnowledgeList(entries: readonly KnowledgeRecord[]): string { return entries.length ? entries.map((entry) => formatKnowledge(entry, false)).join('\n') : 'No knowledge entries found.'; }
 function formatKnowledge(entry: KnowledgeRecord, includeEvidence: boolean): string { return `${entry.id} [${entry.state}]${entry.authoritative ? ' [authoritative]' : ''}\n${entry.statement}${includeEvidence ? `\nEvidence: ${entry.evidenceIds.join(', ')}` : ''}`; }
 function countLabel(count: number, singular: string): string { return `${count} ${count === 1 ? singular : `${singular}s`}`; }
@@ -586,7 +692,7 @@ function invalidCommand(command: string | undefined): SyntaxError {
     ? `Unknown command form for ${command}.`
     : 'Unknown command.');
 }
-function usage(): string { return 'Usage: ael <init [--workspace-id slug]|init --scope global|repo|workspace [--hooks codex,cursor]|unregister --repository-id id|list records|stats|status|status-global|experience add|experience inspect|validate|inspect|lessons list|retrieve|export|evidence session <id>|capture hook --source codex|cursor|capture drain|capture status|analysis run --repository-id id|analysis report --repository-id id|hooks verify --worktree path|hooks diagnostics|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote|skill install|update|status|validate|uninstall> [options]'; }
+function usage(): string { return 'Usage: ael <init [--workspace-id slug]|init --scope global|repo|workspace [--hooks codex,cursor]|unregister --repository-id id|list records|stats|status|status-global|experience add|experience inspect|validate|inspect|lessons list|retrieve|export|evidence session <id>|capture hook --source codex|cursor|capture drain|capture status|analysis run --repository-id id|analysis report --repository-id id|analysis status [--repository-id id] [--session id]|analysis worker|hooks verify --worktree path|hooks diagnostics|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote|skill install|update|status|validate|uninstall> [options]'; }
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } {
   return error instanceof DomainError || error instanceof RuntimeServiceError
     ? { code: error.code, message: error.message }

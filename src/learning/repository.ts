@@ -521,8 +521,12 @@ export class OperationalLearningRepository {
         if (job.state !== 'completed' && (oldest === null || job.created_at < oldest)) oldest = job.created_at;
         if (job.state === 'retryable-failure' && job.retry_after !== null && (nextRetryAt === null || job.retry_after < nextRetryAt)) nextRetryAt = job.retry_after;
       }
-      const { active_running_count: activeRunningCount } = this.database.prepare(`SELECT COUNT(*) AS active_running_count
-        FROM operational_analysis_jobs WHERE state = 'running' AND lease_expires_at > ?`).get(timestamp) as { active_running_count: number };
+      const { active_running_count: activeRunningCount } = this.database.prepare(`SELECT
+        (SELECT COUNT(*) FROM operational_analysis_worker_slots s WHERE s.lease_expires_at > ?) +
+        (SELECT COUNT(*) FROM operational_analysis_jobs j WHERE j.state = 'running' AND j.lease_expires_at > ?
+          AND NOT EXISTS (SELECT 1 FROM operational_analysis_worker_slots s
+            WHERE s.job_id = j.id AND s.lease_expires_at > ?)) AS active_running_count`)
+        .get(timestamp, timestamp, timestamp) as { active_running_count: number };
       const metrics = this.database.prepare(`SELECT COUNT(*) AS total_attempts,
         COALESCE(SUM(CASE WHEN j.outcome = 'retryable-failure' THEN 1 ELSE 0 END), 0) AS total_retries,
         COALESCE(SUM(j.events_loaded), 0) AS events_loaded,

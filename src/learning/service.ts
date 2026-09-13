@@ -12,6 +12,7 @@ import {
   type AnalysisFailureReason,
   type AnalysisJob,
   type AnalysisMetrics,
+  type AnalysisWorkerSlotFence,
   type OperationalLearningReport
 } from './repository.js';
 
@@ -31,6 +32,7 @@ export interface LearningRunOptions {
   readonly maxEvents?: number;
   readonly deadlineMs?: number;
   readonly repositoryId?: string;
+  readonly workerSlot?: AnalysisWorkerSlotFence;
 }
 
 export interface LearningRunResult {
@@ -70,7 +72,9 @@ export class OperationalLearningService {
     const ownerId = options.ownerId ?? randomUUID();
     const repository = new OperationalLearningRepository(this.databasePath);
     try {
-      const job = repository.claim({ ownerId, leaseMs: JOB_LEASE_MS, ...(options.repositoryId === undefined ? {} : { repositoryId: options.repositoryId }) });
+      const job = repository.claim({ ownerId, leaseMs: JOB_LEASE_MS,
+        ...(options.repositoryId === undefined ? {} : { repositoryId: options.repositoryId }),
+        ...(options.workerSlot === undefined ? {} : { workerSlot: options.workerSlot }) });
       if (!job) return Object.freeze({ status: 'idle' });
       let store: ExperienceStore;
       try { store = this.openStore(this.databasePath); }

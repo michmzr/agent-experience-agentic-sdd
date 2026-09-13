@@ -19,7 +19,9 @@ import { projectCapturedSessionEvidence } from '../evidence/capture-projection.j
 import { sourceEvidenceCapabilities } from '../evidence/capabilities.js';
 import { SessionEvidenceRepository } from '../evidence/repository.js';
 import { OperationalLearningService } from '../learning/service.js';
+import { OperationalLearningRepository, type AnalysisFilters, type AnalysisWorkerSlotFence } from '../learning/repository.js';
 import type { AnalysisWorkerScheduler } from '../learning/worker-launcher.js';
+import { loadAnalysisWorkerSettings } from '../learning/worker-settings.js';
 import type { SessionId } from '../domain/types.js';
 import {
   RuntimeService,
@@ -206,6 +208,22 @@ export class ExperienceService {
   runOperationalAnalysis(repositoryId: string) {
     const service = new OperationalLearningService(this.databasePath);
     return service.runNext({ repositoryId });
+  }
+
+  runNextOperationalAnalysis(workerSlot: AnalysisWorkerSlotFence) {
+    const service = new OperationalLearningService(this.databasePath);
+    return service.runNext({ workerSlot });
+  }
+
+  operationalAnalysisStatus(filters: AnalysisFilters = {}) {
+    let workerConfig;
+    try { workerConfig = loadAnalysisWorkerSettings(this.dataDirectory); }
+    catch { throw new DomainError('ANALYSIS_CONFIGURATION_ERROR', 'Analysis worker configuration is invalid.'); }
+    const repository = new OperationalLearningRepository(this.databasePath);
+    try {
+      const status = repository.status(filters);
+      return Object.freeze({ version: 1 as const, workerConfig, ...status, activeChildren: status.activeRunningCount });
+    } finally { repository.close(); }
   }
 
   operationalAnalysisReport(repositoryId: string, sessionId?: string) {

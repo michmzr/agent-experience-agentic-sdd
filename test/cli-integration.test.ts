@@ -7,6 +7,10 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { runCli } from '../src/cli.js';
+import { ExperienceService } from '../src/application/experience-service.js';
+import type { SessionId } from '../src/domain/types.js';
+import { OperationalLearningRepository } from '../src/learning/repository.js';
+import { ExperienceStore } from '../src/storage/experience-store.js';
 import { initializeDiagnosticWorkspace, resolveDiagnosticScope } from '../src/capture/diagnostic-scope.js';
 import { CaptureDiagnosticStore } from '../src/storage/capture-diagnostic-store.js';
 import { initializeGitRepository } from './helpers/git-repository.js';
@@ -166,6 +170,58 @@ test('exposes the package bin as an executable compiled CLI', () => {
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+test('compiled watchdog isolates worker-child and completes a slot-linked analysis claim', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-worker-cli-'));
+  const root = mkdtempSync(join(tmpdir(), 'ael-worker-repository-'));
+  const databasePath = join(dataDir, 'experience.sqlite');
+  try {
+    writeFileSync(join(root, 'AGENTS.md'), 'Use pnpm instead of npm.\n');
+    const store = new ExperienceStore(databasePath);
+    store.registerRepository({ id: 'repo-1', root, observedAt: new Date().toISOString() });
+    store.appendIncremental({ session: { id: 'session-1' as SessionId, source: 'codex',
+      startedAt: new Date().toISOString(), repositoryId: 'repo-1' as never } });
+    store.appendIncremental({ session: { id: 'session-2' as SessionId, source: 'codex',
+      startedAt: new Date(Date.now() + 1).toISOString(), repositoryId: 'repo-1' as never } });
+    store.close();
+    const repository = new OperationalLearningRepository(databasePath);
+    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 0 });
+    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-2', inputHighWater: 0 });
+    const coordinator = repository.acquireCoordinatorLease({ ownerId: 'coordinator', leaseMs: 60_000 })!;
+    const slot = repository.reserveWorkerSlot({ ...coordinator, leaseMs: 45_000, maxProcesses: 1 })!;
+    assert.equal(repository.status().activeRunningCount, 1, 'unclaimed live slot is visible in status');
+    repository.close();
+
+    const executable = join(process.cwd(), 'dist', 'src', 'cli.js');
+    const result = spawnSync(process.execPath, [executable, 'analysis', 'worker-watchdog', '--data-dir', dataDir,
+      '--worker-slot-id', slot.slotId, '--worker-slot-owner', slot.ownerId,
+      '--worker-slot-attempt', String(slot.attempt)], { encoding: 'utf8', timeout: 10_000 });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, '');
+    assert.equal(new ExperienceService({ dataDir }).operationalAnalysisReport('repo-1').candidates.length, 1);
+    const status = JSON.parse(spawnSync(process.execPath, [executable, 'analysis', 'status', '--data-dir', dataDir, '--json'],
+      { encoding: 'utf8' }).stdout);
+    assert.equal(status.jobs.completed, 1);
+    assert.equal(status.jobs.pending, 1, 'worker-child performs exactly one runNext operation');
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('compiled coordinator loads global settings, waits for idle timeout, and emits no routine output', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-coordinator-cli-'));
+  try {
+    writeFileSync(join(dataDir, 'analysis-worker.json'), JSON.stringify({ version: 1, maxProcesses: 3, idleTimeoutMs: 1_000 }));
+    const executable = join(process.cwd(), 'dist', 'src', 'cli.js');
+    const result = spawnSync(process.execPath, [executable, 'analysis', 'worker', '--data-dir', dataDir],
+      { encoding: 'utf8', timeout: 5_000 });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, '');
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 
 test('runs the declared development script and an installed package bin', () => {

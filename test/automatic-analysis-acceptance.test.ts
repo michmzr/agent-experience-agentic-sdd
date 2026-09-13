@@ -35,7 +35,11 @@ test('passive capture produces an analysis candidate without a manual analysis r
               await runAnalysisCoordinator(dataDirectory, { version: 1, maxProcesses: 1, idleTimeoutMs: 1000 }, repository, {
                 now: () => Date.now(),
                 delay: (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
-                spawnChild: async () => service.runNext({ ownerId: 'acceptance-child' }).status === 'completed' ? 0 : 1
+                spawnChild: async (_dataDirectory, slot) => {
+                  const exitCode = service.runNext({ ownerId: 'acceptance-child', workerSlot: slot }).status === 'completed' ? 0 : 1;
+                  repository.releaseWorkerSlot(slot);
+                  return exitCode;
+                }
               }, 'acceptance-coordinator');
             } finally { repository.close(); }
           `;

@@ -71,6 +71,23 @@ test('returns idle when no committed analysis job is pending', () => {
   assert.deepEqual(service.runNext(), { status: 'idle' });
 });
 
+test('passes a complete durable worker slot fence into the job claim', () => {
+  const { databasePath, store } = fixture();
+  append(store, repairEvents());
+  store.close();
+  const service = new OperationalLearningService(databasePath);
+  service.enqueueCommittedSession('repo-1', 'session-1');
+  const repository = new OperationalLearningRepository(databasePath);
+  const coordinator = repository.acquireCoordinatorLease({ ownerId: 'coordinator', leaseMs: 60_000 })!;
+  const slot = repository.reserveWorkerSlot({ ...coordinator, leaseMs: 30_000, maxProcesses: 1 })!;
+  repository.close();
+
+  assert.equal(service.runNext({ ownerId: 'worker-child', workerSlot: slot }).status, 'completed');
+  const reopened = new OperationalLearningRepository(databasePath);
+  assert.equal(reopened.status().activeRunningCount, 1, 'watchdog owns the live slot until it releases it');
+  reopened.close();
+});
+
 test('analyzes only the claimed high-water when later events already exist', () => {
   const { databasePath, store } = fixture();
   append(store, repairEvents());
