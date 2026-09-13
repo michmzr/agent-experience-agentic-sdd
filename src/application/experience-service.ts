@@ -28,6 +28,8 @@ import {
   type PublicGateDecision
 } from './runtime-service.js';
 
+const legacyOperationalDetector = 'm6-deterministic@1';
+
 export interface LessonFilter {
   readonly scope?: KnowledgeScope;
   readonly repositoryId?: string;
@@ -242,7 +244,8 @@ export class ExperienceService {
   operationalAnalysisReport(repositoryId: string, sessionId?: string) {
     const service = new OperationalLearningService(this.databasePath);
     const report = service.report(repositoryId);
-    const scopedEpisodes = sessionId === undefined ? report.episodes : report.episodes.filter((episode) => episode.sessionId === sessionId);
+    const legacyEpisodes = report.episodes.filter((episode) => episode.detector === legacyOperationalDetector);
+    const scopedEpisodes = sessionId === undefined ? legacyEpisodes : legacyEpisodes.filter((episode) => episode.sessionId === sessionId);
     const episodeIds = new Set(scopedEpisodes.map(({ id }) => id));
     return Object.freeze({
       version: 1 as const,

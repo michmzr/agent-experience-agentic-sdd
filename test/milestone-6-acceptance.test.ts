@@ -76,3 +76,36 @@ test('exposes report-safe typed evidence and episodes through the versioned anal
     assert.equal(result.stdout.includes('production-rollout'), false);
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
+
+test('keeps the schema-v1 analysis report unchanged when typed rows are present', () => {
+  const legacyDataDir = mkdtempSync(join(tmpdir(), 'ael-v1-legacy-report-'));
+  const typedDataDir = mkdtempSync(join(tmpdir(), 'ael-v1-typed-report-'));
+  try {
+    const baseline = seedSchemaV1Report(legacyDataDir, false);
+    const withTypedRows = seedSchemaV1Report(typedDataDir, true);
+    assert.equal(withTypedRows, baseline);
+  } finally {
+    rmSync(legacyDataDir, { recursive: true, force: true });
+    rmSync(typedDataDir, { recursive: true, force: true });
+  }
+});
+
+function seedSchemaV1Report(dataDir: string, includeTypedRows: boolean): string {
+  const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+  try {
+    learning.enqueue({ repositoryId: 'repo-v1', sessionId: 'session-v1', inputHighWater: 1 });
+    const job = learning.claim();
+    learning.saveResult(job!.id, {
+      episodes: [{ id: 'legacy-episode', repositoryId: 'repo-v1', sessionId: 'session-v1', detector: 'm6-deterministic@1', state: 'outcome-observed', evidenceEventIds: ['legacy-event'], hypothesis: 'Legacy hypothesis.' }, ...(includeTypedRows ? [{ id: 'typed-correction', kind: 'correction' as const, repositoryId: 'repo-v1', sessionId: 'session-v1', detector: 'm9-typed-evidence@1', state: 'outcome-observed' as const, evidenceEventIds: ['typed-original', 'typed-changed', 'typed-outcome'], originalDecisionEvidenceId: 'typed-original', changedDecisionEvidenceId: 'typed-changed', outcomeEvidenceId: 'typed-outcome' }] : [])],
+      episodeEvidence: includeTypedRows ? [
+        { id: 'typed-original', kind: 'tool-request' as const, state: 'observed' as const, decisionKey: 'typed-decision', scopeKey: 'typed-scope', evidenceIds: ['typed-original'] },
+        { id: 'typed-changed', kind: 'tool-request' as const, state: 'succeeded' as const, decisionKey: 'typed-decision', scopeKey: 'typed-scope', evidenceIds: ['typed-original'] },
+        { id: 'typed-outcome', kind: 'tool-result' as const, state: 'succeeded' as const, decisionKey: 'typed-decision', scopeKey: 'typed-scope', evidenceIds: ['typed-changed'] }
+      ] : [],
+      findings: [], candidates: []
+    }, job!.leaseToken);
+  } finally { learning.close(); }
+  const report = runCli(['analysis', 'report', '--repository-id', 'repo-v1', '--data-dir', dataDir, '--json']);
+  assert.equal(report.exitCode, 0);
+  return report.stdout;
+}
