@@ -362,11 +362,17 @@ test('reads a captured session range in stable insertion order without crossing 
   assert.equal(Object.isFrozen(firstRead.events[0]), true);
 
   target.appendIncremental({ session, event: preEvent('pre-fourth', 'push', '2026-08-25T10:15:00.000Z') });
-  const repeatedRead = target.loadCapturedSessionRange(session.id, { after: 1, through: 3, limit: 1 });
-  assert.deepEqual(repeatedRead.events.map(({ sourceEventId }) => sourceEventId), ['pre-second']);
+  const repeatedRead = target.loadCapturedSessionRange(session.id, { after: 1, through: 3, limit: 10 });
+  assert.deepEqual(repeatedRead.events.map(({ sourceEventId }) => sourceEventId), ['pre-second', 'pre-third']);
   assert.equal(repeatedRead.requestedHighWater, 3);
-  assert.equal(repeatedRead.actualHighWater, 2);
+  assert.equal(repeatedRead.actualHighWater, 3);
   assert.equal(repeatedRead.availableHighWater, 4);
+
+  const atHighWater = target.loadCapturedSessionRange(session.id, { after: 3, through: 3, limit: 10 });
+  assert.deepEqual(atHighWater.events, []);
+  assert.equal(atHighWater.requestedHighWater, 3);
+  assert.equal(atHighWater.actualHighWater, 3);
+  assert.equal(atHighWater.availableHighWater, 4);
   assert.deepEqual(target.loadCapturedSession(session.id)?.events.map(({ sourceEventId }) => sourceEventId), [
     'pre-fourth', 'pre-second', 'pre-third', 'pre-first'
   ]);
