@@ -18,6 +18,22 @@ test('returns false when no committed analysis job is pending', () => {
   assert.deepEqual(service.runNext(), { status: 'idle' });
 });
 
+test('rejects malformed or duplicate supplied evidence before claiming a valid analysis stream', () => {
+  for (const supplied of [
+    [{ id: 'invalid-evidence', kind: 'invalid-kind' as never, state: 'observed' as const, evidenceIds: ['invalid-evidence'] }],
+    [
+      { id: 'duplicate-evidence', kind: 'task-transition' as const, state: 'closed' as const, decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['duplicate-evidence'] },
+      { id: 'duplicate-evidence', kind: 'task-transition' as const, state: 'closed' as const, decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['duplicate-evidence'] }
+    ]
+  ]) {
+    const { databasePath, service } = pendingLearningService();
+    assert.throws(() => service.runNext({ repositoryId: 'repo-pending', episodeEvidence: supplied }), /evidence|duplicate|kind/i);
+    const repository = new OperationalLearningRepository(databasePath);
+    try { assert.equal(repository.streamsFor('repo-pending')[0]?.state, 'pending'); } finally { repository.close(); }
+    assert.equal(service.runNext({ repositoryId: 'repo-pending' }).status, 'completed');
+  }
+});
+
 test('coalesces admission into one detector-version stream and keeps later input pending', () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-learning-stream-'));
   const databasePath = join(dataDir, 'experience.sqlite');
@@ -173,4 +189,20 @@ test('projects retained tool activity into bounded typed evidence without leakin
 function fixtureEpisodeEvidence(): readonly EpisodeEvidence[] {
   const fixtureUrl = new URL('../../test/fixtures/reliable-observation/scenarios.json', import.meta.url);
   return (JSON.parse(readFileSync(fixtureUrl, 'utf8')) as { readonly episodeEvidence: readonly EpisodeEvidence[] }).episodeEvidence;
+}
+
+function pendingLearningService(): { readonly databasePath: string; readonly service: OperationalLearningService } {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-learning-supplied-evidence-'));
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const project = join(dataDir, 'project');
+  mkdirSync(project);
+  initializeGitRepository(project);
+  const store = new ExperienceStore(databasePath);
+  try {
+    store.registerRepository({ id: 'repo-pending', root: project, observedAt: '2026-09-13T10:00:00.000Z' });
+    store.appendIncremental({ session: { id: 'session-pending' as never, source: 'codex', startedAt: '2026-09-13T10:00:00.000Z', repositoryId: 'repo-pending' as never } });
+  } finally { store.close(); }
+  const service = new OperationalLearningService(databasePath);
+  service.enqueueCommittedSession('repo-pending', 'session-pending');
+  return { databasePath, service };
 }

@@ -106,6 +106,23 @@ test('rejects typed evidence IDs that are already owned by another repository sc
   second.close();
 });
 
+test('allows an identical evidence retry within one scope but rejects a changed payload', () => {
+  const repository = new OperationalLearningRepository(path());
+  const evidence = { id: 'immutable-evidence', kind: 'task-transition' as const, state: 'closed' as const, decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['immutable-evidence'] };
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const first = repository.claim();
+  repository.saveResult(first!.id, { episodeEvidence: [evidence], episodes: [], findings: [], candidates: [] }, first!.leaseToken);
+
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 2 });
+  const second = repository.claim();
+  assert.throws(() => repository.saveResult(second!.id, {
+    episodeEvidence: [{ ...evidence, state: 'observed' }], episodes: [], findings: [], candidates: []
+  }, second!.leaseToken), /payload/i);
+  repository.saveResult(second!.id, { episodeEvidence: [evidence], episodes: [], findings: [], candidates: [] }, second!.leaseToken);
+  assert.deepEqual(repository.report('repo-1').episodeEvidence, [evidence]);
+  repository.close();
+});
+
 test('rejects insufficient-evidence findings that reference evidence outside the claimed job scope', () => {
   const repository = new OperationalLearningRepository(path());
   repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });

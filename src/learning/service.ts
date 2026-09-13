@@ -51,6 +51,7 @@ export class OperationalLearningService {
   runNext(options: LearningRunOptions = {}): LearningRunResult {
     const maxEvents = validateLimit(options.maxEvents, DEFAULT_MAX_EVENTS, 'Event limit');
     const deadlineMs = validateLimit(options.deadlineMs, DEFAULT_DEADLINE_MS, 'Deadline');
+    const suppliedEvidence = validateSuppliedEpisodeEvidence(options.episodeEvidence);
     const repository = new OperationalLearningRepository(this.databasePath);
     try {
       const job = repository.claim(options.repositoryId, maxEvents);
@@ -69,7 +70,7 @@ export class OperationalLearningService {
         try {
           const snapshot = repository.contextSnapshotFor(job.repositoryId, job.sessionId);
           const conventions = snapshot?.conventions ?? readProjectInstructionContext(registration.root, loadProjectSettings(registration.root)).conventions;
-          const episodeEvidence = mergeEpisodeEvidence(episodeEvidenceFromCapture(events), options.episodeEvidence ?? []);
+          const episodeEvidence = mergeEpisodeEvidence(episodeEvidenceFromCapture(events), suppliedEvidence);
           const result = detectOperationalEpisodes({ repositoryId: job.repositoryId, sessionId: job.sessionId, events, conventions, episodeEvidence });
           if (performance.now() - startedAt > deadlineMs) {
             repository.retry(job.id, 'timeout', job.leaseToken);
@@ -111,9 +112,20 @@ function episodeEvidenceFromCapture(events: readonly CapturedEventRecord[]): rea
   }));
 }
 
-function mergeEpisodeEvidence(captured: readonly EpisodeEvidence[], supplied: readonly EpisodeEvidence[]): readonly EpisodeEvidence[] {
+function validateSuppliedEpisodeEvidence(supplied: readonly EpisodeEvidence[] | undefined): readonly EpisodeEvidence[] {
+  if (supplied === undefined) return Object.freeze([]);
   if (!Array.isArray(supplied) || supplied.length > MAX_SUPPLIED_EPISODE_EVIDENCE) throw new TypeError('Supplied episode evidence is invalid.');
-  const merged = [...captured, ...supplied.map(createEpisodeEvidence)];
+  const validated = supplied.map(createEpisodeEvidence);
+  const ids = new Set<string>();
+  for (const evidence of validated) {
+    if (ids.has(evidence.id)) throw new TypeError('Supplied episode evidence contains duplicate identity.');
+    ids.add(evidence.id);
+  }
+  return Object.freeze(validated);
+}
+
+function mergeEpisodeEvidence(captured: readonly EpisodeEvidence[], supplied: readonly EpisodeEvidence[]): readonly EpisodeEvidence[] {
+  const merged = [...captured, ...supplied];
   const ids = new Set<string>();
   for (const evidence of merged) {
     if (ids.has(evidence.id)) throw new TypeError('Supplied episode evidence contains duplicate identity.');
