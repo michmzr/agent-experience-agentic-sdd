@@ -12,6 +12,89 @@ function path(): string { return join(mkdtempSync(join(tmpdir(), 'ael-learning-r
 const emptyResult = { episodes: [], findings: [], candidates: [] };
 const emptyCheckpoint = { version: 1, pendingEvents: [] };
 
+for (const reason of ['execution-failure', 'timeout'] as const) {
+  test(`failed ${reason} attempt records loaded work before a successful reread without acknowledging failed progress`, () => {
+    const databasePath = path();
+    let millis = Date.parse('2026-09-13T10:00:00.000Z');
+    const repository = new OperationalLearningRepository(databasePath, () => new Date(millis).toISOString());
+    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 4 });
+    const first = repository.claim({ ownerId: 'owner', leaseMs: 60_000 })!;
+    repository.retry(first.id, { ownerId: 'owner', attempt: first.attempts, reason, processedHighWater: 3,
+      metrics: { eventsLoaded: 4, findings: 1, elapsedMs: 12.5 } });
+    assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 0);
+    assert.equal(repository.status().uniqueAcknowledgedEvents, 0);
+    assert.equal(repository.status().eventsLoaded, 4);
+    millis += 1_000;
+    const second = repository.claim({ ownerId: 'owner', leaseMs: 60_000 })!;
+    assert.equal(second.inputLowWater, 0);
+    repository.acknowledge(second.id, { ownerId: 'owner', attempt: second.attempts, processedHighWater: 4,
+      checkpoint: emptyCheckpoint, result: emptyResult, metrics: { eventsLoaded: 4, findings: 0, elapsedMs: 10 } });
+    const status = repository.status();
+    assert.equal(status.eventsLoaded, 8);
+    assert.equal(status.uniqueAcknowledgedEvents, 4);
+    assert.equal(status.rereadRatio, 2);
+    assert.equal(status.totalRetries, 1);
+    assert.equal(status.failureCounts[reason], 1);
+    const database = new DatabaseSync(databasePath);
+    const failed = database.prepare('SELECT * FROM operational_analysis_attempts WHERE job_id = ? AND attempt = 1').get(first.id)!;
+    assert.equal(failed.events_loaded, 4); assert.equal(failed.processed_high_water, 3);
+    assert.equal(failed.findings, 1); assert.equal(failed.elapsed_ms, 12.5);
+    assert.equal(failed.failure_category, reason);
+    database.close(); repository.close();
+    const reopened = new OperationalLearningRepository(databasePath);
+    assert.equal(reopened.status().rereadRatio, 2);
+    assert.equal(reopened.status().failureCounts[reason], 1);
+    reopened.close();
+  });
+}
+
+test('failed attempt metrics reject invalid ranges, counters, durations and owners atomically', () => {
+  const repository = new OperationalLearningRepository(path(), () => '2026-09-13T10:00:00.000Z');
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 4 });
+  const job = repository.claim({ ownerId: 'owner', leaseMs: 60_000 })!;
+  const input = { ownerId: 'owner', attempt: 1, reason: 'timeout' as const, processedHighWater: 3,
+    metrics: { eventsLoaded: 4, findings: 1, elapsedMs: 12.5 } };
+  for (const change of [{ ownerId: 'other' }, { attempt: 2 }, { processedHighWater: -1 }, { processedHighWater: 5 },
+    ...[-1, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].flatMap((invalid) => [
+      { metrics: { ...input.metrics, eventsLoaded: invalid } }, { metrics: { ...input.metrics, findings: invalid } },
+      { metrics: { ...input.metrics, elapsedMs: invalid } }
+    ]), { metrics: { ...input.metrics, eventsLoaded: 2 } },
+    ...[null, undefined].map((invalid) => ({ processedHighWater: 0, metrics: { ...input.metrics, eventsLoaded: invalid as unknown as number } }))]) {
+    assert.throws(() => repository.retry(job.id, { ...input, ...change }));
+    assert.equal(repository.jobById(job.id)?.state, 'running');
+    assert.equal(repository.status().eventsLoaded, 0);
+    assert.equal(repository.status().totalRetries, 0);
+  }
+  repository.close();
+});
+
+test('status classifies every failed attempt including quarantine and applies only metric filters', () => {
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const repository = new OperationalLearningRepository(path(), () => new Date(millis).toISOString());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 1 });
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    const job = repository.claim({ repositoryId: 'repo-1', ownerId: 'owner', leaseMs: 60_000 })!;
+    repository.retry(job.id, { ownerId: 'owner', attempt, reason: 'timeout' });
+    millis += [1_000, 5_000, 30_000, 0][attempt - 1]!;
+  }
+  repository.enqueue({ repositoryId: 'repo-2', sessionId: 'session-2', detectorSetVersion: 'v2', inputHighWater: 1 });
+  const invalid = repository.claim({ repositoryId: 'repo-2', ownerId: 'owner', leaseMs: 60_000 })!;
+  repository.retry(invalid.id, { ownerId: 'owner', attempt: 1, reason: 'invalid-input' });
+  repository.enqueue({ repositoryId: 'repo-2', sessionId: 'session-3', detectorSetVersion: 'v2', inputHighWater: 1 });
+  repository.claim({ repositoryId: 'repo-2', ownerId: 'owner', leaseMs: 1 });
+  millis += 1;
+  repository.recoverExpiredJobs();
+  const status = repository.status();
+  assert.deepEqual(status.failureCounts, { 'execution-failure': 0, timeout: 4, 'invalid-input': 1, 'lease-expired': 1 });
+  assert.equal(status.totalRetries, 4, 'terminal failures count as failures but do not schedule a retry');
+  assert.ok(Object.isFrozen(status.failureCounts));
+  assert.deepEqual(repository.status({ repositoryId: 'repo-2', sessionId: 'session-2', detectorSetVersion: 'v2' }).failureCounts,
+    { 'execution-failure': 0, timeout: 0, 'invalid-input': 1, 'lease-expired': 0 });
+  assert.deepEqual(repository.status({ repositoryId: 'missing' }).failureCounts,
+    { 'execution-failure': 0, timeout: 0, 'invalid-input': 0, 'lease-expired': 0 });
+  repository.close();
+});
+
 test('upgrades a version-one running job without a lease into recoverable bounded retry', () => {
   const databasePath = path();
   const now = () => '2026-09-13T10:00:00.000Z';

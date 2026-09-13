@@ -113,7 +113,12 @@ export interface AnalysisAcknowledgement extends AnalysisFence {
   readonly result: LearningResult; readonly metrics: AnalysisMetrics;
 }
 export type AnalysisFailureReason = 'execution-failure' | 'timeout' | 'invalid-input' | 'lease-expired';
-export interface AnalysisRetry extends AnalysisFence { readonly reason: AnalysisFailureReason; }
+export interface AnalysisRetry extends AnalysisFence {
+  readonly reason: AnalysisFailureReason;
+  /** Examined progress for this failed attempt only; it never acknowledges stream progress. */
+  readonly processedHighWater?: number;
+  readonly metrics?: AnalysisMetrics;
+}
 export interface AnalysisFilters { readonly repositoryId?: string; readonly sessionId?: string; readonly detectorSetVersion?: string; }
 export interface CoordinatorLease extends AnalysisFence { readonly leaseExpiresAt: string; }
 export type AnalysisDiagnostic = 'coordinator-launch-failed' | 'child-process-failed';
@@ -123,6 +128,8 @@ export interface AnalysisStatus {
   readonly coordinatorLease: CoordinatorLease | null; readonly activeRunningCount: number;
   readonly totalAttempts: number; readonly totalRetries: number; readonly eventsLoaded: number;
   readonly uniqueAcknowledgedEvents: number; readonly rereadRatio: number;
+  /** Counts every classified attempt, including failures that quarantine instead of scheduling another retry. */
+  readonly failureCounts: Readonly<Record<AnalysisFailureReason, number>>;
   readonly diagnostics: Readonly<Record<AnalysisDiagnostic, number>>;
 }
 export type OperationalAnalysisStatus = AnalysisStatus;
@@ -230,7 +237,7 @@ export class OperationalLearningRepository {
     this.transaction(() => {
       const timestamp = this.now();
       const job = this.assertOwnedJob(jobId, input, timestamp);
-      this.failAttempt(job, input.reason, timestamp);
+      this.failAttempt(job, input.reason, timestamp, input.processedHighWater, input.metrics);
     });
   }
 
@@ -420,6 +427,15 @@ export class OperationalLearningRepository {
         FROM operational_analysis_attempts j WHERE 1 = 1 ${filter.sql}`).get(...filter.values) as {
           total_attempts: number; total_retries: number; events_loaded: number; acknowledged: number;
         };
+      const failureCounts: Record<AnalysisFailureReason, number> = { 'execution-failure': 0, timeout: 0, 'invalid-input': 0, 'lease-expired': 0 };
+      const failures = this.database.prepare(`SELECT j.failure_category, COUNT(*) AS occurrences FROM operational_analysis_attempts j
+        WHERE j.failure_category IS NOT NULL ${filter.sql} GROUP BY j.failure_category`).all(...filter.values);
+      for (const failure of failures) {
+        if (failure.failure_category === 'execution-failure' || failure.failure_category === 'timeout' ||
+          failure.failure_category === 'invalid-input' || failure.failure_category === 'lease-expired') {
+          failureCounts[failure.failure_category] = Number(failure.occurrences);
+        }
+      }
       const lease = this.database.prepare(`SELECT owner_id, attempt, lease_expires_at FROM operational_analysis_coordinator
         WHERE singleton = 1 AND owner_id IS NOT NULL AND lease_expires_at > ?`).get(timestamp) as { owner_id: string; attempt: number; lease_expires_at: string } | undefined;
       const diagnostics: Record<AnalysisDiagnostic, number> = { 'coordinator-launch-failed': 0, 'child-process-failed': 0 };
@@ -430,6 +446,7 @@ export class OperationalLearningRepository {
         nextRetryAt, activeRunningCount, totalAttempts: metrics.total_attempts, totalRetries: metrics.total_retries,
         eventsLoaded: metrics.events_loaded, uniqueAcknowledgedEvents: metrics.acknowledged,
         rereadRatio: metrics.acknowledged === 0 ? 0 : metrics.events_loaded / metrics.acknowledged,
+        failureCounts: Object.freeze(failureCounts),
         coordinatorLease: lease ? Object.freeze({ ownerId: lease.owner_id, attempt: lease.attempt, leaseExpiresAt: lease.lease_expires_at }) : null,
         diagnostics: Object.freeze(diagnostics) });
       this.database.exec('COMMIT');
@@ -558,7 +575,18 @@ export class OperationalLearningRepository {
       .get(job.repositoryId, job.sessionId, job.detectorSetVersion) as { id: string; input_high_water: number } | undefined;
   }
 
-  private failAttempt(job: AnalysisJob, reason: AnalysisFailureReason, timestamp: string): void {
+  private failAttempt(job: AnalysisJob, reason: AnalysisFailureReason, timestamp: string,
+    processedHighWater = job.inputLowWater, metrics?: AnalysisMetrics): void {
+    const eventsLoaded = metrics === undefined ? 0 : metrics.eventsLoaded;
+    const findings = metrics?.findings ?? 0;
+    assertInteger(processedHighWater, 'Failed attempt processed high-water');
+    assertInteger(eventsLoaded, 'Failed attempt events loaded');
+    assertInteger(findings, 'Failed attempt findings');
+    if (processedHighWater < job.inputLowWater || processedHighWater > job.inputHighWater ||
+      eventsLoaded < processedHighWater - job.inputLowWater) throw new TypeError('Failed attempt metrics conflict with the claimed range.');
+    if (metrics !== undefined && (!Number.isFinite(metrics.elapsedMs) || metrics.elapsedMs < 0 || metrics.elapsedMs > Number.MAX_SAFE_INTEGER)) {
+      throw new TypeError('Failed attempt elapsed time is invalid.');
+    }
     const state = reason === 'invalid-input' || job.attempts >= 4 ? 'quarantined-input' : 'retryable-failure';
     let highWater = job.inputHighWater;
     if (state === 'retryable-failure') {
@@ -573,8 +601,9 @@ export class OperationalLearningRepository {
       retry_after = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ? AND state = 'running' AND lease_owner = ? AND attempts = ?`)
       .run(state, highWater, reason, retryAfter, timestamp, job.id, job.leaseOwner, job.attempts);
     this.database.prepare(`UPDATE operational_analysis_attempts SET outcome = ?, failure_category = ?, finished_at = ?,
-      elapsed_ms = MAX(0, (julianday(?) - julianday(started_at)) * 86400000) WHERE job_id = ? AND attempt = ?`)
-      .run(state, reason, timestamp, timestamp, job.id, job.attempts);
+      processed_high_water = ?, events_loaded = ?, findings = ?,
+      elapsed_ms = COALESCE(?, MAX(0, (julianday(?) - julianday(started_at)) * 86400000)) WHERE job_id = ? AND attempt = ?`)
+      .run(state, reason, timestamp, processedHighWater, eventsLoaded, findings, metrics?.elapsedMs ?? null, timestamp, job.id, job.attempts);
   }
 
   private claimableRows(timestamp: string, filters: AnalysisFilters): JobRow[] {
