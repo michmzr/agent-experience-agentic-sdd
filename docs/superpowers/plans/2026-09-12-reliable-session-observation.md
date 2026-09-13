@@ -340,6 +340,8 @@ Quality follow-up evidence: schema-version 2 has dedicated human renderers for s
 
 Final quality follow-up evidence: analysis state now uses aggregate coverage status before selecting the bounded example list. Coverage JSON reports `total` and `truncated` alongside at most 64 examples. A regression with 64 completed coverage rows and one further failed row reports `failed`, total 65, and truncation. Focused tests passed 33/33; the serial suite passed on 2026-09-13.
 
+Detector-list follow-up evidence: the capped detector-version list now includes `detectorVersionTotal` and `detectorVersionsTruncated`. A 70-version, zero-coverage regression reports 64 examples, total 70, and truncation. Focused tests passed 33/33; the serial suite passed on 2026-09-13.
+
 ### Task 6: Preserve historical instruction and execution context for issue #8
 
 **Files:**

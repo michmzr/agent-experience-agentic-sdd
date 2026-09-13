@@ -301,7 +301,7 @@ export class ExperienceService {
   }
 
   private analysisQuality(repositoryId: string) {
-    const empty = Object.freeze({ state: 'not-run' as const, detectorVersions: Object.freeze([]), desiredThrough: 0, completedThrough: 0, backlog: 0, range: Object.freeze({ from: 0, through: 0 }), retries: 0, cost: Object.freeze({ completedRuns: 0, total: 0 }), coverage: Object.freeze({ required: true as const, total: 0, truncated: false, detectors: Object.freeze([]) }), result: 'unavailable' as const });
+    const empty = Object.freeze({ state: 'not-run' as const, detectorVersions: Object.freeze([]), detectorVersionTotal: 0, detectorVersionsTruncated: false, desiredThrough: 0, completedThrough: 0, backlog: 0, range: Object.freeze({ from: 0, through: 0 }), retries: 0, cost: Object.freeze({ completedRuns: 0, total: 0 }), coverage: Object.freeze({ required: true as const, total: 0, truncated: false, detectors: Object.freeze([]) }), result: 'unavailable' as const });
     if (!existsSync(this.databasePath)) return empty;
     const repository = new OperationalLearningRepository(this.databasePath);
     try { return reportAnalysisQuality(repository.quality(repositoryId)); } finally { repository.close(); }
@@ -382,6 +382,8 @@ function reportAnalysisQuality(quality: OperationalAnalysisQuality) {
   return Object.freeze({
     state,
     detectorVersions: quality.detectorVersions,
+    detectorVersionTotal: quality.detectorVersionTotal,
+    detectorVersionsTruncated: quality.detectorVersionTotal > quality.detectorVersions.length,
     desiredThrough: streams.desiredThrough,
     completedThrough: streams.completedThrough,
     backlog,

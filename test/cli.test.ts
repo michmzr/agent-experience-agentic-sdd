@@ -214,9 +214,11 @@ test('bounds version 2 detector summaries while retaining aggregate high waters'
     const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
     for (let index = 0; index < 70; index += 1) learning.enqueue({ repositoryId: 'repo-bounded', sessionId: `session-${index}`, detectorVersion: `detector-${index}@1`, inputHighWater: 1 });
     learning.close();
-    const report = JSON.parse(runCli(['analysis', 'report', '--repository-id', 'repo-bounded', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as { analysis: { detectorVersions: string[]; desiredThrough: number; coverage: { detectors: unknown[] } } };
+    const report = JSON.parse(runCli(['analysis', 'report', '--repository-id', 'repo-bounded', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as { analysis: { detectorVersions: string[]; detectorVersionTotal: number; detectorVersionsTruncated: boolean; desiredThrough: number; coverage: { detectors: unknown[] } } };
     assert.equal(report.analysis.desiredThrough, 70);
     assert.equal(report.analysis.detectorVersions.length, 64);
+    assert.equal(report.analysis.detectorVersionTotal, 70);
+    assert.equal(report.analysis.detectorVersionsTruncated, true);
     assert.equal(report.analysis.coverage.detectors.length, 0);
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
