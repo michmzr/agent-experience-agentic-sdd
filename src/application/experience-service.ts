@@ -272,10 +272,11 @@ export class ExperienceService {
         : { state: spool.status.failedAdmission > 0 || spool.status.quarantined > 0 || spool.status.delayedDelivery.count > 0 ? 'degraded' as const : spool.status.pending > 0 || spool.status.claimed > 0 ? 'backlogged' as const : 'healthy' as const, pending: spool.status.pending, claimed: spool.status.claimed, committed: spool.status.committed, quarantined: spool.status.quarantined, failedAdmission: spool.status.failedAdmission }),
       dataQuality: Object.freeze({
         state: dataState,
+        admittedOperations: spool?.receipts.accepted ?? 0,
         receipts: Object.freeze(spool === undefined ? { accounting: 'unavailable' as const, total: 0, accepted: 0 } : spool.receipts),
         results: Object.freeze({ linked: evidence.linked, unknown: Object.freeze(evidence.unknown) }),
         skips: Object.freeze(spool === undefined ? { total: 0, byDisposition: Object.freeze({}) } : spool.skips),
-        denominator: Object.freeze({ state: 'unavailable' as const }),
+        denominator: Object.freeze(evidence.operations === 0 ? { state: 'unavailable' as const } : { state: 'known' as const, count: evidence.operations }),
         ...(evidence.firstObservedAt === undefined ? {} : { observedTimeRange: Object.freeze({ first: evidence.firstObservedAt, last: evidence.lastObservedAt! }) })
       }),
       analysis
@@ -386,12 +387,13 @@ function reportAnalysisQuality(quality: OperationalAnalysisQuality) {
   const completedThrough = streams.reduce((total, stream) => total + stream.completedThrough, 0);
   const backlog = Math.max(0, desiredThrough - completedThrough);
   const retries = quality.runs.reduce((total, run) => total + Math.max(0, run.attempts - 1), 0);
+  const coverageComplete = streams.length > 0 && streams.every(({ detectorVersion }) => quality.coverage.some(({ detector, status }) => detector === detectorVersion && status === 'completed'));
   const state = streams.length === 0 ? 'not-run'
     : streams.some(({ state }) => state === 'quarantined-input') ? 'quarantined'
       : streams.some(({ state }) => state === 'running') ? 'running'
         : streams.some(({ state }) => state === 'retryable-failure') || quality.coverage.some(({ status }) => status === 'failed') ? 'failed'
           : streams.some(({ state }) => state === 'pending') ? 'pending'
-            : quality.coverage.some(({ status }) => status === 'incomplete') ? 'incomplete'
+            : !coverageComplete || quality.coverage.some(({ status }) => status === 'incomplete') ? 'incomplete'
               : 'completed';
   const completed = state === 'completed';
   const range = quality.runs.length === 0
@@ -406,7 +408,8 @@ function reportAnalysisQuality(quality: OperationalAnalysisQuality) {
     range: Object.freeze(range),
     retries,
     cost: quality.cost,
-    result: completed ? (quality.findings > 0 ? 'findings' as const : 'no-findings' as const) : 'unavailable' as const
+    coverage: Object.freeze({ required: true as const, detectors: quality.coverage }),
+    result: completed && coverageComplete ? (quality.findings > 0 ? 'findings' as const : 'no-findings' as const) : 'unavailable' as const
   });
 }
 

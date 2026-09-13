@@ -332,6 +332,8 @@ Run: `git add src/application/experience-service.ts src/cli.ts src/learning/repo
 
 Evidence: RED: `pnpm build && node --test dist/test/cli.test.js dist/test/repository-observability.test.js` failed because `schemaVersion` was absent from `status --schema-version 2`. GREEN: the same focused command passed 18/18 on 2026-09-13. Coverage includes empty data, a delivery backlog, unavailable denominator, unknown result evidence, not-run analysis, completed no-findings analysis, and path-free global JSON. Legacy status JSON is selected unchanged when the version option is omitted. Final verification: `pnpm build && node --test --test-concurrency=1 dist/test/**/*.test.js` passed serially on 2026-09-13.
 
+Review follow-up evidence: an initially failing regression showed that a completed stream without persisted detector coverage was reported as `completed` with `no-findings`. The report now requires completed coverage for every detector version before claiming `no-findings`; otherwise it returns `incomplete` and `unavailable`. Data quality now includes `admittedOperations`, a known denominator when retained source operations establish one, and required analysis coverage. Focused tests passed 19/19; the serial suite passed on 2026-09-13.
+
 ### Task 6: Preserve historical instruction and execution context for issue #8
 
 **Files:**

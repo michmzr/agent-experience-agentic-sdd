@@ -99,9 +99,11 @@ test('reports unknown results and a completed no-findings analysis without leaki
     });
     store.close();
     const unknown = JSON.parse(runCli(['status', '--repository-id', repositoryId, '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
-      dataQuality: { state: string; results: { linked: number; unknown: Record<string, number> }; observedTimeRange: { first: string; last: string } }; analysis: { state: string };
+      dataQuality: { state: string; admittedOperations: number; denominator: { state: string; count?: number }; results: { linked: number; unknown: Record<string, number> }; observedTimeRange: { first: string; last: string } }; analysis: { state: string };
     };
     assert.equal(unknown.dataQuality.state, 'degraded');
+    assert.equal(unknown.dataQuality.admittedOperations, 0);
+    assert.deepEqual(unknown.dataQuality.denominator, { state: 'known', count: 1 });
     assert.deepEqual(unknown.dataQuality.results, { linked: 0, unknown: { 'result-not-delivered': 1 } });
     assert.deepEqual(unknown.dataQuality.observedTimeRange, { first: '2026-09-13T09:00:00.000Z', last: '2026-09-13T09:00:00.000Z' });
     assert.equal(unknown.analysis.state, 'not-run');
@@ -112,17 +114,36 @@ test('reports unknown results and a completed no-findings analysis without leaki
     learning.saveResult(job.id, { episodes: [], findings: [], candidates: [], coverage: [{ detector: 'm6-deterministic@1', status: 'completed', examinedEvents: 2, findings: 0 }], cost: 3 }, job.leaseToken);
     learning.close();
     const complete = JSON.parse(runCli(['analysis', 'report', '--repository-id', repositoryId, '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
-      schemaVersion: number; analysis: { state: string; result: string; cost: { completedRuns: number; total: number }; range: { from: number; through: number } };
+      schemaVersion: number; analysis: { state: string; result: string; cost: { completedRuns: number; total: number }; range: { from: number; through: number }; coverage: { required: boolean; detectors: unknown[] } };
     };
     assert.equal(complete.schemaVersion, 2);
     assert.equal(complete.analysis.state, 'completed');
     assert.equal(complete.analysis.result, 'no-findings');
     assert.deepEqual(complete.analysis.cost, { completedRuns: 1, total: 3 });
     assert.deepEqual(complete.analysis.range, { from: 1, through: 2 });
+    assert.deepEqual(complete.analysis.coverage, { required: true, detectors: [{ detector: 'm6-deterministic@1', status: 'completed', examinedEvents: 2, findings: 0 }] });
 
     const global = runCli(['status-global', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout;
     assert.equal(global.includes(dataDir), false);
     assert.equal(global.includes('experience.sqlite'), false);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('does not call an uncovered completed stream a no-findings analysis', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-uncovered-'));
+  try {
+    const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    learning.enqueue({ repositoryId: 'repo-uncovered', sessionId: 'session-uncovered', inputHighWater: 1 });
+    const job = learning.claim('repo-uncovered')!;
+    learning.saveResult(job.id, { episodes: [], findings: [], candidates: [] }, job.leaseToken);
+    learning.close();
+
+    const report = JSON.parse(runCli(['analysis', 'report', '--repository-id', 'repo-uncovered', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
+      analysis: { state: string; result: string; coverage: { required: boolean; detectors: unknown[] } };
+    };
+    assert.equal(report.analysis.state, 'incomplete');
+    assert.equal(report.analysis.result, 'unavailable');
+    assert.deepEqual(report.analysis.coverage, { required: true, detectors: [] });
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 
