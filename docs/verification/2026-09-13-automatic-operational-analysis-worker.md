@@ -2,7 +2,7 @@
 
 Date: 2026-09-13
 
-Tested implementation commit: `b1051b6`.
+Tested implementation commit: `4388139`.
 
 ## Load fixture
 
@@ -17,6 +17,8 @@ The restart fixture started three session streams and held three slot-linked job
 The restarted coordinator observed three claimable streams and reached child concurrency 3 with `maxProcesses: 3`. Each stream finished at committed and processed high-water 2. The six captured source-event ordinals remained present, `uniqueAcknowledgedEvents` was 6, and no pending, running, retryable or quarantined work remained. Result tables contained no duplicate identity.
 
 The two load fixtures use injected process hosts and real SQLite repositories, range reads, analysis services and detectors. Their clocks, child completion and lease loss are deterministic. `test/automatic-analysis-acceptance.test.ts` starts the coordinator in a real detached Node.js process. `test/cli-integration.test.ts` separately executes the compiled coordinator and the compiled watchdog to Worker thread to worker-child chain. No load fixture starts a real child process.
+
+Mixed-repository capture tests drain enabled and disabled repositories in both input orders and from both invoking settings. Only records whose registered repository root enables automatic learning are admitted. A disabled hook and an empty drain both wake durable work already admitted for another repository, after the capture batch acknowledgment boundary. A separate end-to-end case passes a relative `--data-dir` to the public CLI and observes automatic completion through the detached coordinator without exposing the path marker.
 
 ## Commands
 
@@ -36,7 +38,7 @@ Focused acceptance command:
 rtk pnpm build && node --test dist/test/analysis-worker-settings.test.js dist/test/learning-repository.test.js dist/test/learning-detectors.test.js dist/test/learning-service.test.js dist/test/analysis-worker.test.js dist/test/capture-spool.test.js dist/test/automatic-analysis-acceptance.test.js dist/test/analysis-load.test.js dist/test/cli.test.js dist/test/cli-integration.test.js
 ```
 
-Result: 147 tests passed, 0 failed, in 5.171 seconds.
+Result: 150 tests passed, 0 failed, in 4.654 seconds.
 
 Full project check:
 
@@ -44,7 +46,7 @@ Full project check:
 rtk pnpm check
 ```
 
-Result: 785 tests passed, 0 failed, in 19.297 seconds. During the initial verification pass, two full runs reported temporary-directory cleanup races in existing hook tests. The directly affected `hook-readiness` file passed 2 tests with 0 failures in isolation before subsequent full passes.
+Result: 788 tests passed, 0 failed, in 17.129 seconds. The preceding full run passed 787 of 788 tests and reported an `ENOTEMPTY` temporary-directory cleanup race in the existing Milestone 2.5 hook acceptance test. That file then passed 5 tests with 0 failures in isolation before the complete rerun passed.
 
 Patch validation:
 
