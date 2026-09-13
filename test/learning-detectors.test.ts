@@ -187,6 +187,18 @@ test('derives a verification gap for closure with no recorded criterion', () => 
   assert.equal(episode?.criterionState, 'unknown');
 });
 
+test('prefers a matching successful verification over a failed sibling', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'closure', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository' }),
+      evidence({ id: 'criterion-failed', kind: 'task-verification', state: 'failed', decisionKey: 'issue-9', scopeKey: 'repository' }),
+      evidence({ id: 'criterion-succeeded', kind: 'task-verification', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository' })
+    ]
+  });
+  assert.equal(result.episodes.some((item) => item.kind === 'verification-gap'), false);
+});
+
 test('derives repeated acceptance only for a matching decision in the same scope', () => {
   const sameScope = detectOperationalEpisodes({
     repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],

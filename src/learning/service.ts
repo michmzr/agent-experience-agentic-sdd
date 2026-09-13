@@ -135,11 +135,11 @@ function mergeEpisodeEvidence(captured: readonly EpisodeEvidence[], supplied: re
 }
 
 function captureEvidenceId(source: string, sourceEventId: string): string {
-  return `capture:${createHash('sha256').update(`ael:episode-evidence:v1\\0${source}\\0${sourceEventId}`).digest('hex')}`;
+  return `capture-${createHash('sha256').update(`ael:episode-evidence:v1\\0${source}\\0${sourceEventId}`).digest('hex')}`;
 }
 
 function captureDecisionKey(event: CapturedEventRecord): string {
-  return `decision:${createHash('sha256').update(`ael:episode-decision:v1\\0${JSON.stringify(event.signature)}`).digest('hex')}`;
+  return `decision-${createHash('sha256').update(`ael:episode-decision:v1\\0${JSON.stringify(event.signature)}`).digest('hex')}`;
 }
 
 function captureEvidenceState(outcome: CapturedEventRecord['outcome']): EpisodeEvidenceState {

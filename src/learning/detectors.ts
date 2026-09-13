@@ -25,6 +25,9 @@ export interface CorrectionEpisode extends OperationalEpisode {
 }
 export interface VerificationGapEpisode extends OperationalEpisode {
   readonly kind: 'verification-gap';
+  readonly implementationEvidenceId?: string;
+  readonly checkExecutionEvidenceId?: string;
+  readonly checkResultEvidenceId?: string;
   readonly closureEvidenceId: string;
   readonly criterionEvidenceId?: string;
   readonly criterionState: 'met' | 'unmet' | 'unknown';
@@ -95,13 +98,17 @@ function typedEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 
   }
 
   for (const closure of evidence.filter((item) => item.kind === 'task-transition' && item.state === 'closed')) {
-    const criterion = evidence.find((item) => item.kind === 'task-verification' && item.decisionKey === closure.decisionKey && item.scopeKey === closure.scopeKey);
+    const related = closure.evidenceIds.map((id) => byEvidenceId.get(id)).filter((item): item is EpisodeEvidence => item !== undefined && item.id !== closure.id);
+    const implementation = related.find((item) => item.kind === 'tool-result');
+    const checkExecution = related.find((item) => item.kind === 'tool-request');
+    const checkResult = related.find((item) => item.kind === 'tool-result' && checkExecution !== undefined && item.evidenceIds.includes(checkExecution.id));
+    const criterion = evidence.filter((item) => item.kind === 'task-verification' && item.decisionKey === closure.decisionKey && item.scopeKey === closure.scopeKey).sort(byVerificationStateThenId)[0];
     const criterionState = criterion === undefined ? 'unknown' : criterion.state === 'failed' ? 'unmet' : criterion.state === 'succeeded' ? 'met' : 'unknown';
     if (criterionState === 'met') continue;
-    const evidenceEventIds = [closure.id, ...(criterion === undefined ? [] : [criterion.id])];
+    const evidenceEventIds = [closure.id, ...(implementation === undefined ? [] : [implementation.id]), ...(checkExecution === undefined ? [] : [checkExecution.id]), ...(checkResult === undefined ? [] : [checkResult.id]), ...(criterion === undefined ? [] : [criterion.id])];
     episodes.push(createTypedEpisode({
       id: stableId('episode', input.repositoryId, input.sessionId, typedDetectorVersion, 'verification-gap', ...evidenceEventIds), repositoryId: input.repositoryId, sessionId: input.sessionId, detector: typedDetectorVersion, state: 'unresolved', evidenceEventIds,
-      kind: 'verification-gap', closureEvidenceId: closure.id, ...(criterion === undefined ? {} : { criterionEvidenceId: criterion.id }), criterionState
+      kind: 'verification-gap', ...(implementation === undefined ? {} : { implementationEvidenceId: implementation.id }), ...(checkExecution === undefined ? {} : { checkExecutionEvidenceId: checkExecution.id }), ...(checkResult === undefined ? {} : { checkResultEvidenceId: checkResult.id }), closureEvidenceId: closure.id, ...(criterion === undefined ? {} : { criterionEvidenceId: criterion.id }), criterionState
     }));
   }
 
@@ -116,6 +123,11 @@ function typedEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 
     }));
   }
   return { episodes, findings };
+}
+
+function byVerificationStateThenId(left: EpisodeEvidence, right: EpisodeEvidence): number {
+  const priority = (value: EpisodeEvidence) => value.state === 'succeeded' ? 0 : value.state === 'failed' ? 1 : 2;
+  return priority(left) - priority(right) || byId(left, right);
 }
 
 function isDecision(value: EpisodeEvidence): boolean {
@@ -134,8 +146,8 @@ export function createTypedEpisode(value: TypedOperationalEpisode): TypedOperati
   if (value.kind === 'verification-gap') {
     if (!['met', 'unmet', 'unknown'].includes(value.criterionState)) throw new TypeError('Verification criterion state is invalid.');
     if (value.criterionState !== 'unknown' && value.criterionEvidenceId === undefined) throw new TypeError('Verification criterion evidence is invalid.');
-    assertReferences(base.evidenceEventIds, [value.closureEvidenceId, ...(value.criterionEvidenceId === undefined ? [] : [value.criterionEvidenceId])]);
-    return Object.freeze({ ...base, kind: value.kind, closureEvidenceId: value.closureEvidenceId, ...(value.criterionEvidenceId === undefined ? {} : { criterionEvidenceId: value.criterionEvidenceId }), criterionState: value.criterionState });
+    assertReferences(base.evidenceEventIds, [value.closureEvidenceId, ...(value.implementationEvidenceId === undefined ? [] : [value.implementationEvidenceId]), ...(value.checkExecutionEvidenceId === undefined ? [] : [value.checkExecutionEvidenceId]), ...(value.checkResultEvidenceId === undefined ? [] : [value.checkResultEvidenceId]), ...(value.criterionEvidenceId === undefined ? [] : [value.criterionEvidenceId])]);
+    return Object.freeze({ ...base, kind: value.kind, ...(value.implementationEvidenceId === undefined ? {} : { implementationEvidenceId: value.implementationEvidenceId }), ...(value.checkExecutionEvidenceId === undefined ? {} : { checkExecutionEvidenceId: value.checkExecutionEvidenceId }), ...(value.checkResultEvidenceId === undefined ? {} : { checkResultEvidenceId: value.checkResultEvidenceId }), closureEvidenceId: value.closureEvidenceId, ...(value.criterionEvidenceId === undefined ? {} : { criterionEvidenceId: value.criterionEvidenceId }), criterionState: value.criterionState });
   }
   assertIdentifier(value.scopeKey, 'Repeated acceptance scope');
   assertReferences(base.evidenceEventIds, [value.firstAcceptanceEvidenceId, value.repeatedAcceptanceEvidenceId]);
@@ -165,7 +177,7 @@ function assertReferences(evidenceEventIds: readonly string[], references: reado
 
 function assertTypedEpisodeFields(value: TypedOperationalEpisode): void {
   const base = new Set(['id', 'repositoryId', 'sessionId', 'detector', 'state', 'evidenceEventIds', 'attemptedOperation', 'changedOperation', 'confirmingEventId', 'hypothesis']);
-  const fields = value.kind === 'correction' ? ['kind', 'originalDecisionEvidenceId', 'changedDecisionEvidenceId', 'reasonEvidenceId', 'outcomeEvidenceId'] : value.kind === 'verification-gap' ? ['kind', 'closureEvidenceId', 'criterionEvidenceId', 'criterionState'] : ['kind', 'firstAcceptanceEvidenceId', 'repeatedAcceptanceEvidenceId', 'scopeKey'];
+  const fields = value.kind === 'correction' ? ['kind', 'originalDecisionEvidenceId', 'changedDecisionEvidenceId', 'reasonEvidenceId', 'outcomeEvidenceId'] : value.kind === 'verification-gap' ? ['kind', 'implementationEvidenceId', 'checkExecutionEvidenceId', 'checkResultEvidenceId', 'closureEvidenceId', 'criterionEvidenceId', 'criterionState'] : ['kind', 'firstAcceptanceEvidenceId', 'repeatedAcceptanceEvidenceId', 'scopeKey'];
   for (const key of Reflect.ownKeys(value)) if (typeof key !== 'string' || (!base.has(key) && !fields.includes(key))) throw new TypeError('Typed episode payload is invalid.');
 }
 

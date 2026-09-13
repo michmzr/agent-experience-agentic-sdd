@@ -104,6 +104,10 @@ test('rejects malformed, duplicate, free-text, and dependency-free episode evide
   assert.throws(() => createEpisodeEvidence({ ...toolRequest, kind: 'transcript' as never }), /kind/i);
   assert.throws(() => createEpisodeEvidence({ ...toolRequest, evidenceIds: ['capture-request-1', 'capture-request-1'] }), /duplicate/i);
   assert.throws(() => createEpisodeEvidence({ ...toolRequest, scopeKey: '' }), /scope/i);
+  assert.throws(() => createEpisodeEvidence({ ...toolRequest, id: '/Users/example/private' }), /identity/i);
+  assert.throws(() => createEpisodeEvidence({ ...toolRequest, decisionKey: 'token=synthetic-value' }), /decision/i);
+  assert.throws(() => createEpisodeEvidence({ ...toolRequest, scopeKey: 'codex:source-event-1' }), /scope/i);
+  assert.throws(() => createEpisodeEvidence({ ...toolRequest, evidenceIds: ['capture:source-event-1'] }), /evidence/i);
   assert.throws(() => createEpisodeEvidence({ ...toolRequest, freeText: 'raw command output' } as EpisodeEvidence), /field/i);
   assert.throws(() => createEpisodeEvidence({ ...toolResult, reasonClass: 'raw command output' as never }), /reason/i);
   assert.throws(() => createEpisodeEvidence({ ...inference, detectorVersion: '' }), /detector/i);

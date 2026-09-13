@@ -123,6 +123,22 @@ test('allows an identical evidence retry within one scope but rejects a changed 
   repository.close();
 });
 
+test('rejects unsafe evidence before persistence and returns only report-safe evidence', () => {
+  const repository = new OperationalLearningRepository(path());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const claimed = repository.claim();
+  assert.throws(() => repository.saveResult(claimed!.id, {
+    episodeEvidence: [{ id: 'capture:/Users/private', kind: 'task-transition', state: 'closed', scopeKey: 'repository', evidenceIds: ['capture:/Users/private'] }], episodes: [], findings: [], candidates: []
+  }, claimed!.leaseToken), /identity/i);
+  repository.saveResult(claimed!.id, {
+    episodeEvidence: [{ id: 'safe-evidence', kind: 'task-transition', state: 'closed', scopeKey: 'repository', evidenceIds: ['safe-evidence'] }], episodes: [], findings: [], candidates: []
+  }, claimed!.leaseToken);
+  const report = repository.report('repo-1');
+  assert.equal(JSON.stringify(report.episodeEvidence).includes('/Users/'), false);
+  assert.deepEqual(report.episodeEvidence.map(({ id }) => id), ['safe-evidence']);
+  repository.close();
+});
+
 test('rejects insufficient-evidence findings that reference evidence outside the claimed job scope', () => {
   const repository = new OperationalLearningRepository(path());
   repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
