@@ -6,6 +6,17 @@ const textLimit = 2_048;
 export type AnalysisJobState = 'pending' | 'running' | 'completed' | 'retryable-failure' | 'quarantined-input';
 export type EpisodeState = 'unresolved' | 'outcome-observed' | 'solution-supported';
 export type FindingKind = 'repository-tool-convention' | 'command-repair' | 'ambiguous-repair';
+export type EpisodeEvidenceKind = 'tool-request' | 'tool-result' | 'task-verification' | 'agent-claim' | 'user-instruction' | 'task-transition' | 'instruction-context' | 'analyzer-inference';
+export type EpisodeEvidenceState = 'observed' | 'succeeded' | 'failed' | 'closed';
+
+export interface EpisodeEvidence {
+  readonly id: string;
+  readonly kind: EpisodeEvidenceKind;
+  readonly state: EpisodeEvidenceState;
+  readonly decisionKey?: string;
+  readonly scopeKey?: string;
+  readonly evidenceIds: readonly string[];
+}
 
 export interface AnalysisCoverage {
   readonly detector: string;
@@ -45,6 +56,24 @@ export interface LearningCandidate {
   readonly procedure: readonly string[];
   readonly evidenceEventIds: readonly string[];
   readonly invalidationConditions: readonly string[];
+}
+
+export function createEpisodeEvidence(value: EpisodeEvidence): EpisodeEvidence {
+  assertEpisodeEvidenceFields(value);
+  assertIdentifier(value.id, 'Evidence identity');
+  if (!episodeEvidenceKinds.has(value.kind)) throw new TypeError('Evidence kind is invalid.');
+  if (!episodeEvidenceStates.has(value.state)) throw new TypeError('Evidence state is invalid.');
+  optionalIdentifier(value.decisionKey, 'Evidence decision key');
+  optionalIdentifier(value.scopeKey, 'Evidence scope key');
+  const evidenceIds = freezeIdentifiers(value.evidenceIds, 'Episode evidence');
+  return Object.freeze({
+    id: value.id,
+    kind: value.kind,
+    state: value.state,
+    ...(value.decisionKey === undefined ? {} : { decisionKey: value.decisionKey }),
+    ...(value.scopeKey === undefined ? {} : { scopeKey: value.scopeKey }),
+    evidenceIds
+  });
 }
 
 export function createOperationalEpisode(value: OperationalEpisode): OperationalEpisode {
@@ -114,6 +143,23 @@ function freezeText(values: readonly string[], field: string): readonly string[]
 
 function optionalIdentifier(value: string | undefined, field: string): void {
   if (value !== undefined) assertIdentifier(value, field);
+}
+
+const episodeEvidenceKinds = new Set<EpisodeEvidenceKind>([
+  'tool-request', 'tool-result', 'task-verification', 'agent-claim',
+  'user-instruction', 'task-transition', 'instruction-context', 'analyzer-inference'
+]);
+
+const episodeEvidenceStates = new Set<EpisodeEvidenceState>(['observed', 'succeeded', 'failed', 'closed']);
+
+const episodeEvidenceFields = new Set<keyof EpisodeEvidence>(['id', 'kind', 'state', 'decisionKey', 'scopeKey', 'evidenceIds']);
+
+function assertEpisodeEvidenceFields(value: EpisodeEvidence): void {
+  for (const field of Reflect.ownKeys(value)) {
+    if (typeof field !== 'string' || !episodeEvidenceFields.has(field as keyof EpisodeEvidence)) {
+      throw new TypeError('Episode evidence contains an unsupported field.');
+    }
+  }
 }
 
 function assertIdentifier(value: string, field: string): void {
