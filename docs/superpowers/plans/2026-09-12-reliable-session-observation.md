@@ -268,6 +268,8 @@ Evidence: RED: `pnpm build && node --test dist/test/learning-service.test.js dis
 
 Review follow-up evidence: persisted deterministic exponential retry eligibility is capped at 60 seconds; a concurrent drain contender cannot alter the lock owner's completion marker; completed analysis-run cost totals are exposed in the analysis JSON report. RED failed at compilation because `nextEligibleAt` and report cost contracts were absent. GREEN: `pnpm build && node --test dist/test/learning-repository.test.js dist/test/capture-spool.test.js dist/test/milestone-6-acceptance.test.js` passed 24/24. `pnpm build && node --test --test-concurrency=1 dist/test/**/*.test.js` passed serially on 2026-09-12.
 
+Migration follow-up evidence: a pre-stream `operational_analysis_jobs` fixture with pending, retryable, running, and completed rows initially opened with no streams (RED). The additive migration creates one detector-version stream per legacy repository/session, retains the highest pending input as eligible, converts legacy running work to retryable recovery, and is idempotent on reopen. GREEN: `pnpm build && node --test dist/test/learning-repository.test.js dist/test/learning-service.test.js dist/test/capture-spool.test.js dist/test/milestone-2-5-acceptance.test.js` passed 31/31. `pnpm build && node --test --test-concurrency=1 dist/test/**/*.test.js` passed serially on 2026-09-13.
+
 ### Task 5: Add explicit quality reporting for issue #7
 
 **Files:**

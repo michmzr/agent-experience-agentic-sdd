@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { OperationalLearningRepository } from '../src/learning/repository.js';
@@ -95,4 +96,36 @@ test('persists deterministic bounded retry eligibility and completed cost counte
     repository.saveResult(retry!.id, { episodes: [], findings: [], candidates: [], cost: 7 });
     assert.deepEqual(repository.report('repo-1').cost, { completedRuns: 1, total: 7 });
   } finally { repository.close(); }
+});
+
+test('migrates legacy analysis jobs into idempotent streams and recoverable runs', () => {
+  const databasePath = path();
+  const legacy = new DatabaseSync(databasePath);
+  try {
+    legacy.exec(`CREATE TABLE operational_analysis_jobs (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, session_id TEXT NOT NULL, input_high_water INTEGER NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(repository_id, session_id, input_high_water));`);
+    const insert = legacy.prepare('INSERT INTO operational_analysis_jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+    insert.run('pending-3', 'repo-1', 'session-pending', 3, 'pending', 0, '2026-09-12T09:00:00.000Z', '2026-09-12T09:00:00.000Z');
+    insert.run('retry-5', 'repo-1', 'session-pending', 5, 'retryable-failure', 2, '2026-09-12T09:01:00.000Z', '2026-09-12T09:01:00.000Z');
+    insert.run('running-4', 'repo-1', 'session-running', 4, 'running', 1, '2026-09-12T09:02:00.000Z', '2026-09-12T09:02:00.000Z');
+    insert.run('completed-6', 'repo-1', 'session-completed', 6, 'completed', 1, '2026-09-12T09:03:00.000Z', '2026-09-12T09:03:00.000Z');
+  } finally { legacy.close(); }
+
+  const repository = new OperationalLearningRepository(databasePath, () => '2026-09-12T10:00:00.000Z');
+  try {
+    assert.deepEqual(repository.streamsFor('repo-1').map(({ sessionId, desiredThrough, completedThrough, state }) => ({ sessionId, desiredThrough, completedThrough, state })), [
+      { sessionId: 'session-completed', desiredThrough: 6, completedThrough: 6, state: 'completed' },
+      { sessionId: 'session-pending', desiredThrough: 5, completedThrough: 0, state: 'pending' },
+      { sessionId: 'session-running', desiredThrough: 4, completedThrough: 0, state: 'pending' }
+    ]);
+    assert.equal(repository.jobById('retry-5')?.state, 'retryable-failure');
+    assert.equal(repository.jobById('running-4')?.state, 'retryable-failure');
+    assert.equal(repository.jobById('running-4')?.nextEligibleAt, '2026-09-12T10:00:00.000Z');
+    assert.equal(repository.claim()?.inputThrough, 5);
+  } finally { repository.close(); }
+
+  const reopened = new OperationalLearningRepository(databasePath, () => '2026-09-12T10:00:00.000Z');
+  try {
+    assert.equal(reopened.streamsFor('repo-1').length, 3);
+    assert.equal(reopened.analysisRunsFor('repo-1').length, 4);
+  } finally { reopened.close(); }
 });
