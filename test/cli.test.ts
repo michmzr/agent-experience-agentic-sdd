@@ -147,7 +147,7 @@ test('reports unknown results and a completed no-findings analysis without leaki
     const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
     learning.enqueue({ repositoryId, sessionId: 'session-quality', inputHighWater: 2 });
     const job = learning.claim(repositoryId)!;
-    learning.saveResult(job.id, { episodes: [], findings: [], candidates: [], coverage: [{ detector: 'm6-deterministic@1', status: 'completed', examinedEvents: 2, findings: 0 }], cost: 3 }, job.leaseToken);
+    learning.saveResult(job.id, { episodes: [], findings: [], candidates: [], coverage: [{ detector: job.detectorVersion, status: 'completed', examinedEvents: 2, findings: 0 }], cost: 3 }, job.leaseToken);
     learning.close();
     const complete = JSON.parse(runCli(['analysis', 'report', '--repository-id', repositoryId, '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
       schemaVersion: number; analysis: { state: string; result: string; cost: { completedRuns: number; total: number }; range: { from: number; through: number }; coverage: { required: boolean; detectors: unknown[] } };
@@ -157,7 +157,7 @@ test('reports unknown results and a completed no-findings analysis without leaki
     assert.equal(complete.analysis.result, 'no-findings');
     assert.deepEqual(complete.analysis.cost, { completedRuns: 1, total: 3 });
     assert.deepEqual(complete.analysis.range, { from: 1, through: 2 });
-    assert.deepEqual(complete.analysis.coverage, { required: true, total: 1, truncated: false, detectors: [{ detector: 'm6-deterministic@1', status: 'completed', examinedEvents: 2, findings: 0 }] });
+    assert.deepEqual(complete.analysis.coverage, { required: true, total: 1, truncated: false, detectors: [{ detector: job.detectorVersion, status: 'completed', examinedEvents: 2, findings: 0 }] });
 
     const global = runCli(['status-global', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout;
     assert.equal(global.includes(dataDir), false);

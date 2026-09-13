@@ -413,7 +413,7 @@ Evidence: initial focused context tests passed 21/21. Spec review found missing 
 - Modify: `test/learning-repository.test.ts`
 - Modify: `test/reliable-observation.test.ts`
 
-- [ ] **Step 1: Write failing typed-episode tests**
+- [x] **Step 1: Write failing typed-episode tests**
 
 Assert a Liquibase-to-SQL correction retains decision, correction, reason, and outcome evidence; a closure with missing verification becomes a verification-gap episode; an agent claim differs from a tool result; scope-changed repeat acceptance abstains; and missing evidence remains an abstention.
 
@@ -424,13 +424,13 @@ assert.equal(episodes[1]?.criterionState, 'unknown');
 assert.equal(findings[0]?.kind, 'insufficient-evidence');
 ```
 
-- [ ] **Step 2: Run focused tests and confirm RED**
+- [x] **Step 2: Run focused tests and confirm RED**
 
 Run: `pnpm build && node --test dist/test/learning-detectors.test.js dist/test/learning-repository.test.js dist/test/reliable-observation.test.js`
 
 Expected: failure because current episodes only represent convention and command-repair paths.
 
-- [ ] **Step 3: Implement typed evidence references and abstaining detectors**
+- [x] **Step 3: Implement typed evidence references and abstaining detectors**
 
 Introduce discriminated episode kinds and typed evidence provenance. Persist implementation facts, checks, criteria, claims, and closure separately. Require unchanged scope for repeated acceptance. Return an explicit insufficient-evidence finding when a required relation is missing.
 
@@ -440,15 +440,17 @@ export type EvidenceKind = 'tool-request' | 'source-result' | 'task-verification
   'user-instruction' | 'agent-claim' | 'task-transition' | 'instruction-context' | 'analyzer-inference';
 ```
 
-- [ ] **Step 4: Run focused tests and confirm GREEN**
+- [x] **Step 4: Run focused tests and confirm GREEN**
 
 Run: `pnpm build && node --test dist/test/learning-detectors.test.js dist/test/learning-repository.test.js dist/test/reliable-observation.test.js`
 
 Expected: correction, gap, negative, scope-change, and abstention tests pass.
 
-- [ ] **Step 5: Commit issue #9**
+- [x] **Step 5: Commit issue #9**
 
 Run: `git add src/learning src/evidence test/learning-detectors.test.ts test/learning-repository.test.ts test/reliable-observation.test.ts && git commit -m "feat: derive evidence-backed correction episodes"`
+
+Verification: RED command `rtk pnpm build && node --test dist/test/learning-service.test.js dist/test/reliable-observation.test.js` failed 1/12 because the report contained no typed tool evidence. GREEN commands `rtk pnpm build && node --test dist/test/learning-service.test.js dist/test/reliable-observation.test.js` passed 12/12 and `rtk pnpm build && node --test dist/test/learning-detectors.test.js dist/test/learning-repository.test.js dist/test/reliable-observation.test.js` passed 34/34. Commits `9d70ae8`, `2c783c0`, `31d16f0`, `d18722f`, `11ae9ae` implement the contract, persistence, capture projection, fixture path, and service boundary. The first `rtk pnpm check` run exposed a CLI coverage fixture with a stale `m6-deterministic@1` identifier; commit `4ab8a76` aligned it with the claimed job detector. `rtk pnpm build && node --test dist/test/cli.test.js` passed 18/18 and the final `rtk pnpm check` passed 738/738.
 
 ### Task 8: Verify, document, and prepare the pull request
 

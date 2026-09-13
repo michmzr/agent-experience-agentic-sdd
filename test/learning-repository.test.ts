@@ -29,6 +29,168 @@ test('coalesces an equivalent job and persists candidates across restart', () =>
   reopened.close();
 });
 
+test('persists typed evidence before its dependent episode across restart', () => {
+  const databasePath = path();
+  const repository = new OperationalLearningRepository(databasePath);
+  const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const claimed = repository.claim();
+  repository.saveResult(claimed!.id, {
+    episodeEvidence: [
+      { id: 'closure-1', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['closure-1'] }
+    ],
+    episodes: [{ id: 'gap-1', kind: 'verification-gap', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm9-typed-evidence@1', state: 'unresolved', evidenceEventIds: ['closure-1'], closureEvidenceId: 'closure-1', criterionState: 'unknown' }],
+    findings: [], candidates: []
+  }, claimed!.leaseToken);
+  repository.close();
+
+  const reopened = new OperationalLearningRepository(databasePath);
+  const report = reopened.report('repo-1');
+  assert.deepEqual(report.episodeEvidence.map(({ kind }) => kind), ['task-transition']);
+  assert.notEqual(report.episodeEvidence[0]?.id, 'closure-1');
+  assert.equal(report.episodes[0] !== undefined && 'kind' in report.episodes[0] ? report.episodes[0].kind : undefined, 'verification-gap');
+  reopened.close();
+});
+
+test('pseudonymizes semantic typed evidence and preserves public references', () => {
+  const repository = new OperationalLearningRepository(path());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const claimed = repository.claim();
+  repository.saveResult(claimed!.id, {
+    episodeEvidence: [{ id: 'semantic-closure', kind: 'task-transition', state: 'closed', decisionKey: 'release-approval', scopeKey: 'production-rollout', evidenceIds: ['semantic-closure'] }],
+    episodes: [{ id: 'semantic-gap', kind: 'verification-gap', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm9-typed-evidence@1', state: 'unresolved', evidenceEventIds: ['semantic-closure'], closureEvidenceId: 'semantic-closure', criterionState: 'unknown' }],
+    findings: [{ id: 'semantic-finding', episodeId: 'semantic-finding', kind: 'insufficient-evidence', evidenceEventIds: ['semantic-closure'], statement: 'Missing task verification.' }], candidates: []
+  }, claimed!.leaseToken);
+
+  const report = repository.report('repo-1');
+  const serialized = JSON.stringify(report);
+  for (const raw of ['semantic-closure', 'semantic-gap', 'semantic-finding', 'release-approval', 'production-rollout']) assert.equal(serialized.includes(raw), false);
+  const evidence = report.episodeEvidence[0]!;
+  const episode = report.episodes.find((item) => 'kind' in item && item.kind === 'verification-gap');
+  const finding = report.findings.find(({ kind }) => kind === 'insufficient-evidence');
+  assert.notEqual(evidence.id, 'semantic-closure');
+  assert.notEqual(evidence.decisionKey, 'release-approval');
+  assert.notEqual(evidence.scopeKey, 'production-rollout');
+  assert.equal(episode !== undefined && 'closureEvidenceId' in episode ? episode.closureEvidenceId : undefined, evidence.id);
+  assert.equal(episode?.evidenceEventIds[0], evidence.id);
+  assert.equal(finding?.evidenceEventIds[0], evidence.id);
+  assert.equal(finding?.id, finding?.episodeId);
+  repository.close();
+});
+
+test('rejects forged evidence and discriminated references outside the job scope', () => {
+  const repository = new OperationalLearningRepository(path());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const claimed = repository.claim();
+  assert.throws(() => repository.saveResult(claimed!.id, {
+    episodeEvidence: [{ id: 'closure-1', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['forged-evidence'] }],
+    episodes: [], findings: [], candidates: []
+  }, claimed!.leaseToken), /evidence.*scope/i);
+  repository.close();
+
+  const valid = new OperationalLearningRepository(path());
+  valid.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const validClaim = valid.claim();
+  assert.throws(() => valid.saveResult(validClaim!.id, {
+    episodeEvidence: [{ id: 'closure-1', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['closure-1'] }],
+    episodes: [{ id: 'gap-1', kind: 'verification-gap', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm9-typed-evidence@1', state: 'unresolved', evidenceEventIds: ['closure-1', 'forged-closure'], closureEvidenceId: 'forged-closure', criterionState: 'unknown' }],
+    findings: [], candidates: []
+  }, validClaim!.leaseToken), /episode evidence.*scope/i);
+  valid.close();
+
+  const correction = new OperationalLearningRepository(path());
+  correction.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const correctionClaim = correction.claim();
+  assert.throws(() => correction.saveResult(correctionClaim!.id, {
+    episodeEvidence: [
+      { id: 'original', kind: 'tool-request', state: 'observed', decisionKey: 'schema-update', scopeKey: 'repository', evidenceIds: ['original'] },
+      { id: 'changed', kind: 'tool-request', state: 'succeeded', decisionKey: 'schema-update', scopeKey: 'repository', evidenceIds: ['original'] }
+    ],
+    episodes: [{ id: 'correction-1', kind: 'correction', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm9-typed-evidence@1', state: 'outcome-observed', evidenceEventIds: ['original', 'changed', 'forged-reason'], originalDecisionEvidenceId: 'original', changedDecisionEvidenceId: 'changed', reasonEvidenceId: 'forged-reason' }],
+    findings: [], candidates: []
+  }, correctionClaim!.leaseToken), /episode evidence.*scope/i);
+  correction.close();
+});
+
+test('uses the typed-evidence detector version for default analysis jobs', () => {
+  const repository = new OperationalLearningRepository(path());
+  const stream = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-default', inputHighWater: 1 });
+  assert.equal(stream.detectorVersion, 'm9-typed-evidence@1');
+  repository.close();
+});
+
+test('rejects typed evidence IDs that are already owned by another repository scope', () => {
+  const databasePath = path();
+  const first = new OperationalLearningRepository(databasePath);
+  first.enqueue({ repositoryId: 'repo-a', sessionId: 'session-1', inputHighWater: 1 });
+  const firstClaim = first.claim();
+  first.saveResult(firstClaim!.id, { episodeEvidence: [{ id: 'shared-evidence', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['shared-evidence'] }], episodes: [], findings: [], candidates: [] }, firstClaim!.leaseToken);
+  first.close();
+
+  const second = new OperationalLearningRepository(databasePath);
+  second.enqueue({ repositoryId: 'repo-b', sessionId: 'session-1', inputHighWater: 1 });
+  const secondClaim = second.claim();
+  assert.throws(() => second.saveResult(secondClaim!.id, { episodeEvidence: [{ id: 'shared-evidence', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['shared-evidence'] }], episodes: [], findings: [], candidates: [] }, secondClaim!.leaseToken), /collision.*scope/i);
+  second.close();
+});
+
+test('allows an identical evidence retry within one scope but rejects a changed payload', () => {
+  const repository = new OperationalLearningRepository(path());
+  const evidence = { id: 'immutable-evidence', kind: 'task-transition' as const, state: 'closed' as const, decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['immutable-evidence'] };
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const first = repository.claim();
+  repository.saveResult(first!.id, { episodeEvidence: [evidence], episodes: [], findings: [], candidates: [] }, first!.leaseToken);
+
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 2 });
+  const second = repository.claim();
+  assert.throws(() => repository.saveResult(second!.id, {
+    episodeEvidence: [{ ...evidence, state: 'observed' }], episodes: [], findings: [], candidates: []
+  }, second!.leaseToken), /payload/i);
+  repository.saveResult(second!.id, { episodeEvidence: [evidence], episodes: [], findings: [], candidates: [] }, second!.leaseToken);
+  const report = repository.report('repo-1');
+  assert.equal(report.episodeEvidence[0]?.kind, evidence.kind);
+  assert.notEqual(report.episodeEvidence[0]?.id, evidence.id);
+  repository.close();
+});
+
+test('rejects unsafe evidence before persistence and returns only report-safe evidence', () => {
+  const repository = new OperationalLearningRepository(path());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const claimed = repository.claim();
+  assert.throws(() => repository.saveResult(claimed!.id, {
+    episodeEvidence: [{ id: 'capture:/Users/private', kind: 'task-transition', state: 'closed', scopeKey: 'repository', evidenceIds: ['capture:/Users/private'] }], episodes: [], findings: [], candidates: []
+  }, claimed!.leaseToken), /identity/i);
+  repository.saveResult(claimed!.id, {
+    episodeEvidence: [{ id: 'safe-evidence', kind: 'task-transition', state: 'closed', scopeKey: 'repository', evidenceIds: ['safe-evidence'] }], episodes: [], findings: [], candidates: []
+  }, claimed!.leaseToken);
+  const report = repository.report('repo-1');
+  assert.equal(JSON.stringify(report.episodeEvidence).includes('/Users/'), false);
+  assert.notEqual(report.episodeEvidence[0]?.id, 'safe-evidence');
+  repository.close();
+});
+
+test('rejects insufficient-evidence findings that reference evidence outside the claimed job scope', () => {
+  const repository = new OperationalLearningRepository(path());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const claimed = repository.claim();
+  assert.throws(() => repository.saveResult(claimed!.id, {
+    episodeEvidence: [], episodes: [], candidates: [],
+    findings: [{ id: 'finding-1', episodeId: 'finding-1', kind: 'insufficient-evidence', evidenceEventIds: ['forged-evidence'], statement: 'Missing linked decision evidence.' }]
+  }, claimed!.leaseToken), /finding evidence.*scope/i);
+  repository.close();
+});
+
+test('rejects a typed episode whose evidence was not persisted for the job scope', () => {
+  const repository = new OperationalLearningRepository(path());
+  const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const claimed = repository.claim();
+  assert.throws(() => repository.saveResult(claimed!.id, {
+    episodeEvidence: [],
+    episodes: [{ id: 'gap-missing', kind: 'verification-gap', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm9-typed-evidence@1', state: 'unresolved', evidenceEventIds: ['missing-evidence'], closureEvidenceId: 'missing-evidence', criterionState: 'unknown' }],
+    findings: [], candidates: []
+  }, claimed!.leaseToken), /evidence.*job/i);
+  repository.close();
+});
+
 test('retains contradictory evidence and marks the candidate disputed', () => {
   const repository = new OperationalLearningRepository(path());
   const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 1 });
@@ -130,7 +292,7 @@ test('migrates legacy analysis jobs into idempotent streams and recoverable runs
   } finally { reopened.close(); }
 });
 
-test('merges legacy jobs with an existing completed stream without rerunning covered input', () => {
+test('keeps migrated m6 jobs separate from a completed typed-evidence stream', () => {
   const databasePath = path();
   const seeded = new OperationalLearningRepository(databasePath, () => '2026-09-12T10:00:00.000Z');
   try {
@@ -146,11 +308,14 @@ test('merges legacy jobs with an existing completed stream without rerunning cov
 
   const migrated = new OperationalLearningRepository(databasePath, () => '2026-09-12T10:00:00.000Z');
   try {
-    assert.deepEqual(migrated.streamsFor('repo-1').map(({ desiredThrough, completedThrough, state }) => ({ desiredThrough, completedThrough, state })), [{ desiredThrough: 9, completedThrough: 7, state: 'pending' }]);
+    assert.deepEqual(migrated.streamsFor('repo-1').map(({ desiredThrough, completedThrough, state }) => ({ desiredThrough, completedThrough, state })), [
+      { desiredThrough: 9, completedThrough: 0, state: 'pending' },
+      { desiredThrough: 7, completedThrough: 7, state: 'completed' }
+    ]);
     assert.equal(migrated.jobById('legacy-covered-5')?.state, 'completed');
     assert.equal(migrated.jobById('legacy-new-9')?.state, 'retryable-failure');
     const claimed = migrated.claim();
-    assert.deepEqual({ inputFrom: claimed?.inputFrom, inputThrough: claimed?.inputThrough }, { inputFrom: 8, inputThrough: 9 });
+    assert.deepEqual({ inputFrom: claimed?.inputFrom, inputThrough: claimed?.inputThrough }, { inputFrom: 1, inputThrough: 9 });
   } finally { migrated.close(); }
 });
 

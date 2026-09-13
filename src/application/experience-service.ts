@@ -28,6 +28,8 @@ import {
   type PublicGateDecision
 } from './runtime-service.js';
 
+const legacyOperationalDetector = 'm6-deterministic@1';
+
 export interface LessonFilter {
   readonly scope?: KnowledgeScope;
   readonly repositoryId?: string;
@@ -174,7 +176,18 @@ export class ExperienceService {
   }
 
   operationalAnalysisReportV2(repositoryId: string) {
-    return Object.freeze({ version: 2 as const, schemaVersion: 2 as const, analysis: this.analysisQuality(repositoryId) });
+    const learning = new OperationalLearningService(this.databasePath);
+    const report = learning.report(repositoryId);
+    return Object.freeze({
+      version: 2 as const,
+      schemaVersion: 2 as const,
+      analysis: this.analysisQuality(repositoryId),
+      typed: Object.freeze({
+        episodes: Object.freeze(report.episodes.filter((episode) => 'kind' in episode)),
+        evidence: report.episodeEvidence,
+        findings: Object.freeze(report.findings.filter((finding) => finding.kind === 'insufficient-evidence'))
+      })
+    });
   }
 
   private repositoryStatus(repository: { id: string; root?: string; observedAt: string; selectedSources?: readonly ('codex' | 'cursor')[] }, entrypoint: string, database = { path: this.databasePath, available: existsSync(this.databasePath) }) {
@@ -231,7 +244,8 @@ export class ExperienceService {
   operationalAnalysisReport(repositoryId: string, sessionId?: string) {
     const service = new OperationalLearningService(this.databasePath);
     const report = service.report(repositoryId);
-    const scopedEpisodes = sessionId === undefined ? report.episodes : report.episodes.filter((episode) => episode.sessionId === sessionId);
+    const legacyEpisodes = report.episodes.filter((episode) => episode.detector === legacyOperationalDetector);
+    const scopedEpisodes = sessionId === undefined ? legacyEpisodes : legacyEpisodes.filter((episode) => episode.sessionId === sessionId);
     const episodeIds = new Set(scopedEpisodes.map(({ id }) => id));
     return Object.freeze({
       version: 1 as const,

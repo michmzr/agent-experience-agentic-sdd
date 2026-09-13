@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import type { CapturedEventRecord } from '../src/capture/contracts.js';
-import { detectOperationalEpisodes } from '../src/learning/detectors.js';
+import { createTypedEpisode, createTypedFinding, detectOperationalEpisodes, type CorrectionEpisode, type VerificationGapEpisode } from '../src/learning/detectors.js';
 import { readProjectToolConventions } from '../src/learning/project-conventions.js';
+import type { EpisodeEvidence } from '../src/learning/contracts.js';
 
 const at = (second: number) => `2026-09-08T10:00:${String(second).padStart(2, '0')}.000Z`;
 
@@ -30,6 +31,10 @@ function event(input: {
     summary: 'Sanitized capture.',
     ...(input.phase === 'post-result' ? { outcome: input.outcome!, relatedEventId: input.relatedEventId!, exitStatus: input.outcome === 'succeeded' ? 0 : 1 } : {})
   };
+}
+
+function evidence(input: Omit<EpisodeEvidence, 'evidenceIds'> & { readonly evidenceIds?: readonly string[] }): EpisodeEvidence {
+  return { ...input, evidenceIds: input.evidenceIds ?? ['capture-1'] };
 }
 
 test('reads only explicit root-scoped pnpm and uv conventions', () => {
@@ -87,4 +92,195 @@ test('records ambiguity rather than a repair for unknown, unrelated or privilege
 
   assert.equal(result.candidates.length, 0);
   assert.equal(result.findings.some(({ kind }) => kind === 'ambiguous-repair'), true);
+});
+
+test('derives a linked changed decision as a correction without inventing a reason', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'liquibase-decision', kind: 'tool-request', state: 'observed', decisionKey: 'schema-update', scopeKey: 'repository' }),
+      evidence({ id: 'sql-decision', kind: 'tool-request', state: 'succeeded', decisionKey: 'schema-update', scopeKey: 'repository', evidenceIds: ['liquibase-decision'] })
+    ]
+  });
+
+  const episode = result.episodes.find((item): item is CorrectionEpisode => item.kind === 'correction');
+  assert.equal(episode?.kind, 'correction');
+  assert.equal(episode?.originalDecisionEvidenceId, 'liquibase-decision');
+  assert.equal(episode?.changedDecisionEvidenceId, 'sql-decision');
+  assert.equal(episode?.reasonEvidenceId, undefined);
+  assert.equal(episode?.state, 'unresolved');
+  assert.equal(result.findings.some(({ kind }) => kind === 'insufficient-evidence'), false);
+  assert.equal(result.candidates.length, 0);
+});
+
+test('reports insufficient evidence when a changed decision is not linked to its original decision', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'original-decision', kind: 'tool-request', state: 'observed', decisionKey: 'schema-update', scopeKey: 'repository' }),
+      evidence({ id: 'changed-decision', kind: 'tool-request', state: 'succeeded', decisionKey: 'schema-update', scopeKey: 'repository', evidenceIds: ['capture-2'] })
+    ]
+  });
+
+  assert.equal(result.episodes.some((item) => item.kind === 'correction'), false);
+  assert.equal(result.episodes.length, 0);
+  assert.equal(result.findings.some(({ kind }) => kind === 'insufficient-evidence'), true);
+  assert.equal(result.candidates.length, 0);
+});
+
+test('abstains when correction evidence has an incompatible scope', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'original', kind: 'tool-request', state: 'observed', decisionKey: 'schema-update', scopeKey: 'repository' }),
+      evidence({ id: 'changed', kind: 'tool-request', state: 'succeeded', decisionKey: 'schema-update', scopeKey: 'other-repository', evidenceIds: ['original'] })
+    ]
+  });
+
+  assert.equal(result.episodes.length, 0);
+  assert.equal(result.findings.some(({ kind }) => kind === 'insufficient-evidence'), true);
+});
+
+test('abstains when a linked correction reason has an incompatible scope', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'original', kind: 'tool-request', state: 'observed', decisionKey: 'schema-update', scopeKey: 'repository' }),
+      evidence({ id: 'changed', kind: 'tool-request', state: 'succeeded', decisionKey: 'schema-update', scopeKey: 'repository', evidenceIds: ['original'] }),
+      evidence({ id: 'reason', kind: 'agent-claim', state: 'observed', decisionKey: 'schema-update', scopeKey: 'other-repository', reasonClass: 'superseded', evidenceIds: ['changed'] })
+    ]
+  });
+
+  assert.equal(result.episodes.length, 0);
+  assert.equal(result.findings.some(({ kind }) => kind === 'insufficient-evidence'), true);
+});
+
+test('uses a typed-evidence detector version without changing legacy detector records', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [evidence({ id: 'closed', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository' })]
+  });
+
+  assert.equal(result.episodes[0]?.detector, 'm9-typed-evidence@1');
+});
+
+test('rejects malformed typed episode and insufficient-evidence payloads at runtime', () => {
+  const base = { id: 'episode-1', repositoryId: 'repo-1', sessionId: 'session-1', detector: 'm9-typed-evidence@1', state: 'unresolved' as const, evidenceEventIds: ['closure-1'] };
+  assert.throws(() => createTypedEpisode({ ...base, kind: 'verification-gap', closureEvidenceId: 'closure-1', criterionState: 'missing' as never }), /criterion/i);
+  assert.throws(() => createTypedEpisode({ ...base, kind: 'verification-gap', closureEvidenceId: 'closure-1', criterionState: 'unmet' }), /criterion/i);
+  assert.throws(() => createTypedEpisode({ ...base, detector: 'm6-deterministic@1', kind: 'verification-gap', closureEvidenceId: 'closure-1', criterionState: 'unknown' }), /detector/i);
+  assert.throws(() => createTypedEpisode({ ...base, kind: 'repeated-acceptance', firstAcceptanceEvidenceId: 'approval-1', repeatedAcceptanceEvidenceId: 'approval-2', scopeKey: '', evidenceEventIds: ['approval-1', 'approval-2'] }), /scope/i);
+  assert.throws(() => createTypedEpisode({ ...base, kind: 'correction', originalDecisionEvidenceId: 'decision-1', changedDecisionEvidenceId: 'decision-2', evidenceEventIds: ['decision-1'] }), /evidence/i);
+  assert.throws(() => createTypedFinding({ id: 'finding-1', episodeId: 'episode-1', kind: 'insufficient-evidence', evidenceEventIds: [], statement: 'Missing relation.' }), /evidence/i);
+  assert.throws(() => createTypedFinding({ id: 'finding-1', episodeId: 'episode-1', kind: 'insufficient-evidence', evidenceEventIds: ['evidence-1', 'evidence-1'], statement: 'Missing relation.' }), /duplicate/i);
+  assert.throws(() => createTypedFinding({ id: 'finding-1', episodeId: 'episode-1', kind: 'insufficient-evidence', evidenceEventIds: Array.from({ length: 129 }, (_, index) => `evidence-${index}`), statement: 'Missing relation.' }), /evidence/i);
+});
+
+test('derives a verification gap for closure with no recorded criterion', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [evidence({ id: 'issue-closed', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository' })]
+  });
+
+  const episode = result.episodes.find((item): item is VerificationGapEpisode => item.kind === 'verification-gap');
+  assert.equal(episode?.kind, 'verification-gap');
+  assert.equal(episode?.closureEvidenceId, 'issue-closed');
+  assert.equal(episode?.criterionState, 'unknown');
+});
+
+test('suppresses a gap only for a successful criterion linked to the same closure', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'closure', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['implementation'] }),
+      evidence({ id: 'implementation', kind: 'tool-result', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository' }),
+      evidence({ id: 'check-execution', kind: 'tool-request', state: 'observed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['implementation'] }),
+      evidence({ id: 'check-result', kind: 'tool-result', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['check-execution'] }),
+      evidence({ id: 'criterion-succeeded', kind: 'task-verification', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['check-result'] })
+    ]
+  });
+  assert.equal(result.episodes.some((item) => item.kind === 'verification-gap'), false);
+});
+
+test('does not let an unrelated successful criterion suppress a failed linked verification', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'closure', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['implementation'] }),
+      evidence({ id: 'implementation', kind: 'tool-result', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository' }),
+      evidence({ id: 'check-execution', kind: 'tool-request', state: 'observed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['implementation'] }),
+      evidence({ id: 'check-result', kind: 'tool-result', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['check-execution'] }),
+      evidence({ id: 'criterion-failed', kind: 'task-verification', state: 'failed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['check-result'] }),
+      evidence({ id: 'stale-success', kind: 'task-verification', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository' })
+    ]
+  });
+  const gap = result.episodes.find((item): item is VerificationGapEpisode => item.kind === 'verification-gap');
+  assert.equal(gap?.criterionEvidenceId, 'criterion-failed');
+  assert.equal(gap?.criterionState, 'unmet');
+});
+
+test('does not attach same-kind evidence outside the closure dependency chain', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'closure', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['implementation'] }),
+      evidence({ id: 'implementation', kind: 'tool-result', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository' }),
+      evidence({ id: 'unrelated-request', kind: 'tool-request', state: 'observed', decisionKey: 'issue-9', scopeKey: 'repository' }),
+      evidence({ id: 'unrelated-result', kind: 'tool-result', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['unrelated-request'] }),
+      evidence({ id: 'unrelated-criterion', kind: 'task-verification', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['unrelated-result'] })
+    ]
+  });
+  const gap = result.episodes.find((item): item is VerificationGapEpisode => item.kind === 'verification-gap');
+  assert.equal(gap?.implementationEvidenceId, 'implementation');
+  assert.equal(gap?.checkExecutionEvidenceId, undefined);
+  assert.equal(gap?.checkResultEvidenceId, undefined);
+  assert.equal(gap?.criterionEvidenceId, undefined);
+  assert.equal(gap?.criterionState, 'unknown');
+});
+
+test('keeps implementation and check-result roles distinct when a result references a check request', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'closure', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['implementation', 'check-execution'] }),
+      evidence({ id: 'implementation', kind: 'tool-result', state: 'succeeded', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['check-execution'] }),
+      evidence({ id: 'check-execution', kind: 'tool-request', state: 'observed', decisionKey: 'issue-9', scopeKey: 'repository' })
+    ]
+  });
+  const gap = result.episodes.find((item): item is VerificationGapEpisode => item.kind === 'verification-gap');
+  assert.equal(gap?.implementationEvidenceId, 'implementation');
+  assert.equal(gap?.checkResultEvidenceId, undefined);
+  assert.equal(new Set(gap?.evidenceEventIds).size, gap?.evidenceEventIds.length);
+});
+
+test('does not treat a tool result as an agent claim or a repeated acceptance', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'agent-claim', kind: 'agent-claim', state: 'succeeded', decisionKey: 'approval', scopeKey: 'repository' }),
+      evidence({ id: 'tool-result', kind: 'tool-result', state: 'succeeded', decisionKey: 'approval', scopeKey: 'repository', evidenceIds: ['agent-claim'] })
+    ]
+  });
+  assert.equal(result.episodes.some((item) => item.kind === 'repeated-acceptance'), false);
+  assert.equal(result.candidates.length, 0);
+});
+
+test('derives repeated acceptance only for a matching decision in the same scope', () => {
+  const sameScope = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'acceptance-1', kind: 'agent-claim', state: 'succeeded', decisionKey: 'deploy', scopeKey: 'production' }),
+      evidence({ id: 'acceptance-2', kind: 'agent-claim', state: 'succeeded', decisionKey: 'deploy', scopeKey: 'production' })
+    ]
+  });
+  const changedScope = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'acceptance-a', kind: 'agent-claim', state: 'succeeded', decisionKey: 'deploy', scopeKey: 'staging' }),
+      evidence({ id: 'acceptance-b', kind: 'agent-claim', state: 'succeeded', decisionKey: 'deploy', scopeKey: 'production' })
+    ]
+  });
+
+  assert.equal(sameScope.episodes.some((item) => item.kind === 'repeated-acceptance'), true);
+  assert.equal(changedScope.episodes.some((item) => item.kind === 'repeated-acceptance'), false);
 });

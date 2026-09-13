@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import test from 'node:test';
 
 import { containsCredentialMaterial } from '../src/privacy/structured-arguments.js';
+import { detectOperationalEpisodes } from '../src/learning/detectors.js';
+import { createEpisodeEvidence, type EpisodeEvidence } from '../src/learning/contracts.js';
 
 type ReceiptDisposition = 'accepted' | 'privacy-redaction' | 'unsupported';
 type EvidenceGap = 'result-not-delivered' | 'privacy-redacted' | 'verification-not-observed';
@@ -23,6 +25,7 @@ interface Scenario {
 interface Fixture {
   readonly version: 1;
   readonly synthetic: true;
+  readonly episodeEvidence: readonly EpisodeEvidence[];
   readonly scenarios: readonly Scenario[];
   readonly transports: readonly { id: string; scenarioId: string; kind: 'lifecycle' | 'operation' }[];
   readonly receipts: readonly { id: string; scenarioId: string; operationId: string; disposition: ReceiptDisposition }[];
@@ -58,15 +61,27 @@ interface ValidatedResults {
   readonly operationLinks: readonly { id: string; scenarioId: string; relatedOperationId: string }[];
 }
 
-test('contains the six synthetic reliable-observation scenarios and their deterministic baseline', () => {
+test('contains the seven synthetic reliable-observation scenarios and their deterministic baseline', () => {
   const fixture = parseFixture(readFixture());
 
   assert.equal(fixture.synthetic, true);
   assert.deepEqual(fixture.scenarios.map(({ id }) => id), [
     'resume-after-run-end', 'missing-result', 'privacy-redaction',
-    'expected-red', 'liquibase-to-sql', 'closure-with-verification-gap'
+    'expected-red', 'liquibase-to-sql', 'closure-with-verification-gap', 'scope-changed-approval'
   ]);
   assert.deepEqual(evaluateReliableObservationFixture(fixture), fixture.expectedQuality);
+});
+
+test('passes closure and changed-scope approval evidence through the typed detector contract', () => {
+  const fixture = parseFixture(readFixture());
+  assert.ok(fixture.scenarios.some(({ id }) => id === 'closure-with-verification-gap'));
+  assert.ok(fixture.scenarios.some(({ id }) => id === 'scope-changed-approval'));
+  const result = detectOperationalEpisodes({
+    repositoryId: 'fixture-repository', sessionId: 'fixture-session', events: [], conventions: [],
+    episodeEvidence: fixture.episodeEvidence
+  });
+  assert.equal(result.episodes.some(({ kind }) => kind === 'verification-gap'), true);
+  assert.equal(result.episodes.some(({ kind }) => kind === 'repeated-acceptance'), false);
 });
 
 test('rejects unsafe, incomplete, and duplicate synthetic corpus records', () => {
@@ -156,11 +171,12 @@ function captureError(callback: () => void): unknown {
 function parseFixture(value: unknown): Fixture {
   assertObject(value, 'fixture');
   rejectUnsafeFixtureData(value);
-  assertClosedKeys(value, ['version', 'synthetic', 'scenarios', 'transports', 'receipts', 'results', 'analysis', 'findings', 'abstentions', 'expectedQuality'], 'fixture');
+  assertClosedKeys(value, ['version', 'synthetic', 'episodeEvidence', 'scenarios', 'transports', 'receipts', 'results', 'analysis', 'findings', 'abstentions', 'expectedQuality'], 'fixture');
   assert.equal(value.version, 1, 'fixture.version');
   assert.equal(value.synthetic, true, 'fixture.synthetic');
-  for (const key of ['scenarios', 'transports', 'receipts', 'results', 'analysis', 'findings', 'abstentions'] as const) assertArray(value[key], `fixture.${key}`);
+  for (const key of ['episodeEvidence', 'scenarios', 'transports', 'receipts', 'results', 'analysis', 'findings', 'abstentions'] as const) assertArray(value[key], `fixture.${key}`);
   assertObject(value.expectedQuality, 'fixture.expectedQuality');
+  const episodeEvidence = (value.episodeEvidence as unknown[]).map((record) => createEpisodeEvidence(record as EpisodeEvidence));
 
   const scenarioIds = new Set<string>();
   const expectedTransportIds = new Map<string, readonly string[]>();
@@ -204,7 +220,7 @@ function parseFixture(value: unknown): Fixture {
   validateExpectedEvidenceGaps(expectedEvidenceGaps, results.evidenceGaps, abstentionEvidenceGaps);
   validateExpectedQuality(value.expectedQuality);
 
-  return value as unknown as Fixture;
+  return { ...value, episodeEvidence } as unknown as Fixture;
 }
 
 function evaluateReliableObservationFixture(fixture: Fixture): QualityMeasure {

@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import { ExperienceService } from '../src/application/experience-service.js';
 import { runCli } from '../src/cli.js';
+import { OperationalLearningRepository } from '../src/learning/repository.js';
 import { OperationalLearningService } from '../src/learning/service.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 
@@ -51,3 +52,60 @@ test('rejects an analysis command without repository selection', () => {
   assert.equal(result.exitCode, 2);
   assert.equal(result.stdout.includes('credential-like-marker'), false);
 });
+
+test('exposes report-safe typed evidence and episodes through the versioned analysis report', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-typed-analysis-report-'));
+  try {
+    const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    learning.enqueue({ repositoryId: 'repo-typed', sessionId: 'session-typed', inputHighWater: 1 });
+    const job = learning.claim();
+    learning.saveResult(job!.id, {
+      episodeEvidence: [{ id: 'semantic-closure', kind: 'task-transition', state: 'closed', decisionKey: 'release-approval', scopeKey: 'production-rollout', evidenceIds: ['semantic-closure'] }],
+      episodes: [{ id: 'semantic-gap', kind: 'verification-gap', repositoryId: 'repo-typed', sessionId: 'session-typed', detector: 'm9-typed-evidence@1', state: 'unresolved', evidenceEventIds: ['semantic-closure'], closureEvidenceId: 'semantic-closure', criterionState: 'unknown' }],
+      findings: [], candidates: []
+    }, job!.leaseToken);
+    learning.close();
+
+    const result = runCli(['analysis', 'report', '--repository-id', 'repo-typed', '--schema-version', '2', '--data-dir', dataDir, '--json']);
+    assert.equal(result.exitCode, 0);
+    const report = JSON.parse(result.stdout) as { typed: { evidence: Array<{ id: string }>; episodes: Array<{ kind: string; closureEvidenceId?: string }> } };
+    assert.equal(report.typed.episodes[0]?.kind, 'verification-gap');
+    assert.equal(report.typed.episodes[0]?.closureEvidenceId, report.typed.evidence[0]?.id);
+    assert.equal(result.stdout.includes('semantic-closure'), false);
+    assert.equal(result.stdout.includes('release-approval'), false);
+    assert.equal(result.stdout.includes('production-rollout'), false);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('keeps the schema-v1 analysis report unchanged when typed rows are present', () => {
+  const legacyDataDir = mkdtempSync(join(tmpdir(), 'ael-v1-legacy-report-'));
+  const typedDataDir = mkdtempSync(join(tmpdir(), 'ael-v1-typed-report-'));
+  try {
+    const baseline = seedSchemaV1Report(legacyDataDir, false);
+    const withTypedRows = seedSchemaV1Report(typedDataDir, true);
+    assert.equal(withTypedRows, baseline);
+  } finally {
+    rmSync(legacyDataDir, { recursive: true, force: true });
+    rmSync(typedDataDir, { recursive: true, force: true });
+  }
+});
+
+function seedSchemaV1Report(dataDir: string, includeTypedRows: boolean): string {
+  const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+  try {
+    learning.enqueue({ repositoryId: 'repo-v1', sessionId: 'session-v1', inputHighWater: 1 });
+    const job = learning.claim();
+    learning.saveResult(job!.id, {
+      episodes: [{ id: 'legacy-episode', repositoryId: 'repo-v1', sessionId: 'session-v1', detector: 'm6-deterministic@1', state: 'outcome-observed', evidenceEventIds: ['legacy-event'], hypothesis: 'Legacy hypothesis.' }, ...(includeTypedRows ? [{ id: 'typed-correction', kind: 'correction' as const, repositoryId: 'repo-v1', sessionId: 'session-v1', detector: 'm9-typed-evidence@1', state: 'outcome-observed' as const, evidenceEventIds: ['typed-original', 'typed-changed', 'typed-outcome'], originalDecisionEvidenceId: 'typed-original', changedDecisionEvidenceId: 'typed-changed', outcomeEvidenceId: 'typed-outcome' }] : [])],
+      episodeEvidence: includeTypedRows ? [
+        { id: 'typed-original', kind: 'tool-request' as const, state: 'observed' as const, decisionKey: 'typed-decision', scopeKey: 'typed-scope', evidenceIds: ['typed-original'] },
+        { id: 'typed-changed', kind: 'tool-request' as const, state: 'succeeded' as const, decisionKey: 'typed-decision', scopeKey: 'typed-scope', evidenceIds: ['typed-original'] },
+        { id: 'typed-outcome', kind: 'tool-result' as const, state: 'succeeded' as const, decisionKey: 'typed-decision', scopeKey: 'typed-scope', evidenceIds: ['typed-changed'] }
+      ] : [],
+      findings: [], candidates: []
+    }, job!.leaseToken);
+  } finally { learning.close(); }
+  const report = runCli(['analysis', 'report', '--repository-id', 'repo-v1', '--data-dir', dataDir, '--json']);
+  assert.equal(report.exitCode, 0);
+  return report.stdout;
+}

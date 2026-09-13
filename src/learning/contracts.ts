@@ -1,11 +1,27 @@
 import type { LessonKind } from '../domain/types.js';
+import { containsCredentialMaterial } from '../privacy/structured-arguments.js';
 
 const identifierPattern = /^[A-Za-z0-9._:@/-]{1,512}$/;
+const evidenceIdentifierPattern = /^[a-z][a-z0-9-]{0,127}$/;
 const textLimit = 2_048;
 
 export type AnalysisJobState = 'pending' | 'running' | 'completed' | 'retryable-failure' | 'quarantined-input';
 export type EpisodeState = 'unresolved' | 'outcome-observed' | 'solution-supported';
 export type FindingKind = 'repository-tool-convention' | 'command-repair' | 'ambiguous-repair';
+export type EpisodeEvidenceKind = 'tool-request' | 'tool-result' | 'task-verification' | 'agent-claim' | 'user-instruction' | 'task-transition' | 'instruction-context' | 'analyzer-inference';
+export type EpisodeEvidenceState = 'observed' | 'succeeded' | 'failed' | 'closed';
+export type EpisodeEvidenceReasonClass = 'failure' | 'instruction' | 'superseded' | 'verification';
+
+export interface EpisodeEvidence {
+  readonly id: string;
+  readonly kind: EpisodeEvidenceKind;
+  readonly state: EpisodeEvidenceState;
+  readonly decisionKey?: string;
+  readonly scopeKey?: string;
+  readonly reasonClass?: EpisodeEvidenceReasonClass;
+  readonly detectorVersion?: string;
+  readonly evidenceIds: readonly string[];
+}
 
 export interface AnalysisCoverage {
   readonly detector: string;
@@ -45,6 +61,29 @@ export interface LearningCandidate {
   readonly procedure: readonly string[];
   readonly evidenceEventIds: readonly string[];
   readonly invalidationConditions: readonly string[];
+}
+
+export function createEpisodeEvidence(value: EpisodeEvidence): EpisodeEvidence {
+  assertEpisodeEvidenceFields(value);
+  assertEvidenceIdentifier(value.id, 'Evidence identity');
+  if (!episodeEvidenceKinds.has(value.kind)) throw new TypeError('Evidence kind is invalid.');
+  if (!episodeEvidenceStates.has(value.state)) throw new TypeError('Evidence state is invalid.');
+  optionalEvidenceIdentifier(value.decisionKey, 'Evidence decision key');
+  optionalEvidenceIdentifier(value.scopeKey, 'Evidence scope key');
+  if (value.reasonClass !== undefined && !episodeEvidenceReasonClasses.has(value.reasonClass)) throw new TypeError('Evidence reason class is invalid.');
+  if (value.kind === 'analyzer-inference') assertIdentifier(value.detectorVersion ?? '', 'Evidence detector version');
+  else if (value.detectorVersion !== undefined) throw new TypeError('Evidence detector version is invalid.');
+  const evidenceIds = freezeEvidenceIdentifiers(value.evidenceIds, 'Episode evidence');
+  return Object.freeze({
+    id: value.id,
+    kind: value.kind,
+    state: value.state,
+    ...(value.decisionKey === undefined ? {} : { decisionKey: value.decisionKey }),
+    ...(value.scopeKey === undefined ? {} : { scopeKey: value.scopeKey }),
+    ...(value.reasonClass === undefined ? {} : { reasonClass: value.reasonClass }),
+    ...(value.detectorVersion === undefined ? {} : { detectorVersion: value.detectorVersion }),
+    evidenceIds
+  });
 }
 
 export function createOperationalEpisode(value: OperationalEpisode): OperationalEpisode {
@@ -116,8 +155,46 @@ function optionalIdentifier(value: string | undefined, field: string): void {
   if (value !== undefined) assertIdentifier(value, field);
 }
 
+function optionalEvidenceIdentifier(value: string | undefined, field: string): void {
+  if (value !== undefined) assertEvidenceIdentifier(value, field);
+}
+
+function freezeEvidenceIdentifiers(values: readonly string[], field: string): readonly string[] {
+  if (!Array.isArray(values) || values.length < 1 || values.length > 128) throw new TypeError(`${field} is invalid.`);
+  const identities = new Set<string>();
+  for (const value of values) {
+    assertEvidenceIdentifier(value, `${field} identity`);
+    if (identities.has(value)) throw new TypeError(`${field} contains duplicate identity.`);
+    identities.add(value);
+  }
+  return Object.freeze([...values]);
+}
+
+const episodeEvidenceKinds = new Set<EpisodeEvidenceKind>([
+  'tool-request', 'tool-result', 'task-verification', 'agent-claim',
+  'user-instruction', 'task-transition', 'instruction-context', 'analyzer-inference'
+]);
+
+const episodeEvidenceStates = new Set<EpisodeEvidenceState>(['observed', 'succeeded', 'failed', 'closed']);
+
+const episodeEvidenceReasonClasses = new Set<EpisodeEvidenceReasonClass>(['failure', 'instruction', 'superseded', 'verification']);
+
+const episodeEvidenceFields = new Set<keyof EpisodeEvidence>(['id', 'kind', 'state', 'decisionKey', 'scopeKey', 'reasonClass', 'detectorVersion', 'evidenceIds']);
+
+function assertEpisodeEvidenceFields(value: EpisodeEvidence): void {
+  for (const field of Reflect.ownKeys(value)) {
+    if (typeof field !== 'string' || !episodeEvidenceFields.has(field as keyof EpisodeEvidence)) {
+      throw new TypeError('Episode evidence contains an unsupported field.');
+    }
+  }
+}
+
 function assertIdentifier(value: string, field: string): void {
   if (typeof value !== 'string' || !identifierPattern.test(value)) throw new TypeError(`${field} is invalid.`);
+}
+
+function assertEvidenceIdentifier(value: string, field: string): void {
+  if (typeof value !== 'string' || !evidenceIdentifierPattern.test(value) || containsCredentialMaterial(value)) throw new TypeError(`${field} is invalid.`);
 }
 
 function optionalText(value: string | undefined, field: string): void {
