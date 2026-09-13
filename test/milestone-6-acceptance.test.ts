@@ -34,6 +34,10 @@ test('reports scoped convention candidates and a privacy-bounded analysis shape'
     assert.deepEqual(Object.keys(parsed).sort(), ['candidates', 'coverage', 'findings', 'hypotheses', 'unverifiedRepairs', 'verifiedKnowledge', 'version']);
     assert.equal((parsed.candidates as unknown[]).length, 1);
     assert.equal((parsed.unverifiedRepairs as unknown[]).length, 0);
+    assert.deepEqual(parsed.coverage, [{
+      detector: 'm6-deterministic@1', detectorSetVersion: 'm6-deterministic@1', status: 'completed',
+      inputLowWater: 0, requestedHighWater: 0, processedHighWater: 0, examinedEvents: 0, findings: 0
+    }]);
     assert.equal(report.stdout.includes('credential-like-marker'), false);
 
     const isolated = runCli(['analysis', 'report', '--repository-id', 'repo-2', '--data-dir', dataDir, '--json']);
