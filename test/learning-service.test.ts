@@ -8,6 +8,7 @@ import test from 'node:test';
 import { adaptCodexCapture } from '../src/capture/adapters/codex.js';
 import type { NormalizedCaptureEvent } from '../src/capture/contracts.js';
 import type { SessionId } from '../src/domain/types.js';
+import { detectOperationalEpisodes } from '../src/learning/detectors.js';
 import { DETECTOR_SET_VERSION, OperationalLearningRepository } from '../src/learning/repository.js';
 import { OperationalLearningService } from '../src/learning/service.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
@@ -198,7 +199,108 @@ test('records loaded work and findings on deadline timeout without acknowledging
   database.close();
 });
 
+test('retries an unexpected captured-range I/O failure instead of quarantining input', () => {
+  const { databasePath, store } = fixture();
+  append(store, repairEvents().slice(0, 2));
+  store.close();
+  const service = new OperationalLearningService(databasePath, {
+    openStore(path: string) {
+      const target = new ExperienceStore(path);
+      target.loadCapturedSessionRange = () => { throw new Error('storage unavailable'); };
+      return target;
+    }
+  });
+  service.enqueueCommittedSession('repo-1', 'session-1');
+
+  assert.equal(service.runNext({ ownerId: 'worker-1' }).status, 'retryable-failure');
+  const repository = new OperationalLearningRepository(databasePath);
+  assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 0);
+  assert.equal(repository.status().failureCounts['execution-failure'], 1);
+  assert.equal(repository.status().failureCounts['invalid-input'], 0);
+  repository.close();
+});
+
+test('records loaded work when reading conventions fails operationally', () => {
+  const { databasePath, store } = fixture();
+  append(store, repairEvents().slice(0, 2));
+  store.close();
+  const service = new OperationalLearningService(databasePath, {
+    monotonicNow: sequenceClock(10, 15),
+    readConventions() { throw new Error('instruction storage unavailable'); }
+  });
+  service.enqueueCommittedSession('repo-1', 'session-1');
+
+  assert.equal(service.runNext({ ownerId: 'worker-1' }).status, 'retryable-failure');
+  const repository = new OperationalLearningRepository(databasePath);
+  assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 0);
+  assert.equal(repository.status().eventsLoaded, 2);
+  assert.equal(repository.status().failureCounts['execution-failure'], 1);
+  repository.close();
+});
+
+for (const point of ['failure', 'timeout', 'acknowledgement'] as const) {
+  test(`controls lease expiry before ${point} without stale-owner mutation`, () => {
+    const { databasePath, store } = fixture();
+    append(store, repairEvents());
+    store.close();
+    const service = new OperationalLearningService(databasePath, {
+      monotonicNow: sequenceClock(10, point === 'timeout' ? 25 : 15),
+      detect(input) {
+        const result = detectOperationalEpisodes(input);
+        expireLease(databasePath);
+        if (point === 'failure') throw new Error('detector failed after lease expiry');
+        return result;
+      }
+    });
+    service.enqueueCommittedSession('repo-1', 'session-1');
+
+    const result = service.runNext({ ownerId: 'worker-1', deadlineMs: point === 'timeout' ? 10 : 250 });
+    assert.equal(result.status, 'retryable-failure');
+    const repository = new OperationalLearningRepository(databasePath);
+    assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 0);
+    assert.equal(repository.jobsForStream('repo-1', 'session-1')[0]?.state, 'retryable-failure');
+    assert.equal(repository.jobsForStream('repo-1', 'session-1')[0]?.failureReason, 'lease-expired');
+    assert.equal(repository.status().failureCounts['lease-expired'], 1);
+    repository.close();
+  });
+}
+
+test('does not recover or mutate a current lease acquired by another owner', () => {
+  const { databasePath, store } = fixture();
+  append(store, repairEvents());
+  store.close();
+  const service = new OperationalLearningService(databasePath, {
+    monotonicNow: sequenceClock(10, 15),
+    detect(input) {
+      const result = detectOperationalEpisodes(input);
+      expireLease(databasePath);
+      let millis = Date.now() + 31_000;
+      const other = new OperationalLearningRepository(databasePath, () => new Date(millis).toISOString());
+      assert.equal(other.recoverExpiredJobs(), 1);
+      millis += 1_000;
+      assert.equal(other.claim({ ownerId: 'worker-2', leaseMs: 60_000 })?.leaseOwner, 'worker-2');
+      other.close();
+      return result;
+    }
+  });
+  service.enqueueCommittedSession('repo-1', 'session-1');
+
+  assert.equal(service.runNext({ ownerId: 'worker-1' }).status, 'retryable-failure');
+  const repository = new OperationalLearningRepository(databasePath);
+  const job = repository.jobsForStream('repo-1', 'session-1')[0];
+  assert.equal(job?.state, 'running');
+  assert.equal(job?.leaseOwner, 'worker-2');
+  assert.equal(job?.attempts, 2);
+  repository.close();
+});
+
 function sequenceClock(...values: number[]): () => number {
   let index = 0;
   return () => values[Math.min(index++, values.length - 1)]!;
+}
+
+function expireLease(databasePath: string): void {
+  const database = new DatabaseSync(databasePath);
+  database.prepare("UPDATE operational_analysis_jobs SET lease_expires_at = '2000-01-01T00:00:00.000Z' WHERE state = 'running'").run();
+  database.close();
 }

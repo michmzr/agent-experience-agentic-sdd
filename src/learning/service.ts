@@ -6,7 +6,14 @@ import { ExperienceStore } from '../storage/experience-store.js';
 import { validateDetectorCheckpoint, type AnalysisCoverage, type DetectorCheckpoint } from './contracts.js';
 import { detectOperationalEpisodes } from './detectors.js';
 import { readProjectToolConventions } from './project-conventions.js';
-import { DETECTOR_SET_VERSION, OperationalLearningRepository, type OperationalLearningReport } from './repository.js';
+import {
+  DETECTOR_SET_VERSION,
+  OperationalLearningRepository,
+  type AnalysisFailureReason,
+  type AnalysisJob,
+  type AnalysisMetrics,
+  type OperationalLearningReport
+} from './repository.js';
 
 const DEFAULT_MAX_EVENTS = 1_024;
 const DEFAULT_DEADLINE_MS = 250;
@@ -15,6 +22,8 @@ const JOB_LEASE_MS = 30_000;
 interface OperationalLearningDependencies {
   readonly monotonicNow?: () => number;
   readonly detect?: typeof detectOperationalEpisodes;
+  readonly openStore?: (databasePath: string) => ExperienceStore;
+  readonly readConventions?: typeof readProjectToolConventions;
 }
 
 export interface LearningRunOptions {
@@ -32,14 +41,18 @@ export interface LearningRunResult {
 export class OperationalLearningService {
   private readonly monotonicNow: () => number;
   private readonly detect: typeof detectOperationalEpisodes;
+  private readonly openStore: (databasePath: string) => ExperienceStore;
+  private readonly readConventions: typeof readProjectToolConventions;
 
   constructor(private readonly databasePath: string, dependencies: OperationalLearningDependencies = {}) {
     this.monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
     this.detect = dependencies.detect ?? detectOperationalEpisodes;
+    this.openStore = dependencies.openStore ?? ((path) => new ExperienceStore(path));
+    this.readConventions = dependencies.readConventions ?? readProjectToolConventions;
   }
 
   enqueueCommittedSession(repositoryId: string, sessionId: string): void {
-    const store = new ExperienceStore(this.databasePath);
+    const store = this.openStore(this.databasePath);
     try {
       const records = store.listRepositoryRecords(repositoryId);
       const record = records.find(({ session }) => session.id === sessionId);
@@ -57,23 +70,28 @@ export class OperationalLearningService {
     try {
       const job = repository.claim({ ownerId, leaseMs: JOB_LEASE_MS, ...(options.repositoryId === undefined ? {} : { repositoryId: options.repositoryId }) });
       if (!job) return Object.freeze({ status: 'idle' });
-      const store = new ExperienceStore(this.databasePath);
+      let store: ExperienceStore;
+      try { store = this.openStore(this.databasePath); }
+      catch { return this.fail(repository, job, ownerId, 'execution-failure'); }
       try {
         let checkpoint: DetectorCheckpoint;
         let repositoryRoot: string;
+        let session: ReturnType<ExperienceStore['loadSession']>;
+        let registration: ReturnType<ExperienceStore['listRepositories']>[number] | undefined;
+        let stream: ReturnType<OperationalLearningRepository['stream']>;
         try {
-          const session = store.loadSession(job.sessionId as SessionId);
-          const registration = store.listRepositories().find(({ id }) => id === job.repositoryId);
-          const stream = repository.stream(job.repositoryId, job.sessionId, job.detectorSetVersion);
-          if (!session || session.repositoryId !== job.repositoryId || !registration || !stream || job.detectorSetVersion !== DETECTOR_SET_VERSION) {
-            throw new TypeError('Analysis input is outside the claimed stream.');
-          }
-          checkpoint = validateDetectorCheckpoint(stream.checkpoint, job.sessionId);
-          repositoryRoot = registration.root;
+          session = store.loadSession(job.sessionId as SessionId);
+          registration = store.listRepositories().find(({ id }) => id === job.repositoryId);
+          stream = repository.stream(job.repositoryId, job.sessionId, job.detectorSetVersion);
         } catch {
-          repository.retry(job.id, { ownerId, attempt: job.attempts, reason: 'invalid-input' });
-          return Object.freeze({ status: 'quarantined-input', jobId: job.id });
+          return this.fail(repository, job, ownerId, 'execution-failure');
         }
+        if (!session || session.repositoryId !== job.repositoryId || !registration || !stream || job.detectorSetVersion !== DETECTOR_SET_VERSION) {
+          return this.fail(repository, job, ownerId, 'invalid-input');
+        }
+        try { checkpoint = validateDetectorCheckpoint(stream.checkpoint, job.sessionId); }
+        catch { return this.fail(repository, job, ownerId, 'invalid-input'); }
+        repositoryRoot = registration.root;
 
         const startedAt = this.monotonicNow();
         let range;
@@ -83,7 +101,18 @@ export class OperationalLearningService {
             through: job.inputHighWater,
             limit: maxEvents
           });
-          if (range.availableHighWater < job.inputHighWater) throw new TypeError('Captured input does not reach the claimed high-water.');
+        } catch {
+          const elapsedMs = this.monotonicNow() - startedAt;
+          return this.fail(repository, job, ownerId, 'execution-failure', job.inputLowWater,
+            { eventsLoaded: 0, findings: 0, elapsedMs });
+        }
+        const metrics = (findings: number, elapsedMs: number): AnalysisMetrics =>
+          ({ eventsLoaded: range.events.length, findings, elapsedMs });
+        if (range.availableHighWater < job.inputHighWater) {
+          const elapsedMs = this.monotonicNow() - startedAt;
+          return this.fail(repository, job, ownerId, 'invalid-input', range.actualHighWater, metrics(0, elapsedMs));
+        }
+        try {
           const identities = new Set(checkpoint.pendingEvents.map(({ id }) => id));
           for (const value of range.events) {
             const event = validateNormalizedCaptureEvent(value);
@@ -91,35 +120,28 @@ export class OperationalLearningService {
             identities.add(event.id);
           }
         } catch {
-          repository.retry(job.id, { ownerId, attempt: job.attempts, reason: 'invalid-input' });
-          return Object.freeze({ status: 'quarantined-input', jobId: job.id });
+          const elapsedMs = this.monotonicNow() - startedAt;
+          return this.fail(repository, job, ownerId, 'invalid-input', range.actualHighWater, metrics(0, elapsedMs));
         }
 
         let result;
         try {
+          const conventions = this.readConventions(repositoryRoot);
           result = this.detect({
             repositoryId: job.repositoryId,
             sessionId: job.sessionId,
             events: range.events,
-            conventions: readProjectToolConventions(repositoryRoot),
+            conventions,
             checkpoint
           });
         } catch {
           const elapsedMs = this.monotonicNow() - startedAt;
-          repository.retry(job.id, {
-            ownerId, attempt: job.attempts, reason: 'execution-failure', processedHighWater: range.actualHighWater,
-            metrics: { eventsLoaded: range.events.length, findings: 0, elapsedMs }
-          });
-          return Object.freeze({ status: retryState(repository, job.id), jobId: job.id });
+          return this.fail(repository, job, ownerId, 'execution-failure', range.actualHighWater, metrics(0, elapsedMs));
         }
 
         const elapsedMs = this.monotonicNow() - startedAt;
         if (elapsedMs > deadlineMs) {
-          repository.retry(job.id, {
-            ownerId, attempt: job.attempts, reason: 'timeout', processedHighWater: range.actualHighWater,
-            metrics: { eventsLoaded: range.events.length, findings: result.findings.length, elapsedMs }
-          });
-          return Object.freeze({ status: retryState(repository, job.id), jobId: job.id });
+          return this.fail(repository, job, ownerId, 'timeout', range.actualHighWater, metrics(result.findings.length, elapsedMs));
         }
         const coverage = Object.freeze([coverageFor(job, range.actualHighWater, range.events.length, result.findings.length)]);
         try {
@@ -130,12 +152,8 @@ export class OperationalLearningService {
           });
           return Object.freeze({ status: 'completed', jobId: job.id });
         } catch (error) {
-          if (repository.jobById(job.id)?.state !== 'running') throw error;
-          repository.retry(job.id, {
-            ownerId, attempt: job.attempts, reason: 'execution-failure', processedHighWater: range.actualHighWater,
-            metrics: { eventsLoaded: range.events.length, findings: result.findings.length, elapsedMs }
-          });
-          return Object.freeze({ status: retryState(repository, job.id), jobId: job.id });
+          return this.fail(repository, job, ownerId, 'execution-failure', range.actualHighWater,
+            metrics(result.findings.length, elapsedMs), error);
         }
       } finally { store.close(); }
     } finally { repository.close(); }
@@ -144,6 +162,36 @@ export class OperationalLearningService {
   report(repositoryId: string): OperationalLearningReport {
     const repository = new OperationalLearningRepository(this.databasePath);
     try { return repository.report(repositoryId); } finally { repository.close(); }
+  }
+
+  private fail(
+    repository: OperationalLearningRepository,
+    job: AnalysisJob,
+    ownerId: string,
+    reason: AnalysisFailureReason,
+    processedHighWater?: number,
+    metrics?: AnalysisMetrics,
+    precedingError?: unknown
+  ): LearningRunResult {
+    try {
+      repository.retry(job.id, {
+        ownerId, attempt: job.attempts, reason,
+        ...(processedHighWater === undefined ? {} : { processedHighWater }),
+        ...(metrics === undefined ? {} : { metrics })
+      });
+    } catch (error) {
+      const current = repository.jobById(job.id);
+      if (!current) throw precedingError ?? error;
+      const sameLease = current.state === 'running' && current.leaseOwner === ownerId && current.attempts === job.attempts;
+      if (sameLease) {
+        repository.recoverExpiredJobs();
+        const afterRecovery = repository.jobById(job.id);
+        if (afterRecovery?.state === 'running' && afterRecovery.leaseOwner === ownerId && afterRecovery.attempts === job.attempts) {
+          throw precedingError ?? error;
+        }
+      }
+    }
+    return Object.freeze({ status: retryState(repository, job.id), jobId: job.id });
   }
 }
 
