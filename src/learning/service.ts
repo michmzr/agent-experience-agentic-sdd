@@ -1,6 +1,7 @@
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
+import type { CapturedEventRecord } from '../capture/contracts.js';
 import { ExperienceStore } from '../storage/experience-store.js';
-import type { AnalysisCoverage } from './contracts.js';
+import { createEpisodeEvidence, type AnalysisCoverage, type EpisodeEvidence, type EpisodeEvidenceState } from './contracts.js';
 import { detectOperationalEpisodes } from './detectors.js';
 import { readProjectInstructionContext } from './project-conventions.js';
 import { OperationalLearningRepository, type OperationalLearningReport } from './repository.js';
@@ -59,13 +60,14 @@ export class OperationalLearningService {
         try {
           const snapshot = repository.contextSnapshotFor(job.repositoryId, job.sessionId);
           const conventions = snapshot?.conventions ?? readProjectInstructionContext(registration.root, loadProjectSettings(registration.root)).conventions;
-          const result = detectOperationalEpisodes({ repositoryId: job.repositoryId, sessionId: job.sessionId, events, conventions });
+          const episodeEvidence = episodeEvidenceFromCapture(events);
+          const result = detectOperationalEpisodes({ repositoryId: job.repositoryId, sessionId: job.sessionId, events, conventions, episodeEvidence });
           if (performance.now() - startedAt > deadlineMs) {
             repository.retry(job.id, 'timeout', job.leaseToken);
             return Object.freeze({ status: retryState(repository, job.id), jobId: job.id });
           }
           const coverage = Object.freeze([coverageFor(events.length, job.inputThrough - job.inputFrom + 1, result.findings.length)]);
-          repository.saveResult(job.id, { ...result, coverage, inputDigest: `${job.inputFrom}:${job.inputThrough}:${events.map(({ id }) => id).join(',')}`, cost: events.length }, job.leaseToken);
+          repository.saveResult(job.id, { ...result, episodeEvidence, coverage, inputDigest: `${job.inputFrom}:${job.inputThrough}:${events.map(({ id }) => id).join(',')}`, cost: events.length }, job.leaseToken);
           return Object.freeze({ status: 'completed', jobId: job.id });
         } catch {
           repository.retry(job.id, 'execution-failure', job.leaseToken);
@@ -79,6 +81,37 @@ export class OperationalLearningService {
     const repository = new OperationalLearningRepository(this.databasePath);
     try { return repository.report(repositoryId); } finally { repository.close(); }
   }
+}
+
+function episodeEvidenceFromCapture(events: readonly CapturedEventRecord[]): readonly EpisodeEvidence[] {
+  const requests = new Map(events.filter(({ phase }) => phase === 'pre-action').map((event) => [event.sourceEventId, event]));
+  return Object.freeze(events.flatMap((event) => {
+    if (event.phase === 'pre-action') {
+      const id = captureEvidenceId(event.source, event.sourceEventId);
+      return [createEpisodeEvidence({ id, kind: 'tool-request', state: 'observed', decisionKey: captureDecisionKey(event), scopeKey: 'repository', evidenceIds: [id] })];
+    }
+    if (event.phase !== 'post-result') return [];
+    const request = event.relatedEventId === undefined ? undefined : requests.get(event.relatedEventId);
+    const id = captureEvidenceId(event.source, event.sourceEventId);
+    const relatedId = event.relatedEventId === undefined ? id : captureEvidenceId(event.source, event.relatedEventId);
+    return [createEpisodeEvidence({
+      id, kind: 'tool-result', state: captureEvidenceState(event.outcome),
+      ...(request === undefined ? {} : { decisionKey: captureDecisionKey(request), scopeKey: 'repository' }),
+      evidenceIds: [relatedId]
+    })];
+  }));
+}
+
+function captureEvidenceId(source: string, sourceEventId: string): string {
+  return `capture:${createHash('sha256').update(`ael:episode-evidence:v1\\0${source}\\0${sourceEventId}`).digest('hex')}`;
+}
+
+function captureDecisionKey(event: CapturedEventRecord): string {
+  return `decision:${createHash('sha256').update(`ael:episode-decision:v1\\0${JSON.stringify(event.signature)}`).digest('hex')}`;
+}
+
+function captureEvidenceState(outcome: CapturedEventRecord['outcome']): EpisodeEvidenceState {
+  return outcome === 'succeeded' ? 'succeeded' : outcome === 'failed' ? 'failed' : 'observed';
 }
 
 function lifecycleContext(store: ExperienceStore, sessionId: string, contextSecret: Uint8Array): { readonly sourceAgentKey?: string; readonly conversationKey?: string; readonly runKey?: string } {

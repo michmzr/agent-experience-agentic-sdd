@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import { OperationalLearningService } from '../src/learning/service.js';
 import { OperationalLearningRepository } from '../src/learning/repository.js';
+import { normalizeMappedCapture } from '../src/capture/normalization.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 import { initializeGitRepository } from './helpers/git-repository.js';
 
@@ -128,4 +129,36 @@ test('preserves privacy-safe lifecycle provenance and leaves an ambiguous run un
     assert.ok(snapshot?.conversationKey);
     assert.equal(snapshot?.runKey, undefined);
   } finally { ambiguousRepository.close(); }
+});
+
+test('projects retained tool activity into bounded typed evidence without leaking capture markers', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-learning-typed-service-'));
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const project = join(dataDir, 'project');
+  mkdirSync(project);
+  initializeGitRepository(project);
+  const store = new ExperienceStore(databasePath);
+  try {
+    store.registerRepository({ id: 'repo-typed', root: project, observedAt: '2026-09-13T10:00:00.000Z' });
+    const request = normalizeMappedCapture({
+      source: 'codex', sourceEventId: 'Liquibase-marker-request', sessionId: 'session-typed' as never,
+      phase: 'pre-action', occurredAt: '2026-09-13T10:00:01.000Z', tool: 'shell', action: 'run', arguments: ['Liquibase-marker'], summary: 'Run migration.'
+    });
+    const result = normalizeMappedCapture({
+      source: 'codex', sourceEventId: 'Liquibase-marker-result', sessionId: 'session-typed' as never,
+      phase: 'post-result', occurredAt: '2026-09-13T10:00:02.000Z', tool: 'shell', action: 'run', arguments: ['Liquibase-marker'], summary: 'Migration completed.', outcome: 'succeeded', exitStatus: 0, relatedEventId: 'Liquibase-marker-request'
+    });
+    store.appendIncremental({ session: { id: 'session-typed' as never, source: 'codex', startedAt: '2026-09-13T10:00:00.000Z', repositoryId: 'repo-typed' as never }, event: request });
+    store.appendIncremental({ event: result });
+  } finally { store.close(); }
+
+  const service = new OperationalLearningService(databasePath);
+  service.enqueueCommittedSession('repo-typed', 'session-typed');
+  assert.equal(service.runNext({ repositoryId: 'repo-typed' }).status, 'completed');
+  const report = service.report('repo-typed');
+  assert.deepEqual(report.episodeEvidence.map(({ kind, state }) => ({ kind, state })).sort((left, right) => left.kind.localeCompare(right.kind)), [
+    { kind: 'tool-result', state: 'succeeded' },
+    { kind: 'tool-request', state: 'observed' }
+  ].sort((left, right) => left.kind.localeCompare(right.kind)));
+  assert.equal(JSON.stringify(report).includes('Liquibase'), false);
 });

@@ -37,6 +37,12 @@
       "expectedDisposition": "accepted",
       "expectedEvidenceGaps": ["verification-not-observed"],
       "expectedRelationships": { "transportIds": ["transport-closure"], "receiptIds": ["receipt-closure"], "resultIds": ["result-closure"] }
+    },
+    {
+      "id": "scope-changed-approval",
+      "expectedDisposition": "accepted",
+      "expectedEvidenceGaps": [],
+      "expectedRelationships": { "transportIds": ["transport-scope-change"], "receiptIds": ["receipt-scope-change"], "resultIds": ["result-scope-change"] }
     }
   ],
   "transports": [
@@ -47,7 +53,8 @@
     { "id": "transport-redaction", "scenarioId": "privacy-redaction", "kind": "operation" },
     { "id": "transport-expected-red", "scenarioId": "expected-red", "kind": "operation" },
     { "id": "transport-liquibase", "scenarioId": "liquibase-to-sql", "kind": "operation" },
-    { "id": "transport-closure", "scenarioId": "closure-with-verification-gap", "kind": "operation" }
+    { "id": "transport-closure", "scenarioId": "closure-with-verification-gap", "kind": "operation" },
+    { "id": "transport-scope-change", "scenarioId": "scope-changed-approval", "kind": "operation" }
   ],
   "receipts": [
     { "id": "receipt-resume-a", "scenarioId": "resume-after-run-end", "operationId": "operation-resume-a", "disposition": "accepted" },
@@ -56,7 +63,8 @@
     { "id": "receipt-redaction", "scenarioId": "privacy-redaction", "operationId": "operation-redaction", "disposition": "privacy-redaction" },
     { "id": "receipt-expected-red", "scenarioId": "expected-red", "operationId": "operation-expected-red", "disposition": "accepted" },
     { "id": "receipt-liquibase", "scenarioId": "liquibase-to-sql", "operationId": "operation-liquibase", "disposition": "accepted" },
-    { "id": "receipt-closure", "scenarioId": "closure-with-verification-gap", "operationId": "operation-closure", "disposition": "accepted" }
+    { "id": "receipt-closure", "scenarioId": "closure-with-verification-gap", "operationId": "operation-closure", "disposition": "accepted" },
+    { "id": "receipt-scope-change", "scenarioId": "scope-changed-approval", "operationId": "operation-scope-change", "disposition": "accepted" }
   ],
   "results": [
     { "id": "result-resume-a", "scenarioId": "resume-after-run-end", "relatedOperationId": "operation-resume-a" },
@@ -65,7 +73,8 @@
     { "id": "result-redaction", "scenarioId": "privacy-redaction", "relatedOperationId": "operation-redaction", "unknownReason": "privacy-redacted" },
     { "id": "result-expected-red", "scenarioId": "expected-red", "relatedOperationId": "operation-expected-red" },
     { "id": "result-liquibase", "scenarioId": "liquibase-to-sql", "relatedOperationId": "operation-liquibase" },
-    { "id": "result-closure", "scenarioId": "closure-with-verification-gap", "relatedOperationId": "operation-closure" }
+    { "id": "result-closure", "scenarioId": "closure-with-verification-gap", "relatedOperationId": "operation-closure" },
+    { "id": "result-scope-change", "scenarioId": "scope-changed-approval", "relatedOperationId": "operation-scope-change" }
   ],
   "analysis": [
     { "id": "analysis-resume", "scenarioId": "resume-after-run-end", "state": "completed", "costUnits": 2 },
@@ -73,7 +82,8 @@
     { "id": "analysis-redaction", "scenarioId": "privacy-redaction", "state": "incomplete", "costUnits": 1 },
     { "id": "analysis-expected-red", "scenarioId": "expected-red", "state": "completed", "costUnits": 1 },
     { "id": "analysis-liquibase", "scenarioId": "liquibase-to-sql", "state": "completed", "costUnits": 1 },
-    { "id": "analysis-closure", "scenarioId": "closure-with-verification-gap", "state": "incomplete", "costUnits": 1 }
+    { "id": "analysis-closure", "scenarioId": "closure-with-verification-gap", "state": "incomplete", "costUnits": 1 },
+    { "id": "analysis-scope-change", "scenarioId": "scope-changed-approval", "state": "completed", "costUnits": 1 }
   ],
   "findings": [
     { "id": "finding-expected-red", "scenarioId": "expected-red" },
@@ -85,15 +95,15 @@
     { "id": "abstention-closure", "scenarioId": "closure-with-verification-gap", "evidenceGaps": ["verification-not-observed"] }
   ],
   "expectedQuality": {
-    "transportRecords": 8,
-    "uniqueOperations": 7,
-    "durableReceipts": 7,
-    "linkedResults": 7,
+    "transportRecords": 9,
+    "uniqueOperations": 8,
+    "durableReceipts": 8,
+    "linkedResults": 8,
     "skips": { "privacy-redaction": 1 },
     "unknownReasons": { "result-not-delivered": 1, "privacy-redacted": 1 },
-    "analysisStates": { "completed": 3, "incomplete": 3 },
+    "analysisStates": { "completed": 4, "incomplete": 3 },
     "findings": 2,
     "abstentions": 3,
-    "cost": 7
+    "cost": 8
   }
 }

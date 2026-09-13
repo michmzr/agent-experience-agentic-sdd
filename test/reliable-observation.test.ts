@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import test from 'node:test';
 
 import { containsCredentialMaterial } from '../src/privacy/structured-arguments.js';
+import { detectOperationalEpisodes } from '../src/learning/detectors.js';
 
 type ReceiptDisposition = 'accepted' | 'privacy-redaction' | 'unsupported';
 type EvidenceGap = 'result-not-delivered' | 'privacy-redacted' | 'verification-not-observed';
@@ -58,15 +59,31 @@ interface ValidatedResults {
   readonly operationLinks: readonly { id: string; scenarioId: string; relatedOperationId: string }[];
 }
 
-test('contains the six synthetic reliable-observation scenarios and their deterministic baseline', () => {
+test('contains the seven synthetic reliable-observation scenarios and their deterministic baseline', () => {
   const fixture = parseFixture(readFixture());
 
   assert.equal(fixture.synthetic, true);
   assert.deepEqual(fixture.scenarios.map(({ id }) => id), [
     'resume-after-run-end', 'missing-result', 'privacy-redaction',
-    'expected-red', 'liquibase-to-sql', 'closure-with-verification-gap'
+    'expected-red', 'liquibase-to-sql', 'closure-with-verification-gap', 'scope-changed-approval'
   ]);
   assert.deepEqual(evaluateReliableObservationFixture(fixture), fixture.expectedQuality);
+});
+
+test('passes closure and changed-scope approval evidence through the typed detector contract', () => {
+  const fixture = parseFixture(readFixture());
+  assert.ok(fixture.scenarios.some(({ id }) => id === 'closure-with-verification-gap'));
+  assert.ok(fixture.scenarios.some(({ id }) => id === 'scope-changed-approval'));
+  const result = detectOperationalEpisodes({
+    repositoryId: 'fixture-repository', sessionId: 'fixture-session', events: [], conventions: [],
+    episodeEvidence: [
+      { id: 'fixture-closure', kind: 'task-transition', state: 'closed', decisionKey: 'fixture-task', scopeKey: 'repository', evidenceIds: ['fixture-closure'] },
+      { id: 'fixture-approval-first', kind: 'agent-claim', state: 'succeeded', decisionKey: 'approval', scopeKey: 'first-scope', evidenceIds: ['fixture-approval-first'] },
+      { id: 'fixture-approval-changed', kind: 'agent-claim', state: 'succeeded', decisionKey: 'approval', scopeKey: 'changed-scope', evidenceIds: ['fixture-approval-changed'] }
+    ]
+  });
+  assert.equal(result.episodes.some(({ kind }) => kind === 'verification-gap'), true);
+  assert.equal(result.episodes.some(({ kind }) => kind === 'repeated-acceptance'), false);
 });
 
 test('rejects unsafe, incomplete, and duplicate synthetic corpus records', () => {
