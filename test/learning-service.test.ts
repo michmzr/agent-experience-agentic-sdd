@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -78,4 +79,53 @@ test('preserves first retained instruction context and leaves unavailable source
     assert.equal(instruction?.digest.includes('npm'), false);
     assert.equal(snapshot?.conventions[0]?.tool, 'pnpm');
   } finally { repository.close(); }
+});
+
+test('preserves privacy-safe lifecycle provenance and leaves an ambiguous run unknown', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-learning-context-lifecycle-'));
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const project = join(dataDir, 'project');
+  mkdirSync(project);
+  initializeGitRepository(project);
+  writeFileSync(join(project, 'AGENTS.md'), 'Use pnpm instead of npm.\n');
+  const store = new ExperienceStore(databasePath);
+  try {
+    store.registerRepository({ id: 'repo-1', root: project, observedAt: '2026-09-13T10:00:00.000Z' });
+    store.applyLifecycle({
+      lifecycle: { sourceEventId: 'opaque-start', source: 'codex', conversationId: 'conversation-secret', kind: 'start', startOrigin: 'startup', receiptAt: '2026-09-13T10:00:00.000Z' },
+      session: { id: 'conversation-secret' as never, source: 'codex', startedAt: '2026-09-13T10:00:00.000Z', repositoryId: 'repo-1' as never }
+    });
+  } finally { store.close(); }
+
+  new OperationalLearningService(databasePath).enqueueCommittedSession('repo-1', 'conversation-secret');
+  const repository = new OperationalLearningRepository(databasePath);
+  try {
+    const snapshot = repository.contextSnapshotFor('repo-1', 'conversation-secret');
+    assert.equal(snapshot?.sourceAgentKey?.includes('codex') ?? true, false);
+    assert.equal(snapshot?.conversationKey?.includes('conversation-secret') ?? true, false);
+    assert.equal(snapshot?.runKey?.includes('conversation-secret') ?? true, false);
+    assert.ok(snapshot?.sourceAgentKey);
+    assert.ok(snapshot?.conversationKey);
+    assert.ok(snapshot?.runKey);
+    assert.notEqual(snapshot?.conversationKey, createHmac('sha256', snapshot!.repositoryFamilyKey).update('ael:operational-context:conversation:v1\0conversation-secret').digest('hex'));
+  } finally { repository.close(); }
+
+  const ambiguousPath = join(mkdtempSync(join(tmpdir(), 'ael-learning-context-ambiguous-')), 'experience.sqlite');
+  const ambiguousStore = new ExperienceStore(ambiguousPath);
+  try {
+    ambiguousStore.registerRepository({ id: 'repo-1', root: project, observedAt: '2026-09-13T10:00:00.000Z' });
+    ambiguousStore.applyLifecycle({
+      lifecycle: { sourceEventId: 'ambiguous-start', source: 'codex', conversationId: 'conversation-ambiguous', kind: 'start', startOrigin: 'startup', receiptAt: '2026-09-13T10:00:00.000Z' },
+      session: { id: 'conversation-ambiguous' as never, source: 'codex', startedAt: '2026-09-13T10:00:00.000Z', repositoryId: 'repo-1' as never }
+    });
+    ambiguousStore.recordLifecycleSignal({ sourceEventId: 'ambiguous-end', source: 'codex', conversationId: 'conversation-ambiguous', kind: 'end', receiptAt: '2026-09-13T10:01:00.000Z' });
+    ambiguousStore.recordLifecycleSignal({ sourceEventId: 'ambiguous-resume', source: 'codex', conversationId: 'conversation-ambiguous', kind: 'start', startOrigin: 'resume', receiptAt: '2026-09-13T10:02:00.000Z' });
+  } finally { ambiguousStore.close(); }
+  new OperationalLearningService(ambiguousPath).enqueueCommittedSession('repo-1', 'conversation-ambiguous');
+  const ambiguousRepository = new OperationalLearningRepository(ambiguousPath);
+  try {
+    const snapshot = ambiguousRepository.contextSnapshotFor('repo-1', 'conversation-ambiguous');
+    assert.ok(snapshot?.conversationKey);
+    assert.equal(snapshot?.runKey, undefined);
+  } finally { ambiguousRepository.close(); }
 });

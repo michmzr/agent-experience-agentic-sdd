@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { openExperienceDatabase } from '../storage/database.js';
 import { createLearningCandidate, createOperationalEpisode, type AnalysisCoverage, type LearningCandidate, type OperationalEpisode, type OperationalFinding } from './contracts.js';
 import type { InstructionContext, ProjectToolConvention } from './project-conventions.js';
@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS operational_candidates (id TEXT PRIMARY KEY, episode_
 CREATE TABLE IF NOT EXISTS operational_candidate_evidence (candidate_id TEXT NOT NULL REFERENCES operational_candidates(id), event_id TEXT NOT NULL, polarity TEXT NOT NULL, PRIMARY KEY(candidate_id, event_id));
 CREATE TABLE IF NOT EXISTS operational_analysis_coverage (job_id TEXT NOT NULL REFERENCES operational_analysis_jobs(id), detector TEXT NOT NULL, status TEXT NOT NULL, examined_events INTEGER NOT NULL, findings INTEGER NOT NULL, PRIMARY KEY(job_id, detector));`;
 const contextSchema = `CREATE TABLE IF NOT EXISTS operational_context_snapshots (repository_id TEXT NOT NULL, session_id TEXT NOT NULL, repository_family_key TEXT NOT NULL, worktree_key TEXT NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY(repository_id, session_id));`;
+const contextSecretSchema = `CREATE TABLE IF NOT EXISTS operational_context_secret (id INTEGER PRIMARY KEY CHECK (id = 1), secret BLOB NOT NULL) STRICT;`;
 const defaultDetector = 'm6-deterministic@1'; const leaseMs = 60_000;
 export interface AnalysisStream { readonly id: string; readonly repositoryId: string; readonly sessionId: string; readonly detectorVersion: string; readonly desiredThrough: number; readonly completedThrough: number; readonly state: AnalysisJob['state']; }
 export interface AnalysisJob { readonly id: string; readonly repositoryId: string; readonly sessionId: string; readonly detectorVersion: string; readonly streamId: string; readonly inputFrom: number; readonly inputThrough: number; readonly inputHighWater: number; readonly state: 'pending' | 'running' | 'completed' | 'retryable-failure' | 'quarantined-input'; readonly attempts: number; readonly leaseToken?: string; readonly leaseExpiresAt?: string; readonly nextEligibleAt?: string; readonly inputDigest?: string; readonly cost?: number; }
@@ -31,8 +32,16 @@ export interface OperationalAnalysisQuality {
 
 export class OperationalLearningRepository {
   private readonly database: DatabaseSync;
-  constructor(databasePath?: string, private readonly now: () => string = () => new Date().toISOString()) { this.database = openExperienceDatabase(databasePath); this.database.exec(schema); this.database.exec(contextSchema); this.addColumn('stream_id', 'TEXT'); this.addColumn('detector_version', "TEXT NOT NULL DEFAULT 'm6-deterministic@1'"); this.addColumn('input_from', 'INTEGER NOT NULL DEFAULT 1'); this.addColumn('input_through', 'INTEGER'); this.addColumn('lease_token', 'TEXT'); this.addColumn('lease_expires_at', 'TEXT'); this.addColumn('next_eligible_at', 'TEXT'); this.addColumn('input_digest', 'TEXT'); this.addColumn('cost', 'REAL'); this.rebuildJobUniqueness(); this.migrateLegacyJobs(); }
+  constructor(databasePath?: string, private readonly now: () => string = () => new Date().toISOString()) { this.database = openExperienceDatabase(databasePath); this.database.exec(schema); this.database.exec(contextSchema); this.database.exec(contextSecretSchema); this.addColumn('stream_id', 'TEXT'); this.addColumn('detector_version', "TEXT NOT NULL DEFAULT 'm6-deterministic@1'"); this.addColumn('input_from', 'INTEGER NOT NULL DEFAULT 1'); this.addColumn('input_through', 'INTEGER'); this.addColumn('lease_token', 'TEXT'); this.addColumn('lease_expires_at', 'TEXT'); this.addColumn('next_eligible_at', 'TEXT'); this.addColumn('input_digest', 'TEXT'); this.addColumn('cost', 'REAL'); this.rebuildJobUniqueness(); this.migrateLegacyJobs(); }
   close(): void { this.database.close(); }
+  contextSecret(): Uint8Array {
+    const existing = this.database.prepare('SELECT secret FROM operational_context_secret WHERE id = 1').get() as { secret?: Uint8Array } | undefined;
+    if (existing?.secret !== undefined) return existing.secret;
+    this.database.prepare('INSERT OR IGNORE INTO operational_context_secret (id, secret) VALUES (1, ?)').run(randomBytes(32));
+    const stored = this.database.prepare('SELECT secret FROM operational_context_secret WHERE id = 1').get() as { secret?: Uint8Array } | undefined;
+    if (stored?.secret === undefined) throw new TypeError('Operational context secret is unavailable.');
+    return stored.secret;
+  }
   preserveContextSnapshot(snapshot: OperationalContextSnapshot): void {
     const payload = Object.freeze({ repositoryId: snapshot.repositoryId, sessionId: snapshot.sessionId, repositoryFamilyKey: snapshot.repositoryFamilyKey, worktreeKey: snapshot.worktreeKey, instructions: Object.freeze(snapshot.instructions.map((value) => Object.freeze({ ...value }))), conventions: Object.freeze(snapshot.conventions.map((value) => Object.freeze({ ...value }))), ...(snapshot.sourceAgentKey === undefined ? {} : { sourceAgentKey: snapshot.sourceAgentKey }), ...(snapshot.runKey === undefined ? {} : { runKey: snapshot.runKey }), ...(snapshot.conversationKey === undefined ? {} : { conversationKey: snapshot.conversationKey }) });
     this.database.prepare('INSERT OR IGNORE INTO operational_context_snapshots (repository_id, session_id, repository_family_key, worktree_key, payload_json) VALUES (?, ?, ?, ?, ?)').run(snapshot.repositoryId, snapshot.sessionId, snapshot.repositoryFamilyKey, snapshot.worktreeKey, JSON.stringify(payload));

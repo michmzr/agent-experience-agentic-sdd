@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { ExperienceStore } from '../storage/experience-store.js';
 import type { AnalysisCoverage } from './contracts.js';
 import { detectOperationalEpisodes } from './detectors.js';
@@ -30,7 +31,7 @@ export class OperationalLearningService {
         if (local) {
           const settings = loadProjectSettings(local.root);
           const context = readProjectInstructionContext(local.root, settings);
-          repository.preserveContextSnapshot({ repositoryId, sessionId, repositoryFamilyKey: local.repositoryFamilyKey, worktreeKey: local.worktreeKey, instructions: context.instructions, conventions: context.conventions });
+          repository.preserveContextSnapshot({ repositoryId, sessionId, repositoryFamilyKey: local.repositoryFamilyKey, worktreeKey: local.worktreeKey, instructions: context.instructions, conventions: context.conventions, ...lifecycleContext(store, sessionId, repository.contextSecret()) });
         }
         repository.enqueue({ repositoryId, sessionId, inputHighWater: record.events.length });
       } finally { repository.close(); }
@@ -78,6 +79,21 @@ export class OperationalLearningService {
     const repository = new OperationalLearningRepository(this.databasePath);
     try { return repository.report(repositoryId); } finally { repository.close(); }
   }
+}
+
+function lifecycleContext(store: ExperienceStore, sessionId: string, contextSecret: Uint8Array): { readonly sourceAgentKey?: string; readonly conversationKey?: string; readonly runKey?: string } {
+  const conversation = store.conversationForLegacySession(sessionId as never);
+  if (conversation === undefined) return Object.freeze({});
+  const base = Object.freeze({
+    sourceAgentKey: localContextKey(contextSecret, 'source-agent', conversation.source),
+    conversationKey: localContextKey(contextSecret, 'conversation', conversation.id)
+  });
+  const runs = store.listConversationRuns(conversation.id);
+  return runs.length === 1 ? Object.freeze({ ...base, runKey: localContextKey(contextSecret, 'run', runs[0]!.id) }) : base;
+}
+
+function localContextKey(contextSecret: Uint8Array, kind: string, value: string): string {
+  return createHmac('sha256', contextSecret).update(`ael:operational-context:${kind}:v1\0${value}`).digest('hex');
 }
 
 function coverageFor(examinedEvents: number, totalEvents: number, findings: number): AnalysisCoverage {
