@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import type { CapturedEventRecord } from '../capture/contracts.js';
+import { validateNormalizedCaptureEvent } from '../capture/normalization.js';
 import {
   createLearningCandidate,
   createOperationalEpisode,
@@ -37,7 +38,7 @@ interface Operation {
 
 export function detectOperationalEpisodes(input: DetectorInput): DetectorResult {
   const previous = validateDetectorCheckpoint(input.checkpoint ?? emptyDetectorCheckpoint(), input.sessionId);
-  const events = [...previous.pendingEvents, ...input.events].sort(byEvent);
+  const events = validateDetectorEvents([...previous.pendingEvents, ...input.events], input.sessionId).sort(byEvent);
   const convention = conventionEpisodes(input);
   const repairs = repairEpisodes({ ...input, events });
   const checkpoint = validateDetectorCheckpoint({
@@ -49,6 +50,17 @@ export function detectOperationalEpisodes(input: DetectorInput): DetectorResult 
     findings: Object.freeze([...repairs.findings].sort(byId)),
     candidates: Object.freeze([...convention.candidates, ...repairs.candidates].sort(byId)),
     checkpoint
+  });
+}
+
+function validateDetectorEvents(events: readonly CapturedEventRecord[], sessionId: string): CapturedEventRecord[] {
+  const identities = new Set<string>();
+  return events.map((value) => {
+    const event = validateNormalizedCaptureEvent(value);
+    if (event.sessionId !== sessionId) throw new TypeError('Detector input event session is outside its stream scope.');
+    if (identities.has(event.id)) throw new TypeError('Detector input contains duplicate event identity.');
+    identities.add(event.id);
+    return event;
   });
 }
 

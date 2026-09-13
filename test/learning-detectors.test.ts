@@ -191,3 +191,44 @@ test('keeps the optional checkpoint API compatible with an explicit empty checkp
 
   assert.deepEqual(detectOperationalEpisodes(input), detectOperationalEpisodes({ ...input, checkpoint: emptyDetectorCheckpoint() }));
 });
+
+test('rejects an overlapping unresolved request at the combined detector input boundary', () => {
+  const request = event({ id: 'request', phase: 'pre-action', action: 'pnpm', arguments: ['test'], second: 1 });
+  const checkpoint = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [request]
+  }).checkpoint;
+
+  assert.throws(() => detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [request], checkpoint
+  }), /detector input.*duplicate/i);
+});
+
+test('rejects overlap before a repeated failed operation can produce duplicate output identities', () => {
+  const failedRequest = event({ id: 'failed-request', phase: 'pre-action', action: 'npm', arguments: ['install'], second: 1 });
+  const failedResult = event({ id: 'failed-result', phase: 'post-result', action: 'npm', outcome: 'failed', relatedEventId: 'failed-request', second: 2 });
+  const checkpoint = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [failedRequest, failedResult]
+  }).checkpoint;
+
+  assert.throws(() => detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], checkpoint,
+    events: [
+      failedRequest,
+      event({ id: 'changed-request', phase: 'pre-action', action: 'pnpm', arguments: ['install'], second: 3 }),
+      event({ id: 'changed-result', phase: 'post-result', action: 'pnpm', outcome: 'succeeded', relatedEventId: 'changed-request', second: 4 })
+    ]
+  }), /detector input.*duplicate/i);
+});
+
+test('validates canonical shape and session scope for consumed page events', () => {
+  const request = event({ id: 'request', phase: 'pre-action', action: 'pnpm', arguments: ['test'], second: 1 });
+  const result = event({ id: 'result', phase: 'post-result', action: 'pnpm', outcome: 'succeeded', relatedEventId: 'request', second: 2 });
+
+  assert.throws(() => detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [],
+    events: [request, { ...result, summary: undefined } as never]
+  }), /capture/i);
+  assert.throws(() => detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-2', conventions: [], events: [request, result]
+  }), /session|scope/i);
+});
