@@ -450,7 +450,7 @@ Expected: correction, gap, negative, scope-change, and abstention tests pass.
 
 Run: `git add src/learning src/evidence test/learning-detectors.test.ts test/learning-repository.test.ts test/reliable-observation.test.ts && git commit -m "feat: derive evidence-backed correction episodes"`
 
-Service integration evidence (commit `31d16f0`): RED command `rtk pnpm build && node --test dist/test/learning-service.test.js dist/test/reliable-observation.test.js` failed 1/12 because the report contained no typed tool evidence. GREEN command passed 12/12 after bounded request/result projection and synthetic closure and changed-scope cases. `rtk pnpm check` ran 738 tests and failed 1 existing CLI assertion: `reports unknown results and a completed no-findings analysis without leaking paths globally` expected `completed` and received `incomplete`. No Task 7 checkbox is marked complete while that acceptance command is failing.
+Service integration evidence (commits `31d16f0`, `d18722f`, `4ab8a76`): RED command `rtk pnpm build && node --test dist/test/learning-service.test.js dist/test/reliable-observation.test.js` failed 1/12 because the report contained no typed tool evidence. GREEN command passed 12/12 after bounded request/result projection and fixture-backed synthetic closure and changed-scope cases. The first `rtk pnpm check` run exposed a CLI coverage fixture with a stale `m6-deterministic@1` identifier; after aligning it with the claimed job detector, `rtk pnpm build && node --test dist/test/cli.test.js` passed 18/18 and `rtk pnpm check` passed 738/738.
 
 ### Task 8: Verify, document, and prepare the pull request
 
