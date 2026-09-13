@@ -141,6 +141,12 @@ export interface RepositoryRegistration {
 }
 
 export interface RepositoryRecord { readonly session: Session; readonly events: readonly CapturedEventRecord[]; }
+export interface CapturedSessionRange {
+  readonly events: readonly CapturedEventRecord[];
+  readonly requestedHighWater: number;
+  readonly actualHighWater: number;
+  readonly availableHighWater: number;
+}
 export interface RepositoryStatistics {
   readonly sessions: number; readonly events: number; readonly knowledge: number;
   readonly firstRecordedAt?: string; readonly lastRecordedAt?: string;
@@ -399,6 +405,44 @@ export class ExperienceStore {
       WHERE e.session_id = ? ORDER BY e.occurred_at, ce.rowid
     `).all(id) as unknown as CaptureRow[];
     return Object.freeze({ session, events: Object.freeze(rows.map(captureFromRow)) });
+  }
+
+  loadCapturedSessionRange(
+    id: SessionId,
+    input: { readonly after: number; readonly through: number; readonly limit: number }
+  ): CapturedSessionRange {
+    if (!Number.isSafeInteger(input.after) || input.after < 0) {
+      throw new RangeError('Captured session range after must be a safe nonnegative integer.');
+    }
+    if (!Number.isSafeInteger(input.through) || input.through < 0) {
+      throw new RangeError('Captured session range through must be a safe nonnegative integer.');
+    }
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1) {
+      throw new RangeError('Captured session range limit must be a safe positive integer.');
+    }
+    if (input.after > input.through) {
+      throw new RangeError('Captured session range after cannot exceed through.');
+    }
+
+    const availableHighWater = Number((this.database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM capture_events ce JOIN events e ON e.id = ce.event_id
+      WHERE e.session_id = ?
+    `).get(id) as { count: number }).count);
+    const rows = this.database.prepare(`
+      SELECT ce.rowid AS sequence, ce.event_id, ce.source, ce.source_event_id, ce.phase, ce.signature_json, ce.summary,
+        ce.capture_outcome, ce.related_event_id, e.session_id, e.occurred_at, e.exit_status
+      FROM capture_events ce JOIN events e ON e.id = ce.event_id
+      WHERE e.session_id = ?
+      ORDER BY ce.rowid LIMIT ? OFFSET ?
+    `).all(id, Math.min(input.limit, input.through - input.after), input.after) as unknown as CaptureRow[];
+    const events = Object.freeze(rows.map(captureFromRow));
+    return Object.freeze({
+      events,
+      requestedHighWater: input.through,
+      actualHighWater: input.after + events.length,
+      availableHighWater
+    });
   }
 
   endSession(source: Session['source'], id: SessionId, endedAt: string): IncrementalAppendResult {
