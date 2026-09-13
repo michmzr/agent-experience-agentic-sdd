@@ -1,8 +1,10 @@
 import { ExperienceStore } from '../storage/experience-store.js';
 import type { AnalysisCoverage } from './contracts.js';
 import { detectOperationalEpisodes } from './detectors.js';
-import { readProjectToolConventions } from './project-conventions.js';
+import { readProjectInstructionContext } from './project-conventions.js';
 import { OperationalLearningRepository, type OperationalLearningReport } from './repository.js';
+import { resolveRepository } from '../repository/local-repository.js';
+import { loadProjectSettings } from '../config/project-settings.js';
 
 const DEFAULT_MAX_EVENTS = 1_024;
 const DEFAULT_DEADLINE_MS = 250;
@@ -20,9 +22,18 @@ export class OperationalLearningService {
     try {
       const records = store.listRepositoryRecords(repositoryId);
       const record = records.find(({ session }) => session.id === sessionId);
-      if (!record) return;
+      const registration = store.listRepositories().find(({ id }) => id === repositoryId);
+      if (!record || !registration) return;
       const repository = new OperationalLearningRepository(this.databasePath);
-      try { repository.enqueue({ repositoryId, sessionId, inputHighWater: record.events.length }); } finally { repository.close(); }
+      try {
+        const local = resolveRepository(registration.root);
+        if (local) {
+          const settings = loadProjectSettings(local.root);
+          const context = readProjectInstructionContext(local.root, settings);
+          repository.preserveContextSnapshot({ repositoryId, sessionId, repositoryFamilyKey: local.repositoryFamilyKey, worktreeKey: local.worktreeKey, instructions: context.instructions, conventions: context.conventions });
+        }
+        repository.enqueue({ repositoryId, sessionId, inputHighWater: record.events.length });
+      } finally { repository.close(); }
     } finally { store.close(); }
   }
 
@@ -45,7 +56,9 @@ export class OperationalLearningService {
         const startedAt = performance.now();
         const events = record.events.slice(job.inputFrom - 1, job.inputThrough);
         try {
-          const result = detectOperationalEpisodes({ repositoryId: job.repositoryId, sessionId: job.sessionId, events, conventions: readProjectToolConventions(registration.root) });
+          const snapshot = repository.contextSnapshotFor(job.repositoryId, job.sessionId);
+          const conventions = snapshot?.conventions ?? readProjectInstructionContext(registration.root, loadProjectSettings(registration.root)).conventions;
+          const result = detectOperationalEpisodes({ repositoryId: job.repositoryId, sessionId: job.sessionId, events, conventions });
           if (performance.now() - startedAt > deadlineMs) {
             repository.retry(job.id, 'timeout', job.leaseToken);
             return Object.freeze({ status: retryState(repository, job.id), jobId: job.id });

@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { openExperienceDatabase } from '../storage/database.js';
 import { createLearningCandidate, createOperationalEpisode, type AnalysisCoverage, type LearningCandidate, type OperationalEpisode, type OperationalFinding } from './contracts.js';
+import type { InstructionContext, ProjectToolConvention } from './project-conventions.js';
 
 const schema = `
 CREATE TABLE IF NOT EXISTS operational_analysis_jobs (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, session_id TEXT NOT NULL, detector_version TEXT NOT NULL DEFAULT 'm6-deterministic@1', input_high_water INTEGER NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, stream_id TEXT, input_from INTEGER NOT NULL DEFAULT 1, input_through INTEGER, lease_token TEXT, lease_expires_at TEXT, next_eligible_at TEXT, input_digest TEXT, cost REAL, UNIQUE(repository_id, session_id, detector_version, input_high_water));
@@ -11,10 +12,12 @@ CREATE TABLE IF NOT EXISTS operational_findings (id TEXT PRIMARY KEY, episode_id
 CREATE TABLE IF NOT EXISTS operational_candidates (id TEXT PRIMARY KEY, episode_id TEXT NOT NULL REFERENCES operational_episodes(id), kind TEXT NOT NULL, state TEXT NOT NULL, statement TEXT NOT NULL, conditions_json TEXT NOT NULL, procedure_json TEXT NOT NULL, invalidation_json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS operational_candidate_evidence (candidate_id TEXT NOT NULL REFERENCES operational_candidates(id), event_id TEXT NOT NULL, polarity TEXT NOT NULL, PRIMARY KEY(candidate_id, event_id));
 CREATE TABLE IF NOT EXISTS operational_analysis_coverage (job_id TEXT NOT NULL REFERENCES operational_analysis_jobs(id), detector TEXT NOT NULL, status TEXT NOT NULL, examined_events INTEGER NOT NULL, findings INTEGER NOT NULL, PRIMARY KEY(job_id, detector));`;
+const contextSchema = `CREATE TABLE IF NOT EXISTS operational_context_snapshots (repository_id TEXT NOT NULL, session_id TEXT NOT NULL, repository_family_key TEXT NOT NULL, worktree_key TEXT NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY(repository_id, session_id));`;
 const defaultDetector = 'm6-deterministic@1'; const leaseMs = 60_000;
 export interface AnalysisStream { readonly id: string; readonly repositoryId: string; readonly sessionId: string; readonly detectorVersion: string; readonly desiredThrough: number; readonly completedThrough: number; readonly state: AnalysisJob['state']; }
 export interface AnalysisJob { readonly id: string; readonly repositoryId: string; readonly sessionId: string; readonly detectorVersion: string; readonly streamId: string; readonly inputFrom: number; readonly inputThrough: number; readonly inputHighWater: number; readonly state: 'pending' | 'running' | 'completed' | 'retryable-failure' | 'quarantined-input'; readonly attempts: number; readonly leaseToken?: string; readonly leaseExpiresAt?: string; readonly nextEligibleAt?: string; readonly inputDigest?: string; readonly cost?: number; }
 export interface LearningResult { readonly episodes: readonly OperationalEpisode[]; readonly findings: readonly OperationalFinding[]; readonly candidates: readonly LearningCandidate[]; readonly coverage?: readonly AnalysisCoverage[]; readonly inputDigest?: string; readonly cost?: number; }
+export interface OperationalContextSnapshot { readonly repositoryId: string; readonly sessionId: string; readonly repositoryFamilyKey: string; readonly worktreeKey: string; readonly instructions: readonly InstructionContext[]; readonly conventions: readonly ProjectToolConvention[]; readonly sourceAgentKey?: string; readonly runKey?: string; readonly conversationKey?: string; }
 export interface OperationalLearningReport { readonly candidates: readonly (Omit<LearningCandidate, 'state'> & { readonly state: 'candidate' | 'disputed' })[]; readonly findings: readonly OperationalFinding[]; readonly episodes: readonly OperationalEpisode[]; readonly coverage: readonly AnalysisCoverage[]; readonly cost: { readonly completedRuns: number; readonly total: number; }; }
 export interface OperationalAnalysisQuality {
   readonly streams: { readonly total: number; readonly pending: number; readonly running: number; readonly completed: number; readonly failed: number; readonly quarantined: number; readonly desiredThrough: number; readonly completedThrough: number; };
@@ -28,8 +31,16 @@ export interface OperationalAnalysisQuality {
 
 export class OperationalLearningRepository {
   private readonly database: DatabaseSync;
-  constructor(databasePath?: string, private readonly now: () => string = () => new Date().toISOString()) { this.database = openExperienceDatabase(databasePath); this.database.exec(schema); this.addColumn('stream_id', 'TEXT'); this.addColumn('detector_version', "TEXT NOT NULL DEFAULT 'm6-deterministic@1'"); this.addColumn('input_from', 'INTEGER NOT NULL DEFAULT 1'); this.addColumn('input_through', 'INTEGER'); this.addColumn('lease_token', 'TEXT'); this.addColumn('lease_expires_at', 'TEXT'); this.addColumn('next_eligible_at', 'TEXT'); this.addColumn('input_digest', 'TEXT'); this.addColumn('cost', 'REAL'); this.rebuildJobUniqueness(); this.migrateLegacyJobs(); }
+  constructor(databasePath?: string, private readonly now: () => string = () => new Date().toISOString()) { this.database = openExperienceDatabase(databasePath); this.database.exec(schema); this.database.exec(contextSchema); this.addColumn('stream_id', 'TEXT'); this.addColumn('detector_version', "TEXT NOT NULL DEFAULT 'm6-deterministic@1'"); this.addColumn('input_from', 'INTEGER NOT NULL DEFAULT 1'); this.addColumn('input_through', 'INTEGER'); this.addColumn('lease_token', 'TEXT'); this.addColumn('lease_expires_at', 'TEXT'); this.addColumn('next_eligible_at', 'TEXT'); this.addColumn('input_digest', 'TEXT'); this.addColumn('cost', 'REAL'); this.rebuildJobUniqueness(); this.migrateLegacyJobs(); }
   close(): void { this.database.close(); }
+  preserveContextSnapshot(snapshot: OperationalContextSnapshot): void {
+    const payload = Object.freeze({ repositoryId: snapshot.repositoryId, sessionId: snapshot.sessionId, repositoryFamilyKey: snapshot.repositoryFamilyKey, worktreeKey: snapshot.worktreeKey, instructions: Object.freeze(snapshot.instructions.map((value) => Object.freeze({ ...value }))), conventions: Object.freeze(snapshot.conventions.map((value) => Object.freeze({ ...value }))), ...(snapshot.sourceAgentKey === undefined ? {} : { sourceAgentKey: snapshot.sourceAgentKey }), ...(snapshot.runKey === undefined ? {} : { runKey: snapshot.runKey }), ...(snapshot.conversationKey === undefined ? {} : { conversationKey: snapshot.conversationKey }) });
+    this.database.prepare('INSERT OR IGNORE INTO operational_context_snapshots (repository_id, session_id, repository_family_key, worktree_key, payload_json) VALUES (?, ?, ?, ?, ?)').run(snapshot.repositoryId, snapshot.sessionId, snapshot.repositoryFamilyKey, snapshot.worktreeKey, JSON.stringify(payload));
+  }
+  contextSnapshotFor(repositoryId: string, sessionId: string): OperationalContextSnapshot | undefined {
+    const row = this.database.prepare('SELECT payload_json FROM operational_context_snapshots WHERE repository_id = ? AND session_id = ?').get(repositoryId, sessionId) as { payload_json: string } | undefined;
+    return row === undefined ? undefined : freezeContext(JSON.parse(row.payload_json) as OperationalContextSnapshot);
+  }
   enqueue(input: { readonly repositoryId: string; readonly sessionId: string; readonly detectorVersion?: string; readonly inputHighWater: number }): AnalysisStream {
     if (!Number.isSafeInteger(input.inputHighWater) || input.inputHighWater < 0) throw new TypeError('Analysis high water is invalid.');
     const detector = input.detectorVersion ?? defaultDetector; const id = streamId(input.repositoryId, input.sessionId, detector); const timestamp = this.now(); const desiredThrough = Math.max(1, input.inputHighWater);
@@ -127,3 +138,6 @@ export class OperationalLearningRepository {
 function streamId(repositoryId:string, sessionId:string, detector:string):string{return `${repositoryId}:${sessionId}:${detector}`;}
 function expiry(timestamp:string):string{return new Date(Date.parse(timestamp)+leaseMs).toISOString();}
 function retryEligibleAt(timestamp:string, attempts:number):string{return new Date(Date.parse(timestamp)+Math.min(60_000, 1_000 * 2 ** Math.max(0, attempts - 1))).toISOString();}
+function freezeContext(value: OperationalContextSnapshot): OperationalContextSnapshot {
+  return Object.freeze({ ...value, instructions: Object.freeze(value.instructions.map((instruction) => Object.freeze({ ...instruction }))), conventions: Object.freeze(value.conventions.map((convention) => Object.freeze({ ...convention }))) });
+}
