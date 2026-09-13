@@ -122,8 +122,45 @@ test('reports insufficient evidence when a changed decision is not linked to its
   });
 
   assert.equal(result.episodes.some((item) => item.kind === 'correction'), false);
+  assert.equal(result.episodes.length, 0);
   assert.equal(result.findings.some(({ kind }) => kind === 'insufficient-evidence'), true);
   assert.equal(result.candidates.length, 0);
+});
+
+test('abstains when correction evidence has an incompatible scope', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'original', kind: 'tool-request', state: 'observed', decisionKey: 'schema-update', scopeKey: 'repository' }),
+      evidence({ id: 'changed', kind: 'tool-request', state: 'succeeded', decisionKey: 'schema-update', scopeKey: 'other-repository', evidenceIds: ['original'] })
+    ]
+  });
+
+  assert.equal(result.episodes.length, 0);
+  assert.equal(result.findings.some(({ kind }) => kind === 'insufficient-evidence'), true);
+});
+
+test('abstains when a linked correction reason has an incompatible scope', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [
+      evidence({ id: 'original', kind: 'tool-request', state: 'observed', decisionKey: 'schema-update', scopeKey: 'repository' }),
+      evidence({ id: 'changed', kind: 'tool-request', state: 'succeeded', decisionKey: 'schema-update', scopeKey: 'repository', evidenceIds: ['original'] }),
+      evidence({ id: 'reason', kind: 'agent-claim', state: 'observed', decisionKey: 'schema-update', scopeKey: 'other-repository', reasonClass: 'superseded', evidenceIds: ['changed'] })
+    ]
+  });
+
+  assert.equal(result.episodes.length, 0);
+  assert.equal(result.findings.some(({ kind }) => kind === 'insufficient-evidence'), true);
+});
+
+test('uses a typed-evidence detector version without changing legacy detector records', () => {
+  const result = detectOperationalEpisodes({
+    repositoryId: 'repo-1', sessionId: 'session-1', conventions: [], events: [],
+    episodeEvidence: [evidence({ id: 'closed', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository' })]
+  });
+
+  assert.equal(result.episodes[0]?.detector, 'm9-typed-evidence@1');
 });
 
 test('derives a verification gap for closure with no recorded criterion', () => {

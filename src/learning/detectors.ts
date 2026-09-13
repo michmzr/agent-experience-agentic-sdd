@@ -4,7 +4,8 @@ import type { CapturedEventRecord } from '../capture/contracts.js';
 import { createEpisodeEvidence, createLearningCandidate, createOperationalEpisode, type EpisodeEvidence, type LearningCandidate, type OperationalEpisode, type OperationalFinding } from './contracts.js';
 import type { ProjectToolConvention } from './project-conventions.js';
 
-const detectorVersion = 'm6-deterministic@1';
+const legacyDetectorVersion = 'm6-deterministic@1';
+const typedDetectorVersion = 'm9-typed-evidence@1';
 
 export interface DetectorInput {
   readonly repositoryId: string;
@@ -70,20 +71,23 @@ function typedEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 
     if (originals.length > 0) {
       for (const original of originals) {
         const related = evidence.filter((item) => item.evidenceIds.includes(changed.id));
-        const reason = related.find((item) => item.reasonClass !== undefined);
-        const outcome = related.find((item) => item.kind === 'tool-result');
+        const reasons = related.filter((item) => item.reasonClass !== undefined);
+        const outcomes = related.filter((item) => item.kind === 'tool-result');
+        if (original.scopeKey === undefined || changed.scopeKey === undefined || original.scopeKey !== changed.scopeKey || [...reasons, ...outcomes].some((item) => item.scopeKey !== changed.scopeKey)) {
+          findings.push(insufficientFinding(input, [original.id, changed.id], 'compatible-scope-evidence'));
+          continue;
+        }
+        const reason = reasons[0];
+        const outcome = outcomes[0];
         const evidenceEventIds = [original.id, changed.id, ...(reason ? [reason.id] : []), ...(outcome ? [outcome.id] : [])];
         episodes.push(typedEpisode({
-          id: stableId('episode', input.repositoryId, input.sessionId, detectorVersion, 'correction', ...evidenceEventIds), repositoryId: input.repositoryId, sessionId: input.sessionId, detector: detectorVersion, state: 'outcome-observed', evidenceEventIds,
+          id: stableId('episode', input.repositoryId, input.sessionId, typedDetectorVersion, 'correction', ...evidenceEventIds), repositoryId: input.repositoryId, sessionId: input.sessionId, detector: typedDetectorVersion, state: 'outcome-observed', evidenceEventIds,
           kind: 'correction', originalDecisionEvidenceId: original.id, changedDecisionEvidenceId: changed.id,
           ...(reason === undefined ? {} : { reasonEvidenceId: reason.id }), ...(outcome === undefined ? {} : { outcomeEvidenceId: outcome.id })
         }));
       }
     } else if (changed.kind === 'tool-request' && changed.state === 'succeeded' && decisions.some((item) => item.id !== changed.id && item.decisionKey === changed.decisionKey)) {
-      const evidenceEventIds = [changed.id];
-      const episodeId = stableId('episode', input.repositoryId, input.sessionId, detectorVersion, 'insufficient-evidence', ...evidenceEventIds);
-      episodes.push(createOperationalEpisode({ id: episodeId, repositoryId: input.repositoryId, sessionId: input.sessionId, detector: detectorVersion, state: 'unresolved', evidenceEventIds }));
-      findings.push(insufficientFinding(input, episodeId, evidenceEventIds, 'linked-decision-evidence'));
+      findings.push(insufficientFinding(input, [changed.id], 'linked-decision-evidence'));
     }
   }
 
@@ -93,7 +97,7 @@ function typedEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 
     if (criterionState === 'met') continue;
     const evidenceEventIds = [closure.id, ...(criterion === undefined ? [] : [criterion.id])];
     episodes.push(typedEpisode({
-      id: stableId('episode', input.repositoryId, input.sessionId, detectorVersion, 'verification-gap', ...evidenceEventIds), repositoryId: input.repositoryId, sessionId: input.sessionId, detector: detectorVersion, state: 'unresolved', evidenceEventIds,
+      id: stableId('episode', input.repositoryId, input.sessionId, typedDetectorVersion, 'verification-gap', ...evidenceEventIds), repositoryId: input.repositoryId, sessionId: input.sessionId, detector: typedDetectorVersion, state: 'unresolved', evidenceEventIds,
       kind: 'verification-gap', closureEvidenceId: closure.id, ...(criterion === undefined ? {} : { criterionEvidenceId: criterion.id }), criterionState
     }));
   }
@@ -104,7 +108,7 @@ function typedEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 
     if (first.decisionKey !== repeated.decisionKey || first.scopeKey !== repeated.scopeKey || first.scopeKey === undefined) continue;
     const evidenceEventIds = [first.id, repeated.id];
     episodes.push(typedEpisode({
-      id: stableId('episode', input.repositoryId, input.sessionId, detectorVersion, 'repeated-acceptance', ...evidenceEventIds), repositoryId: input.repositoryId, sessionId: input.sessionId, detector: detectorVersion, state: 'outcome-observed', evidenceEventIds,
+      id: stableId('episode', input.repositoryId, input.sessionId, typedDetectorVersion, 'repeated-acceptance', ...evidenceEventIds), repositoryId: input.repositoryId, sessionId: input.sessionId, detector: typedDetectorVersion, state: 'outcome-observed', evidenceEventIds,
       kind: 'repeated-acceptance', firstAcceptanceEvidenceId: first.id, repeatedAcceptanceEvidenceId: repeated.id, scopeKey: first.scopeKey
     }));
   }
@@ -119,9 +123,9 @@ function typedEpisode<T extends DerivedOperationalEpisode>(value: T): T {
   return Object.freeze({ ...createOperationalEpisode(value), ...value }) as unknown as T;
 }
 
-function insufficientFinding(input: DetectorInput, episodeId: string, evidenceEventIds: readonly string[], missing: string): DerivedOperationalFinding {
-  const id = stableId('finding', input.repositoryId, input.sessionId, detectorVersion, 'insufficient-evidence', missing, ...evidenceEventIds);
-  return Object.freeze({ id, episodeId, kind: 'insufficient-evidence', evidenceEventIds: Object.freeze([...evidenceEventIds]), statement: `Missing ${missing}.` });
+function insufficientFinding(input: DetectorInput, evidenceEventIds: readonly string[], missing: string): DerivedOperationalFinding {
+  const id = stableId('finding', input.repositoryId, input.sessionId, typedDetectorVersion, 'insufficient-evidence', missing, ...evidenceEventIds);
+  return Object.freeze({ id, episodeId: id, kind: 'insufficient-evidence', evidenceEventIds: Object.freeze([...evidenceEventIds]), statement: `Missing ${missing}.` });
 }
 
 function conventionEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 'candidates'> {
@@ -129,9 +133,9 @@ function conventionEpisodes(input: DetectorInput): Pick<DetectorResult, 'episode
   const candidates: LearningCandidate[] = [];
   for (const convention of input.conventions) {
     const evidenceId = `instruction:${convention.source}`;
-    const episodeId = stableId('episode', input.repositoryId, input.sessionId, detectorVersion, convention.digest, evidenceId);
+    const episodeId = stableId('episode', input.repositoryId, input.sessionId, legacyDetectorVersion, convention.digest, evidenceId);
     episodes.push(createOperationalEpisode({
-      id: episodeId, repositoryId: input.repositoryId, sessionId: input.sessionId, detector: detectorVersion,
+      id: episodeId, repositoryId: input.repositoryId, sessionId: input.sessionId, detector: legacyDetectorVersion,
       state: 'solution-supported', evidenceEventIds: [evidenceId],
       attemptedOperation: convention.replaces, changedOperation: convention.tool,
       confirmingEventId: evidenceId
@@ -156,13 +160,13 @@ function repairEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' |
     const replacement = operations.find((item) => item.request.occurredAt > failed.request.occurredAt && sameIntent(failed.request, item.request) && changedCommand(failed.request, item.request));
     if (replacement === undefined) continue;
     const evidenceEventIds = [failed.request.id, failed.result!.id, replacement.request.id, ...(replacement.result ? [replacement.result.id] : [])];
-    const episodeId = stableId('episode', input.repositoryId, input.sessionId, detectorVersion, ...evidenceEventIds);
+    const episodeId = stableId('episode', input.repositoryId, input.sessionId, legacyDetectorVersion, ...evidenceEventIds);
     if (unsafeChange(replacement.request)) {
-      episodes.push(createOperationalEpisode({ id: episodeId, repositoryId: input.repositoryId, sessionId: input.sessionId, detector: detectorVersion, state: 'outcome-observed', evidenceEventIds, attemptedOperation: command(failed.request), changedOperation: command(replacement.request), hypothesis: 'The changed command requires separate safety review.' }));
+      episodes.push(createOperationalEpisode({ id: episodeId, repositoryId: input.repositoryId, sessionId: input.sessionId, detector: legacyDetectorVersion, state: 'outcome-observed', evidenceEventIds, attemptedOperation: command(failed.request), changedOperation: command(replacement.request), hypothesis: 'The changed command requires separate safety review.' }));
       findings.push(finding(episodeId, evidenceEventIds, 'The changed command modifies privilege or destructive effect.'));
       continue;
     }
-    episodes.push(createOperationalEpisode({ id: episodeId, repositoryId: input.repositoryId, sessionId: input.sessionId, detector: detectorVersion, state: 'outcome-observed', evidenceEventIds, attemptedOperation: command(failed.request), changedOperation: command(replacement.request), hypothesis: 'A source-declared task verification was not observed.' }));
+    episodes.push(createOperationalEpisode({ id: episodeId, repositoryId: input.repositoryId, sessionId: input.sessionId, detector: legacyDetectorVersion, state: 'outcome-observed', evidenceEventIds, attemptedOperation: command(failed.request), changedOperation: command(replacement.request), hypothesis: 'A source-declared task verification was not observed.' }));
     findings.push(finding(episodeId, evidenceEventIds, 'The changed command has no source-declared task verification.'));
   }
   return { episodes, findings, candidates };

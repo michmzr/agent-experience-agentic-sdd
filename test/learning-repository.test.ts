@@ -36,9 +36,9 @@ test('persists typed evidence before its dependent episode across restart', () =
   const claimed = repository.claim();
   repository.saveResult(claimed!.id, {
     episodeEvidence: [
-      { id: 'closure-1', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['capture-1'] }
+      { id: 'closure-1', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['closure-1'] }
     ],
-    episodes: [{ id: 'gap-1', kind: 'verification-gap', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm6-deterministic@1', state: 'unresolved', evidenceEventIds: ['closure-1'], closureEvidenceId: 'closure-1', criterionState: 'unknown' }],
+    episodes: [{ id: 'gap-1', kind: 'verification-gap', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm9-typed-evidence@1', state: 'unresolved', evidenceEventIds: ['closure-1'], closureEvidenceId: 'closure-1', criterionState: 'unknown' }],
     findings: [], candidates: []
   }, claimed!.leaseToken);
   repository.close();
@@ -48,6 +48,47 @@ test('persists typed evidence before its dependent episode across restart', () =
   assert.deepEqual(report.episodeEvidence.map(({ id, kind }) => ({ id, kind })), [{ id: 'closure-1', kind: 'task-transition' }]);
   assert.equal(report.episodes[0] !== undefined && 'kind' in report.episodes[0] ? report.episodes[0].kind : undefined, 'verification-gap');
   reopened.close();
+});
+
+test('rejects forged evidence and discriminated references outside the job scope', () => {
+  const repository = new OperationalLearningRepository(path());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const claimed = repository.claim();
+  assert.throws(() => repository.saveResult(claimed!.id, {
+    episodeEvidence: [{ id: 'closure-1', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['forged-evidence'] }],
+    episodes: [], findings: [], candidates: []
+  }, claimed!.leaseToken), /evidence.*scope/i);
+  repository.close();
+
+  const valid = new OperationalLearningRepository(path());
+  valid.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const validClaim = valid.claim();
+  assert.throws(() => valid.saveResult(validClaim!.id, {
+    episodeEvidence: [{ id: 'closure-1', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['closure-1'] }],
+    episodes: [{ id: 'gap-1', kind: 'verification-gap', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm9-typed-evidence@1', state: 'unresolved', evidenceEventIds: ['closure-1'], closureEvidenceId: 'forged-closure', criterionState: 'unknown' }],
+    findings: [], candidates: []
+  }, validClaim!.leaseToken), /episode evidence.*scope/i);
+  valid.close();
+
+  const correction = new OperationalLearningRepository(path());
+  correction.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const correctionClaim = correction.claim();
+  assert.throws(() => correction.saveResult(correctionClaim!.id, {
+    episodeEvidence: [
+      { id: 'original', kind: 'tool-request', state: 'observed', decisionKey: 'schema-update', scopeKey: 'repository', evidenceIds: ['original'] },
+      { id: 'changed', kind: 'tool-request', state: 'succeeded', decisionKey: 'schema-update', scopeKey: 'repository', evidenceIds: ['original'] }
+    ],
+    episodes: [{ id: 'correction-1', kind: 'correction', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm9-typed-evidence@1', state: 'outcome-observed', evidenceEventIds: ['original', 'changed'], originalDecisionEvidenceId: 'original', changedDecisionEvidenceId: 'changed', reasonEvidenceId: 'forged-reason' }],
+    findings: [], candidates: []
+  }, correctionClaim!.leaseToken), /episode evidence.*scope/i);
+  correction.close();
+});
+
+test('uses the typed-evidence detector version for default analysis jobs', () => {
+  const repository = new OperationalLearningRepository(path());
+  const stream = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-default', inputHighWater: 1 });
+  assert.equal(stream.detectorVersion, 'm9-typed-evidence@1');
+  repository.close();
 });
 
 test('rejects a typed episode whose evidence was not persisted for the job scope', () => {
@@ -163,7 +204,7 @@ test('migrates legacy analysis jobs into idempotent streams and recoverable runs
   } finally { reopened.close(); }
 });
 
-test('merges legacy jobs with an existing completed stream without rerunning covered input', () => {
+test('keeps migrated m6 jobs separate from a completed typed-evidence stream', () => {
   const databasePath = path();
   const seeded = new OperationalLearningRepository(databasePath, () => '2026-09-12T10:00:00.000Z');
   try {
@@ -179,11 +220,14 @@ test('merges legacy jobs with an existing completed stream without rerunning cov
 
   const migrated = new OperationalLearningRepository(databasePath, () => '2026-09-12T10:00:00.000Z');
   try {
-    assert.deepEqual(migrated.streamsFor('repo-1').map(({ desiredThrough, completedThrough, state }) => ({ desiredThrough, completedThrough, state })), [{ desiredThrough: 9, completedThrough: 7, state: 'pending' }]);
+    assert.deepEqual(migrated.streamsFor('repo-1').map(({ desiredThrough, completedThrough, state }) => ({ desiredThrough, completedThrough, state })), [
+      { desiredThrough: 9, completedThrough: 0, state: 'pending' },
+      { desiredThrough: 7, completedThrough: 7, state: 'completed' }
+    ]);
     assert.equal(migrated.jobById('legacy-covered-5')?.state, 'completed');
     assert.equal(migrated.jobById('legacy-new-9')?.state, 'retryable-failure');
     const claimed = migrated.claim();
-    assert.deepEqual({ inputFrom: claimed?.inputFrom, inputThrough: claimed?.inputThrough }, { inputFrom: 8, inputThrough: 9 });
+    assert.deepEqual({ inputFrom: claimed?.inputFrom, inputThrough: claimed?.inputThrough }, { inputFrom: 1, inputThrough: 9 });
   } finally { migrated.close(); }
 });
 
