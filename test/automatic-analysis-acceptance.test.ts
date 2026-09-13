@@ -3,11 +3,12 @@ import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import test from 'node:test';
 
 import { ExperienceService } from '../src/application/experience-service.js';
 import { CaptureSpool } from '../src/capture/spool.js';
+import { runCli } from '../src/cli.js';
 
 test('passive capture produces an analysis candidate without a manual analysis run', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-automatic-analysis-'));
@@ -61,6 +62,35 @@ test('passive capture produces an analysis candidate without a manual analysis r
     await waitFor(() => application.operationalAnalysisReport('repo-1').candidates.length === 1);
     assert.equal(application.operationalAnalysisReport('repo-1').candidates[0]?.kind, 'convention');
     await waitFor(() => coordinator?.exitCode !== null && coordinator?.exitCode !== undefined);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a relative CLI data directory completes automatic analysis with an absolute coordinator path', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-private-relative-data-'));
+  const root = mkdtempSync(join(tmpdir(), 'ael-relative-analysis-repository-'));
+  const relativeDataDir = relative(process.cwd(), dataDir);
+  try {
+    writeFileSync(join(root, 'AGENTS.md'), 'Use pnpm instead of npm\n');
+    writeFileSync(join(dataDir, 'analysis-worker.json'), JSON.stringify({ version: 1, maxProcesses: 1, idleTimeoutMs: 1_000 }));
+    const application = new ExperienceService({ dataDir: relativeDataDir });
+    application.initRepository({ id: 'repo-relative', root, sources: ['codex'], observedAt: '2026-09-13T10:00:00.000Z' });
+    const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+    try {
+      spool.admit({
+        kind: 'session-start',
+        session: { id: 'session-relative' as never, source: 'codex', startedAt: '2026-09-13T10:00:00.000Z', repositoryId: 'repo-relative' as never }
+      }, '2026-09-13T10:00:00.000Z');
+    } finally { spool.close(); }
+
+    const drain = runCli(['capture', 'drain', '--data-dir', relativeDataDir, '--json']);
+    assert.equal(drain.exitCode, 0, drain.stderr);
+    assert.equal(drain.stderr.includes(dataDir), false);
+    assert.equal(drain.stderr.includes('private-relative-data'), false);
+    await waitFor(() => application.operationalAnalysisReport('repo-relative').candidates.length === 1);
+    await waitFor(() => application.operationalAnalysisStatus().coordinatorLease === null);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });

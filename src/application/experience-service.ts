@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import { verifyInstalledHooks } from '../cli/hook-installation.js';
@@ -56,8 +56,8 @@ export class ExperienceService {
   private readonly scheduleAnalysis: AnalysisWorkerScheduler | undefined;
 
   constructor(options: ExperienceServiceOptions = {}) {
-    this.databasePath = options.dataDir ? join(options.dataDir, 'experience.sqlite') : defaultDatabasePath();
-    this.dataDirectory = options.dataDir ?? dirname(this.databasePath);
+    this.databasePath = resolve(options.dataDir === undefined ? defaultDatabasePath() : join(options.dataDir, 'experience.sqlite'));
+    this.dataDirectory = dirname(this.databasePath);
     this.runtime = new RuntimeService({ dataDir: this.dataDirectory });
     this.scheduleAnalysis = options.scheduleAnalysis;
   }
