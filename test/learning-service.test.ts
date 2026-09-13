@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,7 @@ import test from 'node:test';
 import { OperationalLearningService } from '../src/learning/service.js';
 import { OperationalLearningRepository } from '../src/learning/repository.js';
 import { normalizeMappedCapture } from '../src/capture/normalization.js';
+import type { EpisodeEvidence } from '../src/learning/contracts.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 import { initializeGitRepository } from './helpers/git-repository.js';
 
@@ -154,11 +155,22 @@ test('projects retained tool activity into bounded typed evidence without leakin
 
   const service = new OperationalLearningService(databasePath);
   service.enqueueCommittedSession('repo-typed', 'session-typed');
-  assert.equal(service.runNext({ repositoryId: 'repo-typed' }).status, 'completed');
+  assert.equal(service.runNext({ repositoryId: 'repo-typed', episodeEvidence: fixtureEpisodeEvidence() }).status, 'completed');
   const report = service.report('repo-typed');
   assert.deepEqual(report.episodeEvidence.map(({ kind, state }) => ({ kind, state })).sort((left, right) => left.kind.localeCompare(right.kind)), [
+    { kind: 'agent-claim', state: 'succeeded' },
+    { kind: 'agent-claim', state: 'succeeded' },
+    { kind: 'task-transition', state: 'closed' },
     { kind: 'tool-result', state: 'succeeded' },
     { kind: 'tool-request', state: 'observed' }
   ].sort((left, right) => left.kind.localeCompare(right.kind)));
+  assert.equal(report.episodes.some(({ kind }) => kind === 'verification-gap'), true);
+  assert.equal(report.episodes.some(({ kind }) => kind === 'repeated-acceptance'), false);
+  assert.deepEqual(report.coverage, [{ detector: 'm9-typed-evidence@1', status: 'completed', examinedEvents: 2, findings: 0 }]);
   assert.equal(JSON.stringify(report).includes('Liquibase'), false);
 });
+
+function fixtureEpisodeEvidence(): readonly EpisodeEvidence[] {
+  const fixtureUrl = new URL('../../test/fixtures/reliable-observation/scenarios.json', import.meta.url);
+  return (JSON.parse(readFileSync(fixtureUrl, 'utf8')) as { readonly episodeEvidence: readonly EpisodeEvidence[] }).episodeEvidence;
+}

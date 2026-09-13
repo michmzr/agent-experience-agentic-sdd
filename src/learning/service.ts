@@ -10,10 +10,19 @@ import { loadProjectSettings } from '../config/project-settings.js';
 
 const DEFAULT_MAX_EVENTS = 1_024;
 const DEFAULT_DEADLINE_MS = 250;
+const MAX_SUPPLIED_EPISODE_EVIDENCE = 128;
 
 export interface LearningRunResult {
   readonly status: 'idle' | 'completed' | 'retryable-failure' | 'quarantined-input';
   readonly jobId?: string;
+}
+
+export interface LearningRunOptions {
+  readonly maxEvents?: number;
+  readonly deadlineMs?: number;
+  readonly repositoryId?: string;
+  /** Explicit bounded typed task evidence, used without transcript inference. */
+  readonly episodeEvidence?: readonly EpisodeEvidence[];
 }
 
 export class OperationalLearningService {
@@ -39,7 +48,7 @@ export class OperationalLearningService {
     } finally { store.close(); }
   }
 
-  runNext(options: { readonly maxEvents?: number; readonly deadlineMs?: number; readonly repositoryId?: string } = {}): LearningRunResult {
+  runNext(options: LearningRunOptions = {}): LearningRunResult {
     const maxEvents = validateLimit(options.maxEvents, DEFAULT_MAX_EVENTS, 'Event limit');
     const deadlineMs = validateLimit(options.deadlineMs, DEFAULT_DEADLINE_MS, 'Deadline');
     const repository = new OperationalLearningRepository(this.databasePath);
@@ -60,13 +69,13 @@ export class OperationalLearningService {
         try {
           const snapshot = repository.contextSnapshotFor(job.repositoryId, job.sessionId);
           const conventions = snapshot?.conventions ?? readProjectInstructionContext(registration.root, loadProjectSettings(registration.root)).conventions;
-          const episodeEvidence = episodeEvidenceFromCapture(events);
+          const episodeEvidence = mergeEpisodeEvidence(episodeEvidenceFromCapture(events), options.episodeEvidence ?? []);
           const result = detectOperationalEpisodes({ repositoryId: job.repositoryId, sessionId: job.sessionId, events, conventions, episodeEvidence });
           if (performance.now() - startedAt > deadlineMs) {
             repository.retry(job.id, 'timeout', job.leaseToken);
             return Object.freeze({ status: retryState(repository, job.id), jobId: job.id });
           }
-          const coverage = Object.freeze([coverageFor(events.length, job.inputThrough - job.inputFrom + 1, result.findings.length)]);
+          const coverage = Object.freeze([coverageFor(job.detectorVersion, events.length, job.inputThrough - job.inputFrom + 1, result.findings.length)]);
           repository.saveResult(job.id, { ...result, episodeEvidence, coverage, inputDigest: `${job.inputFrom}:${job.inputThrough}:${events.map(({ id }) => id).join(',')}`, cost: events.length }, job.leaseToken);
           return Object.freeze({ status: 'completed', jobId: job.id });
         } catch {
@@ -102,6 +111,17 @@ function episodeEvidenceFromCapture(events: readonly CapturedEventRecord[]): rea
   }));
 }
 
+function mergeEpisodeEvidence(captured: readonly EpisodeEvidence[], supplied: readonly EpisodeEvidence[]): readonly EpisodeEvidence[] {
+  if (!Array.isArray(supplied) || supplied.length > MAX_SUPPLIED_EPISODE_EVIDENCE) throw new TypeError('Supplied episode evidence is invalid.');
+  const merged = [...captured, ...supplied.map(createEpisodeEvidence)];
+  const ids = new Set<string>();
+  for (const evidence of merged) {
+    if (ids.has(evidence.id)) throw new TypeError('Supplied episode evidence contains duplicate identity.');
+    ids.add(evidence.id);
+  }
+  return Object.freeze(merged);
+}
+
 function captureEvidenceId(source: string, sourceEventId: string): string {
   return `capture:${createHash('sha256').update(`ael:episode-evidence:v1\\0${source}\\0${sourceEventId}`).digest('hex')}`;
 }
@@ -129,8 +149,8 @@ function localContextKey(contextSecret: Uint8Array, kind: string, value: string)
   return createHmac('sha256', contextSecret).update(`ael:operational-context:${kind}:v1\0${value}`).digest('hex');
 }
 
-function coverageFor(examinedEvents: number, totalEvents: number, findings: number): AnalysisCoverage {
-  return Object.freeze({ detector: 'm6-deterministic@1', status: examinedEvents < totalEvents ? 'incomplete' : 'completed', examinedEvents, findings });
+function coverageFor(detector: string, examinedEvents: number, totalEvents: number, findings: number): AnalysisCoverage {
+  return Object.freeze({ detector, status: examinedEvents < totalEvents ? 'incomplete' : 'completed', examinedEvents, findings });
 }
 
 function retryState(repository: OperationalLearningRepository, jobId: string): 'retryable-failure' | 'quarantined-input' {
