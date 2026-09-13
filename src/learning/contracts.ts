@@ -9,10 +9,17 @@ export type FindingKind = 'repository-tool-convention' | 'command-repair' | 'amb
 
 export interface AnalysisCoverage {
   readonly detector: string;
+  readonly detectorSetVersion: string;
   readonly status: 'completed' | 'incomplete' | 'failed';
+  readonly inputLowWater: number;
+  readonly requestedHighWater: number;
+  readonly processedHighWater: number;
   readonly examinedEvents: number;
   readonly findings: number;
 }
+
+/** Transitional input accepted only by saveResult until service migration. */
+export type LegacyAnalysisCoverage = Omit<AnalysisCoverage, 'detectorSetVersion' | 'inputLowWater' | 'requestedHighWater' | 'processedHighWater'>;
 
 export interface OperationalEpisode {
   readonly id: string;

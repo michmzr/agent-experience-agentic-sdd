@@ -1,5 +1,5 @@
 import { ExperienceStore } from '../storage/experience-store.js';
-import type { AnalysisCoverage } from './contracts.js';
+import type { LegacyAnalysisCoverage } from './contracts.js';
 import { detectOperationalEpisodes } from './detectors.js';
 import { readProjectToolConventions } from './project-conventions.js';
 import { OperationalLearningRepository, type OperationalLearningReport } from './repository.js';
@@ -67,7 +67,7 @@ export class OperationalLearningService {
   }
 }
 
-function coverageFor(examinedEvents: number, totalEvents: number, findings: number): AnalysisCoverage {
+function coverageFor(examinedEvents: number, totalEvents: number, findings: number): LegacyAnalysisCoverage {
   return Object.freeze({ detector: 'm6-deterministic@1', status: examinedEvents < totalEvents ? 'incomplete' : 'completed', examinedEvents, findings });
 }
 

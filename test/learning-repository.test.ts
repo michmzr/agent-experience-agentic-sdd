@@ -9,6 +9,238 @@ import { DETECTOR_SET_VERSION, OperationalLearningRepository } from '../src/lear
 
 function path(): string { return join(mkdtempSync(join(tmpdir(), 'ael-learning-repository-')), 'experience.sqlite'); }
 
+const emptyResult = { episodes: [], findings: [], candidates: [] };
+const emptyCheckpoint = { version: 1, pendingEvents: [] };
+
+test('upgrades a version-one running job without a lease into recoverable bounded retry', () => {
+  const databasePath = path();
+  const now = () => '2026-09-13T10:00:00.000Z';
+  const repository = new OperationalLearningRepository(databasePath, now);
+  const original = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 10 })!;
+  repository.claim();
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 12 });
+  repository.close();
+  const database = new DatabaseSync(databasePath);
+  database.exec(`DROP TABLE operational_analysis_attempts; DROP TABLE operational_analysis_coordinator;
+    ALTER TABLE operational_analysis_coverage DROP COLUMN detector_set_version;
+    ALTER TABLE operational_analysis_coverage DROP COLUMN input_low_water;
+    ALTER TABLE operational_analysis_coverage DROP COLUMN requested_high_water;
+    ALTER TABLE operational_analysis_coverage DROP COLUMN processed_high_water;
+    UPDATE operational_analysis_schema SET version = 1;
+    UPDATE operational_analysis_jobs SET lease_owner = NULL, lease_expires_at = NULL;`);
+  database.close();
+  const reopened = new OperationalLearningRepository(databasePath, now);
+  assert.equal(reopened.jobById(original.id)?.state, 'retryable-failure');
+  assert.equal(reopened.jobById(original.id)?.inputHighWater, 12);
+  assert.equal(reopened.jobById(original.id)?.retryAfter, '2026-09-13T10:00:01.000Z');
+  assert.equal(reopened.status().totalAttempts, 1);
+  assert.equal(reopened.recoverExpiredJobs(), 0);
+  reopened.close();
+});
+
+test('leased claims exclude another connection and partial acknowledgement refreshes queued successor', () => {
+  const databasePath = path();
+  const repository = new OperationalLearningRepository(databasePath);
+  const other = new OperationalLearningRepository(databasePath);
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 10 });
+  const first = repository.claim({ ownerId: 'owner-1', leaseMs: 60_000 })!;
+  assert.equal(first.leaseOwner, 'owner-1');
+  assert.equal(first.attempts, 1);
+  assert.equal(other.claim({ ownerId: 'owner-2', leaseMs: 60_000 }), undefined);
+  const successor = other.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 12 })!;
+  const coverage = { detector: DETECTOR_SET_VERSION, detectorSetVersion: DETECTOR_SET_VERSION, status: 'incomplete' as const,
+    inputLowWater: 0, requestedHighWater: 10, processedHighWater: 6, examinedEvents: 6, findings: 0 };
+  repository.acknowledge(first.id, { ownerId: 'owner-1', attempt: 1, processedHighWater: 6,
+    checkpoint: emptyCheckpoint, result: { ...emptyResult, coverage: [coverage] }, metrics: { eventsLoaded: 6, elapsedMs: 20 } });
+  assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 6);
+  const next = other.claim({ ownerId: 'owner-2', leaseMs: 60_000 })!;
+  assert.equal(next.id, successor.id);
+  assert.equal(next.inputLowWater, 6);
+  assert.equal(next.inputHighWater, 12);
+  assert.deepEqual(repository.report('repo-1').coverage, [coverage]);
+  assert.throws(() => repository.acknowledge(first.id, { ownerId: 'owner-1', attempt: 1, processedHighWater: 10,
+    checkpoint: emptyCheckpoint, result: emptyResult, metrics: { eventsLoaded: 4, elapsedMs: 1 } }), /lease|running/i);
+  repository.close(); other.close();
+  const reopened = new OperationalLearningRepository(databasePath);
+  assert.equal(reopened.status().uniqueAcknowledgedEvents, 6);
+  assert.deepEqual(reopened.report('repo-1').coverage, [coverage]);
+  reopened.close();
+});
+
+test('acknowledgement creates remaining work and handles a zero-event range once', () => {
+  for (const highWater of [0, 10]) {
+    const repository = new OperationalLearningRepository(path());
+    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: highWater });
+    const job = repository.claim({ ownerId: 'owner', leaseMs: 60_000 })!;
+    repository.acknowledge(job.id, { ownerId: 'owner', attempt: 1, processedHighWater: Math.min(6, highWater),
+      checkpoint: emptyCheckpoint, result: emptyResult, metrics: { eventsLoaded: Math.min(6, highWater), elapsedMs: 1 } });
+    assert.equal(repository.claimableCount(), highWater === 0 ? 0 : 1);
+    assert.equal(repository.hasActiveOrClaimableWork(), highWater > 0);
+    if (highWater) assert.equal(repository.claim({ ownerId: 'next', leaseMs: 60_000 })?.inputLowWater, 6);
+    repository.close();
+  }
+});
+
+test('acknowledgement rejects stale ownership, bad range, checkpoint, version and cross-stream results atomically', () => {
+  const repository = new OperationalLearningRepository(path());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 10 });
+  const job = repository.claim({ ownerId: 'owner', leaseMs: 60_000 })!;
+  const input = { ownerId: 'owner', attempt: 1, processedHighWater: 6, checkpoint: emptyCheckpoint,
+    result: emptyResult, metrics: { eventsLoaded: 6, elapsedMs: 1 } };
+  const invalid = [ { ownerId: 'other' }, { attempt: 2 }, { processedHighWater: 11 }, { processedHighWater: -1 },
+    { checkpoint: { version: 2, pendingEvents: [] } }, { metrics: { eventsLoaded: -1, elapsedMs: 1 } },
+    { result: { ...emptyResult, coverage: [{ detector: 'detector', detectorSetVersion: 'other', status: 'completed' as const,
+      inputLowWater: 0, requestedHighWater: 10, processedHighWater: 6, examinedEvents: 6, findings: 0 }] } },
+    { result: { ...emptyResult, episodes: [{ id: 'alien', repositoryId: 'other', sessionId: 'session-1', detector: DETECTOR_SET_VERSION,
+      state: 'unresolved' as const, evidenceEventIds: [] }] } },
+    { result: { ...emptyResult, findings: [{ id: 'alien', episodeId: 'missing', kind: 'command-repair' as const, evidenceEventIds: [], statement: 'bad' }] } },
+    { metrics: { eventsLoaded: 0, elapsedMs: 1 } }
+  ];
+  for (const change of invalid) {
+    assert.throws(() => repository.acknowledge(job.id, { ...input, ...change }));
+    assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 0);
+    assert.equal(repository.jobById(job.id)?.state, 'running');
+    assert.equal(repository.status().uniqueAcknowledgedEvents, 0);
+  }
+  repository.close();
+});
+
+test('leased retries respect injected time, fence stale attempts and quarantine fourth or invalid failure', () => {
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const repository = new OperationalLearningRepository(path(), () => new Date(millis).toISOString());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 1 });
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    const job = repository.claim({ ownerId: 'owner', leaseMs: 60_000 })!;
+    assert.equal(job.attempts, attempt);
+    if (attempt > 1) assert.throws(() => repository.retry(job.id, { ownerId: 'owner', attempt: attempt - 1, reason: 'timeout' }), /lease/i);
+    repository.retry(job.id, { ownerId: 'owner', attempt, reason: 'timeout' });
+    assert.equal(repository.claimableCount(), 0);
+    if (attempt < 4) {
+      const delay = [1_000, 5_000, 30_000][attempt - 1]!;
+      assert.equal(repository.jobById(job.id)?.retryAfter, new Date(millis + delay).toISOString());
+      millis += delay - 1;
+      assert.equal(repository.claim({ ownerId: 'owner', leaseMs: 60_000 }), undefined);
+      millis += 1;
+    } else assert.equal(repository.jobById(job.id)?.state, 'quarantined-input');
+  }
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-2', inputHighWater: 1 });
+  const invalid = repository.claim({ ownerId: 'owner', leaseMs: 60_000 })!;
+  repository.retry(invalid.id, { ownerId: 'owner', attempt: 1, reason: 'invalid-input' });
+  assert.equal(repository.jobById(invalid.id)?.state, 'quarantined-input');
+  assert.equal(repository.status().totalRetries, 3);
+  repository.close();
+});
+
+test('expired jobs recover once and old owners cannot acknowledge or retry', () => {
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const repository = new OperationalLearningRepository(path(), () => new Date(millis).toISOString());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 4 });
+  const first = repository.claim({ ownerId: 'first', leaseMs: 10 })!;
+  millis += 10;
+  assert.throws(() => repository.retry(first.id, { ownerId: 'first', attempt: 1, reason: 'timeout' }), /lease/i);
+  assert.equal(repository.recoverExpiredJobs(), 1);
+  assert.equal(repository.recoverExpiredJobs(), 0);
+  assert.equal(repository.jobById(first.id)?.failureReason, 'lease-expired');
+  millis += 1_000;
+  const second = repository.claim({ ownerId: 'second', leaseMs: 10 })!;
+  assert.equal(second.attempts, 2);
+  assert.throws(() => repository.acknowledge(first.id, { ownerId: 'first', attempt: 1, processedHighWater: 4,
+    checkpoint: emptyCheckpoint, result: emptyResult, metrics: { eventsLoaded: 4, elapsedMs: 1 } }), /lease/i);
+  assert.throws(() => repository.retry(first.id, { ownerId: 'first', attempt: 1, reason: 'timeout' }), /lease/i);
+  repository.close();
+});
+
+test('four expired leases quarantine without admitting an unresolved successor', () => {
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const repository = new OperationalLearningRepository(path(), () => new Date(millis).toISOString());
+  const input = { repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 4 };
+  const original = repository.enqueue(input)!;
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    repository.claim({ ownerId: 'owner', leaseMs: 10 });
+    millis += 10;
+    assert.equal(repository.recoverExpiredJobs(), 1);
+    if (attempt < 4) millis += [1_000, 5_000, 30_000][attempt - 1]!;
+  }
+  assert.equal(repository.jobById(original.id)?.state, 'quarantined-input');
+  assert.equal(repository.jobById(original.id)?.attempts, 4);
+  repository.enqueue({ ...input, inputHighWater: 8 });
+  assert.equal(repository.claimableCount(), 0);
+  assert.equal(repository.status().totalRetries, 3);
+  repository.close();
+});
+
+test('coordinator convenience API retains a local generation fence after owner reuse', () => {
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const databasePath = path();
+  const repository = new OperationalLearningRepository(databasePath, () => new Date(millis).toISOString());
+  const other = new OperationalLearningRepository(databasePath, () => new Date(millis).toISOString());
+  assert.equal(repository.tryAcquireCoordinatorLease('owner', 10), true);
+  assert.equal(repository.renewCoordinatorLease('owner', 20), true);
+  millis += 20;
+  assert.equal(other.tryAcquireCoordinatorLease('owner', 10), true);
+  assert.equal(repository.renewCoordinatorLease('owner', 20), false);
+  assert.equal(repository.releaseCoordinatorLease('owner'), false);
+  assert.equal(other.releaseCoordinatorLease('owner'), true);
+  repository.close(); other.close();
+});
+
+test('global coordinator lease lifecycle is fenced by generation and expiry', () => {
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const databasePath = path();
+  const repository = new OperationalLearningRepository(databasePath, () => new Date(millis).toISOString());
+  const other = new OperationalLearningRepository(databasePath, () => new Date(millis).toISOString());
+  const first = repository.acquireCoordinatorLease({ ownerId: 'first', leaseMs: 10 })!;
+  assert.ok(first);
+  assert.equal(other.acquireCoordinatorLease({ ownerId: 'second', leaseMs: 10 }), undefined);
+  assert.equal(repository.renewCoordinatorLease({ ownerId: 'first', attempt: first.attempt, leaseMs: 20 })?.leaseExpiresAt,
+    new Date(millis + 20).toISOString());
+  millis += 20;
+  assert.equal(repository.renewCoordinatorLease({ ownerId: 'first', attempt: first.attempt, leaseMs: 20 }), undefined);
+  const second = other.acquireCoordinatorLease({ ownerId: 'second', leaseMs: 10 })!;
+  assert.equal(second.attempt, first.attempt + 1);
+  assert.equal(repository.releaseCoordinatorLease({ ownerId: 'first', attempt: first.attempt }), false);
+  assert.equal(other.releaseCoordinatorLease({ ownerId: 'second', attempt: second.attempt }), true);
+  assert.equal(repository.status().coordinatorLease, null);
+  repository.close(); other.close();
+});
+
+test('status freezes filtered job and attempt metrics while preserving global lease and diagnostics', () => {
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const databasePath = path();
+  const repository = new OperationalLearningRepository(databasePath, () => new Date(millis).toISOString());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 10 });
+  const job = repository.claim({ ownerId: 'owner', leaseMs: 60_000 })!;
+  repository.acknowledge(job.id, { ownerId: 'owner', attempt: 1, processedHighWater: 6,
+    checkpoint: emptyCheckpoint, result: emptyResult, metrics: { eventsLoaded: 8, elapsedMs: 1 } });
+  repository.enqueue({ repositoryId: 'repo-2', sessionId: 'session-2', inputHighWater: 0, detectorSetVersion: 'v2' });
+  repository.claim({ ownerId: 'owner-2', leaseMs: 60_000, repositoryId: 'repo-2' });
+  repository.acquireCoordinatorLease({ ownerId: 'coordinator', leaseMs: 60_000 });
+  repository.recordDiagnostic('coordinator-launch-failed'); repository.recordDiagnostic('coordinator-launch-failed');
+  repository.recordDiagnostic('child-process-failed');
+  millis += 100;
+  const status = repository.status();
+  assert.equal(status.jobs.completed, 1); assert.equal(status.jobs.pending, 1); assert.equal(status.jobs.running, 1);
+  assert.equal(status.activeRunningCount, 1); assert.equal(status.oldestOutstandingAgeMs, 100);
+  assert.equal(status.totalAttempts, 2); assert.equal(status.eventsLoaded, 8);
+  assert.equal(status.uniqueAcknowledgedEvents, 6); assert.equal(status.rereadRatio, 8 / 6);
+  assert.equal(status.diagnostics['coordinator-launch-failed'], 2);
+  assert.equal(status.diagnostics['child-process-failed'], 1);
+  const filtered = repository.status({ repositoryId: 'repo-2', sessionId: 'session-2', detectorSetVersion: 'v2' });
+  assert.equal(filtered.totalAttempts, 1); assert.equal(filtered.uniqueAcknowledgedEvents, 0); assert.equal(filtered.rereadRatio, 0);
+  assert.equal(filtered.jobs.completed, 0); assert.equal(filtered.coordinatorLease?.ownerId, 'coordinator');
+  for (const value of [status, status.jobs, status.diagnostics, status.coordinatorLease]) assert.ok(Object.isFrozen(value));
+  const database = new DatabaseSync(databasePath);
+  const columns = database.prepare('PRAGMA table_info(operational_analysis_attempts)').all().map(({ name }) => name);
+  assert.ok(columns.includes('events_loaded')); assert.ok(columns.includes('detector_set_version'));
+  assert.ok(!columns.some((column) => /payload|text/.test(String(column))));
+  const attempt = database.prepare('SELECT * FROM operational_analysis_attempts WHERE job_id = ?').get(job.id)!;
+  assert.equal(attempt.input_low_water, 0); assert.equal(attempt.requested_high_water, 10);
+  assert.equal(attempt.processed_high_water, 6); assert.equal(attempt.events_loaded, 8);
+  assert.equal(attempt.findings, 0); assert.equal(attempt.elapsed_ms, 1); assert.equal(attempt.outcome, 'completed');
+  assert.equal(attempt.failure_category, null); assert.equal(attempt.started_at, attempt.finished_at);
+  database.close(); repository.close();
+});
+
 function legacyDatabase(databasePath: string, states: readonly string[]): void {
   const database = new DatabaseSync(databasePath);
   database.exec(`
@@ -62,7 +294,8 @@ test('migrates legacy progress and coverage once while coalescing subsequent adm
     assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 4);
     assert.equal(repository.jobById('legacy-4')?.state, 'completed');
     assert.equal(repository.jobsForStream('repo-1', 'session-1').filter(({ state }) => state === 'pending').length, 1);
-    assert.deepEqual(repository.report('repo-1').coverage, [{ detector: 'm6-deterministic@1', status: 'completed', examinedEvents: 4, findings: 0 }]);
+    assert.deepEqual(repository.report('repo-1').coverage, [{ detector: 'm6-deterministic@1', detectorSetVersion: DETECTOR_SET_VERSION,
+      inputLowWater: 0, requestedHighWater: 4, processedHighWater: 4, status: 'completed', examinedEvents: 4, findings: 0 }]);
     assert.equal(repository.report('repo-1').episodes[0]?.id, 'legacy-episode');
     assert.equal(repository.report('repo-1').findings[0]?.id, 'legacy-finding');
     assert.deepEqual(repository.report('repo-1').candidates[0]?.evidenceEventIds, ['event-1']);
@@ -201,7 +434,8 @@ test('admission validates stream identity and high-water before durable changes'
 });
 
 test('retry merges a pending successor without violating the stream uniqueness constraint', () => {
-  const repository = new OperationalLearningRepository(path());
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const repository = new OperationalLearningRepository(path(), () => new Date(millis).toISOString());
   repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 4 });
   const running = repository.claim();
   assert.ok(running);
@@ -212,6 +446,7 @@ test('retry merges a pending successor without violating the stream uniqueness c
   assert.equal(jobs[0]?.id, running.id);
   assert.equal(jobs[0]?.state, 'retryable-failure');
   assert.equal(jobs[0]?.inputHighWater, 8);
+  millis += 1_000;
   assert.equal(repository.claim()?.id, running.id);
   repository.close();
 });
@@ -297,13 +532,15 @@ test('retains contradictory evidence and marks the candidate disputed', () => {
 });
 
 test('retries a bounded failed job and quarantines it after the fourth failure', () => {
-  const repository = new OperationalLearningRepository(path());
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const repository = new OperationalLearningRepository(path(), () => new Date(millis).toISOString());
   const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 1 });
   assert.ok(job);
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const claimed = repository.claim();
     assert.equal(claimed?.state, 'running');
     repository.retry(claimed!.id);
+    millis += [1_000, 5_000, 30_000][attempt - 1]!;
   }
   const fourth = repository.claim();
   assert.equal(fourth?.attempts, 4);
@@ -337,7 +574,8 @@ test('retries a timed-out job as an execution failure', () => {
 for (const reason of ['execution-failure', 'invalid-input'] as const) {
   test(`unchanged admission preserves ${reason} quarantine and higher input waits behind its unprocessed prefix`, () => {
     const databasePath = path();
-    let repository = new OperationalLearningRepository(databasePath);
+    let millis = Date.parse('2026-09-13T10:00:00.000Z');
+    let repository = new OperationalLearningRepository(databasePath, () => new Date(millis).toISOString());
     const input = { repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 4 };
     const original = repository.enqueue(input);
     assert.ok(original);
@@ -345,6 +583,7 @@ for (const reason of ['execution-failure', 'invalid-input'] as const) {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       assert.equal(repository.claim()?.id, original.id);
       repository.retry(original.id, reason);
+      millis += [1_000, 5_000, 30_000, 0][attempt]!;
     }
     const quarantined = repository.jobById(original.id);
     assert.equal(quarantined?.state, 'quarantined-input');
