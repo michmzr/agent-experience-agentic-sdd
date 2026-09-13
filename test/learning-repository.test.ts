@@ -359,13 +359,19 @@ test('status counts live reserved children including unclaimed slots without dou
   const repository = new OperationalLearningRepository(path(), () => new Date(millis).toISOString());
   repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 1 });
   repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-2', inputHighWater: 1 });
+  assert.ok(repository.claim({ ownerId: 'manual-child', leaseMs: 30_000 }));
   const coordinator = repository.acquireCoordinatorLease({ ownerId: 'coordinator', leaseMs: 60_000 })!;
-  const linked = repository.reserveWorkerSlot({ ...coordinator, leaseMs: 30_000, maxProcesses: 3 })!;
-  assert.ok(repository.claim({ ownerId: 'child-1', leaseMs: 30_000, workerSlot: linked }));
-  assert.ok(repository.reserveWorkerSlot({ ...coordinator, leaseMs: 30_000, maxProcesses: 3 }));
+  const linked = repository.reserveWorkerSlot({ ...coordinator, leaseMs: 30_000, maxProcesses: 2 })!;
+  assert.equal(repository.status({ repositoryId: 'missing' }).activeChildren, 1,
+    'active child count includes only live worker slots and stays global when metrics are filtered');
   assert.equal(repository.status({ repositoryId: 'missing' }).activeRunningCount, 2,
-    'active child count stays global when job metrics are filtered');
+    'capacity count includes the live slot and the unlinked running job');
+  assert.ok(repository.claim({ ownerId: 'child-1', leaseMs: 30_000, workerSlot: linked }));
+  assert.equal(repository.status().activeChildren, 1);
+  assert.equal(repository.status().activeRunningCount, 2,
+    'linking the slot to its job does not double count capacity');
   millis += 30_000;
+  assert.equal(repository.status().activeChildren, 0);
   assert.equal(repository.status().activeRunningCount, 0);
   repository.close();
 });

@@ -147,7 +147,7 @@ export type AnalysisDiagnostic = 'coordinator-launch-failed' | 'child-process-fa
 export interface AnalysisStatus {
   readonly jobs: Readonly<Record<AnalysisJob['state'], number>>;
   readonly oldestOutstandingAgeMs: number | null; readonly nextRetryAt: string | null;
-  readonly coordinatorLease: CoordinatorLease | null; readonly activeRunningCount: number;
+  readonly coordinatorLease: CoordinatorLease | null; readonly activeRunningCount: number; readonly activeChildren: number;
   readonly totalAttempts: number; readonly totalRetries: number; readonly eventsLoaded: number;
   readonly uniqueAcknowledgedEvents: number; readonly rereadRatio: number;
   /** Counts every classified attempt, including failures that quarantine instead of scheduling another retry. */
@@ -521,12 +521,13 @@ export class OperationalLearningRepository {
         if (job.state !== 'completed' && (oldest === null || job.created_at < oldest)) oldest = job.created_at;
         if (job.state === 'retryable-failure' && job.retry_after !== null && (nextRetryAt === null || job.retry_after < nextRetryAt)) nextRetryAt = job.retry_after;
       }
-      const { active_running_count: activeRunningCount } = this.database.prepare(`SELECT
+      const active = this.database.prepare(`SELECT
+        (SELECT COUNT(*) FROM operational_analysis_worker_slots s WHERE s.lease_expires_at > ?) AS active_children,
         (SELECT COUNT(*) FROM operational_analysis_worker_slots s WHERE s.lease_expires_at > ?) +
         (SELECT COUNT(*) FROM operational_analysis_jobs j WHERE j.state = 'running' AND j.lease_expires_at > ?
           AND NOT EXISTS (SELECT 1 FROM operational_analysis_worker_slots s
             WHERE s.job_id = j.id AND s.lease_expires_at > ?)) AS active_running_count`)
-        .get(timestamp, timestamp, timestamp) as { active_running_count: number };
+        .get(timestamp, timestamp, timestamp, timestamp) as { active_children: number; active_running_count: number };
       const metrics = this.database.prepare(`SELECT COUNT(*) AS total_attempts,
         COALESCE(SUM(CASE WHEN j.outcome = 'retryable-failure' THEN 1 ELSE 0 END), 0) AS total_retries,
         COALESCE(SUM(j.events_loaded), 0) AS events_loaded,
@@ -550,7 +551,8 @@ export class OperationalLearningRepository {
         if (row.code === 'coordinator-launch-failed' || row.code === 'child-process-failed') diagnostics[row.code] = Number(row.occurrences);
       }
       const status = Object.freeze({ jobs: Object.freeze(jobs), oldestOutstandingAgeMs: oldest === null ? null : Math.max(0, Date.parse(timestamp) - Date.parse(oldest)),
-        nextRetryAt, activeRunningCount, totalAttempts: metrics.total_attempts, totalRetries: metrics.total_retries,
+        nextRetryAt, activeRunningCount: active.active_running_count, activeChildren: active.active_children,
+        totalAttempts: metrics.total_attempts, totalRetries: metrics.total_retries,
         eventsLoaded: metrics.events_loaded, uniqueAcknowledgedEvents: metrics.acknowledged,
         rereadRatio: metrics.acknowledged === 0 ? 0 : metrics.events_loaded / metrics.acknowledged,
         failureCounts: Object.freeze(failureCounts),

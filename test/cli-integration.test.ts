@@ -211,6 +211,23 @@ test('compiled watchdog isolates worker-child and completes a slot-linked analys
   }
 });
 
+test('compiled watchdog and worker-child failures are nonzero, quiet, bounded, and private', () => {
+  const marker = 'private-worker-owner';
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-worker-failure-'));
+  try {
+    const executable = join(process.cwd(), 'dist', 'src', 'cli.js');
+    for (const command of ['worker-watchdog', 'worker-child']) {
+      const result = spawnSync(process.execPath, [executable, 'analysis', command, '--data-dir', dataDir,
+        '--worker-slot-id', '00000000-0000-4000-8000-000000000000', '--worker-slot-owner', marker,
+        '--worker-slot-attempt', '1'], { encoding: 'utf8', timeout: 5_000 });
+      assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+      assert.equal(result.stdout, '');
+      assert.match(result.stderr, /^ANALYSIS_WORKER_(?:FAILED|ERROR): Analysis worker failed\.\n$/);
+      assert.equal(result.stderr.includes(marker), false);
+    }
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
 test('compiled coordinator loads global settings, waits for idle timeout, and emits no routine output', () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-coordinator-cli-'));
   try {

@@ -222,7 +222,7 @@ export class ExperienceService {
     const repository = new OperationalLearningRepository(this.databasePath);
     try {
       const status = repository.status(filters);
-      return Object.freeze({ version: 1 as const, workerConfig, ...status, activeChildren: status.activeRunningCount });
+      return Object.freeze({ version: 1 as const, workerConfig, ...status });
     } finally { repository.close(); }
   }
 
