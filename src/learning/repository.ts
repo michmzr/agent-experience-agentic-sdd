@@ -468,10 +468,14 @@ export class OperationalLearningRepository {
             processed_high_water = (SELECT processed_high_water FROM operational_analysis_jobs WHERE id = job_id);
           UPDATE operational_analysis_schema SET version = 2;`);
         const timestamp = this.now();
-        const unleased = this.database.prepare(`SELECT * FROM operational_analysis_jobs
-          WHERE state = 'running' AND (lease_owner IS NULL OR lease_expires_at IS NULL)`).all() as unknown as JobRow[];
-        for (const row of unleased) {
-          this.database.prepare(`UPDATE operational_analysis_jobs SET lease_owner = 'schema-migration', lease_expires_at = ?,
+        const recoverable = this.database.prepare(`SELECT * FROM operational_analysis_jobs
+          WHERE (state = 'running' AND (lease_owner IS NULL OR lease_expires_at IS NULL))
+            OR (state = 'retryable-failure' AND (retry_after IS NULL OR attempts >= 4))
+          ORDER BY CASE WHEN state = 'running' THEN 0 ELSE 1 END`).all() as unknown as JobRow[];
+        for (const row of recoverable) {
+          // Recovering the running predecessor can already coalesce this retryable successor.
+          if (!this.jobById(row.id)) continue;
+          this.database.prepare(`UPDATE operational_analysis_jobs SET state = 'running', lease_owner = 'schema-migration', lease_expires_at = ?,
             attempts = MAX(attempts, 1) WHERE id = ?`).run(timestamp, row.id);
           const job = this.jobById(row.id)!;
           this.database.prepare(`INSERT INTO operational_analysis_attempts (job_id, attempt, repository_id, session_id, detector_set_version,

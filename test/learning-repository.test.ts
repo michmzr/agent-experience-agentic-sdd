@@ -305,6 +305,67 @@ test('legacy migration quarantines the fourth running attempt without permitting
   }
 });
 
+function versionOneRetryableDatabase(databasePath: string, attempts: number, retryAfter: string | null): void {
+  legacyDatabase(databasePath, ['pending', 'pending', 'pending']);
+  const database = new DatabaseSync(databasePath);
+  database.exec(`DROP TABLE operational_analysis_jobs;
+    CREATE TABLE operational_analysis_schema (version INTEGER PRIMARY KEY);
+    INSERT INTO operational_analysis_schema VALUES (1);
+    CREATE TABLE operational_analysis_streams (
+      repository_id TEXT NOT NULL, session_id TEXT NOT NULL, detector_set_version TEXT NOT NULL,
+      committed_high_water INTEGER NOT NULL, processed_high_water INTEGER NOT NULL DEFAULT 0,
+      checkpoint_json TEXT NOT NULL DEFAULT '{"version":1,"pendingEvents":[]}', next_generation INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      PRIMARY KEY(repository_id, session_id, detector_set_version)
+    );
+    CREATE TABLE operational_analysis_jobs (
+      id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, session_id TEXT NOT NULL, detector_set_version TEXT NOT NULL,
+      input_low_water INTEGER NOT NULL, input_high_water INTEGER NOT NULL, processed_high_water INTEGER NOT NULL,
+      state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, retry_after TEXT, lease_owner TEXT,
+      lease_expires_at TEXT, failure_reason TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      FOREIGN KEY(repository_id, session_id, detector_set_version)
+        REFERENCES operational_analysis_streams(repository_id, session_id, detector_set_version)
+    );
+    CREATE UNIQUE INDEX operational_analysis_one_pending ON operational_analysis_jobs(repository_id, session_id, detector_set_version)
+      WHERE state IN ('pending', 'retryable-failure');
+    CREATE UNIQUE INDEX operational_analysis_one_running ON operational_analysis_jobs(repository_id, session_id, detector_set_version)
+      WHERE state = 'running';`);
+  database.prepare(`INSERT INTO operational_analysis_streams (repository_id, session_id, detector_set_version,
+    committed_high_water, next_generation, created_at, updated_at) VALUES ('repo-1', 'session-1', ?, 8, 2, ?, ?)`)
+    .run(DETECTOR_SET_VERSION, '2026-09-12T10:00:00.000Z', '2026-09-12T10:00:00.000Z');
+  database.prepare(`INSERT INTO operational_analysis_jobs (id, repository_id, session_id, detector_set_version,
+    input_low_water, input_high_water, processed_high_water, state, attempts, retry_after, failure_reason, created_at, updated_at)
+    VALUES ('v1-job', 'repo-1', 'session-1', ?, 0, 8, 0, 'retryable-failure', ?, ?, 'execution-failure', ?, ?)`)
+    .run(DETECTOR_SET_VERSION, attempts, retryAfter, '2026-09-12T10:00:00.000Z', '2026-09-12T10:00:00.000Z');
+  database.close();
+}
+
+for (const attempts of [2, 4]) {
+  for (const retryAfter of [null, '2026-09-13T10:00:02.000Z']) {
+    test(`version-one retryable attempt ${attempts} ${retryAfter === null ? 'without eligibility receives bounded recovery' : 'retains eligibility only within its attempt budget'}`, () => {
+      const databasePath = path();
+      versionOneRetryableDatabase(databasePath, attempts, retryAfter);
+      let millis = Date.parse('2026-09-13T10:00:00.000Z');
+      const expectedRetryAfter = attempts >= 4 ? null : retryAfter ?? '2026-09-13T10:00:05.000Z';
+      for (let reopen = 0; reopen < 2; reopen += 1) {
+        const repository = new OperationalLearningRepository(databasePath, () => new Date(millis).toISOString());
+        const job = repository.jobById('v1-job')!;
+        assert.equal(job.state, attempts >= 4 ? 'quarantined-input' : 'retryable-failure');
+        assert.equal(job.retryAfter, expectedRetryAfter);
+        assert.equal(job.attempts, attempts);
+        assert.equal(job.failureReason, retryAfter !== null && attempts < 4 ? 'execution-failure' : 'lease-expired');
+        assert.equal(repository.claim({ ownerId: 'owner', leaseMs: 60_000 }), undefined);
+        if (reopen === 1 && expectedRetryAfter !== null) {
+          millis = Date.parse(expectedRetryAfter);
+          assert.equal(repository.claim({ ownerId: 'owner', leaseMs: 60_000 })?.attempts, attempts + 1);
+        }
+        repository.close();
+        millis += 1_000;
+      }
+    });
+  }
+}
+
 test('legacy running recovery preserves deterministic retry eligibility below four attempts', () => {
   for (const attempt of [1, 2, 3]) {
     const databasePath = path();
