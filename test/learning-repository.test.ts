@@ -354,20 +354,21 @@ test('durable worker slots count a linked running job once and refill after rele
   repository.close();
 });
 
-test('worker slot renewal is coordinator-fenced and expired reservations are reclaimable', () => {
+test('worker slot renewal is token-fenced and expired reservations are reclaimable', () => {
   let millis = Date.parse('2026-09-13T10:00:00.000Z');
   const repository = new OperationalLearningRepository(path(), () => new Date(millis).toISOString());
   const coordinator = repository.acquireCoordinatorLease({ ownerId: 'coordinator', leaseMs: 60_000 })!;
   const slot = repository.reserveWorkerSlot({ ...coordinator, leaseMs: 10, maxProcesses: 1 })!;
   millis += 5;
-  assert.equal(repository.renewWorkerSlots({ ...coordinator, leaseMs: 20 }), 1);
-  assert.equal(repository.renewWorkerSlots({ ownerId: 'other', attempt: coordinator.attempt, leaseMs: 20 }), 0);
+  assert.equal(repository.renewWorkerSlot({ ...slot, leaseMs: 20 }), true);
+  assert.equal(repository.renewWorkerSlot({ ...slot, ownerId: 'other', leaseMs: 20 }), false);
   millis += 19;
   assert.equal(repository.reserveWorkerSlot({ ...coordinator, leaseMs: 10, maxProcesses: 1 }), undefined);
   millis += 1;
   const replacement = repository.reserveWorkerSlot({ ...coordinator, leaseMs: 10, maxProcesses: 1 });
   assert.ok(replacement);
   assert.notEqual(replacement!.slotId, slot.slotId);
+  assert.equal(repository.renewWorkerSlot({ ...slot, leaseMs: 20 }), false);
   assert.equal(repository.releaseWorkerSlot(slot), false);
   assert.equal(repository.releaseWorkerSlot(replacement!), true);
   repository.close();

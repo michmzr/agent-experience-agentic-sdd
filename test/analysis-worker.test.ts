@@ -1,19 +1,32 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import type { AnalysisWorkerSlot, AnalysisWorkerSlotFence } from '../src/learning/repository.js';
+import { OperationalLearningRepository, type AnalysisWorkerSlot, type AnalysisWorkerSlotFence } from '../src/learning/repository.js';
 import type { AnalysisWorkerSettings } from '../src/learning/worker-settings.js';
 import {
   createProductionAnalysisWorkerHost,
+  createProductionAnalysisWatchdogHost,
   runAnalysisCoordinator,
+  runAnalysisWorkerWatchdog,
   type AnalysisWorkerHost,
   type AnalysisWorkerRepository
 } from '../src/learning/worker.js';
 
 const origin = Date.parse('2026-09-13T10:00:00.000Z');
+const temporaryDirectories: string[] = [];
+
+test.after(() => {
+  for (const directory of temporaryDirectories) rmSync(directory, { recursive: true, force: true });
+});
+
+function temporaryDirectory(prefix: string): string {
+  const directory = mkdtempSync(join(tmpdir(), prefix));
+  temporaryDirectories.push(directory);
+  return directory;
+}
 
 class FakeRepository implements AnalysisWorkerRepository {
   pending = 0;
@@ -173,6 +186,7 @@ function harness(options: { pending?: number; expired?: number; unreservedRunnin
         children.push({ finish: (code = 0) => {
           repository.finishWork(claimed);
           active -= 1;
+          repository.releaseWorkerSlot(slot);
           resolve(code);
         } });
       });
@@ -374,7 +388,7 @@ test('releases its lease after exactly five simulated idle minutes', async () =>
 });
 
 test('production host starts a one-shot worker child with the data directory', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'ael-analysis-worker-'));
+  const directory = temporaryDirectory('ael-analysis-worker-');
   const entrypoint = join(directory, 'child.mjs');
   writeFileSync(entrypoint, `import { writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\nconst args = process.argv.slice(2);\nconst data = args[args.indexOf('--data-dir') + 1];\nwriteFileSync(join(data, 'args.json'), JSON.stringify(args));\n`);
 
@@ -382,6 +396,73 @@ test('production host starts a one-shot worker child with the data directory', a
     slotId: 'slot', ownerId: 'owner', attempt: 1, leaseExpiresAt: new Date(origin + 30_000).toISOString(), jobId: null
   }), 0);
   assert.deepEqual(JSON.parse(readFileSync(join(directory, 'args.json'), 'utf8')),
+    ['analysis', 'worker-watchdog', '--data-dir', directory, '--worker-slot-id', 'slot',
+      '--worker-slot-owner', 'owner', '--worker-slot-attempt', '1']);
+});
+
+test('watchdog fences a blocked analysis across takeover and terminates before releasing its slot', async () => {
+  const directory = temporaryDirectory('ael-analysis-watchdog-');
+  let millis = origin;
+  const repository = new OperationalLearningRepository(join(directory, 'experience.sqlite'),
+    () => new Date(millis).toISOString());
+  const predecessor = repository.acquireCoordinatorLease({ ownerId: 'owner-1', leaseMs: 10_000 })!;
+  const slot = repository.reserveWorkerSlot({ ...predecessor, leaseMs: 45_000, maxProcesses: 1 })!;
+  const order: string[] = [];
+  let terminatedAt: number | undefined;
+  let renewals = 0;
+  const watchdog = runAnalysisWorkerWatchdog(directory, slot, {
+    renewWorkerSlot: (input) => {
+      renewals += 1;
+      return repository.renewWorkerSlot(input);
+    },
+    releaseWorkerSlot: (input) => {
+      order.push('release');
+      return repository.releaseWorkerSlot(input);
+    }
+  }, {
+    now: () => millis,
+    delay: async (delayMs) => {
+      millis += delayMs;
+      await nextTurn();
+    },
+    spawnWorker: () => ({
+      completion: new Promise<number>(() => {}),
+      terminate: async () => {
+        terminatedAt = millis;
+        order.push('terminate');
+        return 1;
+      }
+    })
+  });
+
+  millis += 10_000;
+  const successor = repository.acquireCoordinatorLease({ ownerId: 'owner-2', leaseMs: 60_000 })!;
+  assert.ok(successor);
+  assert.equal(repository.reserveWorkerSlot({ ...successor, leaseMs: 45_000, maxProcesses: 1 }), undefined,
+    'takeover must observe the predecessor watchdog reservation');
+
+  assert.deepEqual(await watchdog, { status: 'timed-out' });
+  assert.equal(terminatedAt, origin + 30_000);
+  assert.deepEqual(order, ['terminate', 'release']);
+  assert.ok(renewals >= 2, 'the slot heartbeat remains valid after coordinator takeover');
+  assert.ok(millis >= origin + 30_000);
+  const replacement = repository.reserveWorkerSlot({ ...successor, leaseMs: 45_000, maxProcesses: 1 });
+  assert.ok(replacement, 'capacity becomes available only after confirmed worker termination');
+  assert.equal(repository.releaseWorkerSlot(slot), false, 'a stale slot token cannot release its replacement');
+  repository.releaseWorkerSlot(replacement!);
+  repository.close();
+});
+
+test('production watchdog runs the analysis command inside a Worker thread', async () => {
+  const directory = temporaryDirectory('ael-analysis-thread-');
+  const entrypoint = join(directory, 'worker.mjs');
+  writeFileSync(entrypoint, `import { writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\nconst args = process.argv.slice(2);\nconst data = args[args.indexOf('--data-dir') + 1];\nwriteFileSync(join(data, 'thread-args.json'), JSON.stringify(args));\n`);
+  const execution = createProductionAnalysisWatchdogHost(entrypoint).spawnWorker(directory, {
+    slotId: 'slot', ownerId: 'owner', attempt: 1, leaseExpiresAt: new Date(origin + 45_000).toISOString(), jobId: null
+  });
+
+  assert.equal(await execution.completion, 0);
+  assert.deepEqual(JSON.parse(readFileSync(join(directory, 'thread-args.json'), 'utf8')),
     ['analysis', 'worker-child', '--data-dir', directory, '--worker-slot-id', 'slot',
       '--worker-slot-owner', 'owner', '--worker-slot-attempt', '1']);
 });

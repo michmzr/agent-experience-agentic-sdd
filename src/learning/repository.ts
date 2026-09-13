@@ -471,17 +471,13 @@ export class OperationalLearningRepository {
     });
   }
 
-  renewWorkerSlots(input: AnalysisFence & { readonly leaseMs: number }): number {
-    assertFence(input); assertLeaseInput(input);
+  renewWorkerSlot(input: AnalysisWorkerSlotFence & { readonly leaseMs: number }): boolean {
+    assertWorkerSlotFence(input); assertLeaseInput(input);
     return this.transaction(() => {
       const timestamp = this.now();
-      const coordinator = this.database.prepare(`SELECT 1 FROM operational_analysis_coordinator
-        WHERE singleton = 1 AND owner_id = ? AND attempt = ? AND lease_expires_at > ?`)
-        .get(input.ownerId, input.attempt, timestamp);
-      if (!coordinator) return 0;
-      return Number(this.database.prepare(`UPDATE operational_analysis_worker_slots SET lease_expires_at = ?, updated_at = ?
-        WHERE owner_id = ? AND owner_attempt = ? AND lease_expires_at > ?`)
-        .run(expiresAt(timestamp, input.leaseMs), timestamp, input.ownerId, input.attempt, timestamp).changes);
+      return this.database.prepare(`UPDATE operational_analysis_worker_slots SET lease_expires_at = ?, updated_at = ?
+        WHERE id = ? AND owner_id = ? AND owner_attempt = ? AND lease_expires_at > ?`)
+        .run(expiresAt(timestamp, input.leaseMs), timestamp, input.slotId, input.ownerId, input.attempt, timestamp).changes === 1;
     });
   }
 
