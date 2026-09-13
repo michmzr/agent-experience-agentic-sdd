@@ -336,6 +336,8 @@ Review follow-up evidence: an initially failing regression showed that a complet
 
 Second review follow-up evidence: coverage is now keyed to its completed analysis job, so a covered second range cannot make an earlier uncovered range `no-findings`. Empty analysis in an absent database explicitly contains required empty coverage. Receipt accounting and admitted-operation counts are marked unavailable in repository reports until the receipt ledger has repository scope. Focused tests passed 20/20; the serial suite passed on 2026-09-13.
 
+Quality follow-up evidence: schema-version 2 has dedicated human renderers for status, global status, and analysis report; they contain dimensions only and status exit derives from installation readiness. Evidence quality and analysis quality use aggregate repository queries, while detector and coverage output is capped at 64 records. Focused tests passed 32/32; the serial suite passed on 2026-09-13.
+
 ### Task 6: Preserve historical instruction and execution context for issue #8
 
 **Files:**

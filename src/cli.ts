@@ -456,13 +456,15 @@ function repositoryId(options: Map<string, string | true>, workingDirectory?: st
   return repositorySelection(options, workingDirectory).id;
 }
 function success(value: unknown, json: boolean, positionals: readonly string[]): CliResult {
+  const version2 = value as { schemaVersion?: number; installation?: { state?: string } };
   const exitCode = (positionals[0] === 'runtime' && positionals[1] === 'evaluate' && (value as { outcome?: string }).outcome === 'BLOCK')
-    || (positionals[0] === 'status' && (value as { status?: string }).status !== 'ready')
+    || (positionals[0] === 'status' && (version2.schemaVersion === 2 ? version2.installation?.state !== 'ready' : (value as { status?: string }).status !== 'ready'))
     || (positionals[0] === 'hooks' && positionals[1] === 'verify' && (value as { status?: string }).status !== 'ready') ? 1 : 0;
   return json ? { exitCode, stdout: `${JSON.stringify(value)}\n`, stderr: '' } : { exitCode, stdout: `${humanOutput(value, positionals)}\n`, stderr: '' };
 }
 function humanOutput(value: unknown, positionals: readonly string[]): string {
   const [command, subcommand] = positionals;
+  if ((command === 'status' || command === 'status-global' || (command === 'analysis' && subcommand === 'report')) && (value as { schemaVersion?: number }).schemaVersion === 2) return formatVersion2Health(value as Version2HealthReport, command, subcommand);
   if (command === 'init') {
     const workspace = value as { kind?: string; id?: string; databasePath?: string };
     return workspace.kind === 'workspace' ? `Initialized workspace ${workspace.id}.` : `Initialized local experience store at ${workspace.databasePath}.`;
@@ -539,6 +541,23 @@ function humanOutput(value: unknown, positionals: readonly string[]): string {
     return `Refreshed ${countLabel(result.rules, 'runtime rule')} from trusted commit ${result.trustedCommit}.`;
   }
   return JSON.stringify(value);
+}
+interface Version2HealthReport {
+  readonly installation?: { readonly state: string };
+  readonly delivery?: { readonly state: string };
+  readonly dataQuality?: { readonly state: string; readonly denominator?: { readonly state: string } };
+  readonly analysis?: { readonly state: string; readonly result: string; readonly coverage: { readonly detectors: readonly unknown[] } };
+  readonly repositories?: readonly { readonly repository: { readonly id: string }; readonly installation: { readonly state: string }; readonly delivery: { readonly state: string }; readonly dataQuality: { readonly state: string }; readonly analysis: { readonly state: string; readonly result: string } }[];
+}
+function formatVersion2Health(report: Version2HealthReport, command: string | undefined, subcommand: string | undefined): string {
+  if (command === 'analysis' && subcommand === 'report') {
+    const analysis = report.analysis!;
+    return [`Analysis: ${analysis.state}`, `Result: ${analysis.result}`, `Coverage: ${analysis.coverage.detectors.length}`].join('\n');
+  }
+  if (command === 'status-global') {
+    return [`Installation: ${report.installation?.state ?? 'unknown'}`, ...(report.repositories ?? []).map(({ repository, installation, delivery, dataQuality, analysis }) => `${repository.id}: installation=${installation.state}; delivery=${delivery.state}; dataQuality=${dataQuality.state}; analysis=${analysis.state}/${analysis.result}`)].join('\n');
+  }
+  return [`Installation: ${report.installation!.state}`, `Delivery: ${report.delivery!.state}`, `Data quality: ${report.dataQuality!.state}`, `Analysis: ${report.analysis!.state}`, `Analysis result: ${report.analysis!.result}`, `Coverage: ${report.analysis!.coverage.detectors.length}`].join('\n');
 }
 interface KnowledgeRecord { readonly id: string; readonly state: string; readonly statement: string; readonly evidenceIds: readonly string[]; readonly authoritative?: boolean; }
 function formatRecords(records: readonly { session: { id: string; source: string; startedAt: string; endedAt?: string }; events: readonly { phase: string; occurredAt: string; summary: string; outcome?: string }[] }[]): string {

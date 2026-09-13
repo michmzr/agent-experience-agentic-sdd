@@ -16,7 +16,6 @@ import { validateImport } from '../domain/validation.js';
 import { defaultDatabasePath } from '../storage/database.js';
 import { ExperienceStore, type KnowledgeScope, type RetrievalFilter, type RetrievedKnowledgeEntry } from '../storage/experience-store.js';
 import { projectCapturedSessionEvidence } from '../evidence/capture-projection.js';
-import { reconstructSessionEvidence } from '../evidence/reconstructor.js';
 import { sourceEvidenceCapabilities } from '../evidence/capabilities.js';
 import { SessionEvidenceRepository } from '../evidence/repository.js';
 import { OperationalLearningRepository, type OperationalAnalysisQuality } from '../learning/repository.js';
@@ -298,21 +297,7 @@ export class ExperienceService {
   private evidenceQuality(repositoryId: string) {
     if (!existsSync(this.databasePath)) return Object.freeze({ operations: 0, linked: 0, unknownTotal: 0, unknown: {}, firstObservedAt: undefined, lastObservedAt: undefined });
     const store = this.openStore();
-    try {
-      const records = store.listRepositoryRecords(repositoryId);
-      let operations = 0; let linked = 0; const unknown: Record<string, number> = {}; const times: string[] = [];
-      for (const record of records) {
-        const report = reconstructSessionEvidence(projectCapturedSessionEvidence(record));
-        for (const operation of report.operations) {
-          operations += 1; times.push(operation.startedAt);
-          if (operation.endedAt !== undefined) times.push(operation.endedAt);
-          if (operation.resultEvidenceId !== undefined) linked += 1;
-          if (operation.result?.unknownReason !== undefined) unknown[operation.result.unknownReason] = (unknown[operation.result.unknownReason] ?? 0) + 1;
-        }
-      }
-      times.sort();
-      return Object.freeze({ operations, linked, unknownTotal: Object.values(unknown).reduce((total, value) => total + value, 0), unknown: Object.freeze(unknown), firstObservedAt: times[0], lastObservedAt: times.at(-1) });
-    } finally { store.close(); }
+    try { return store.repositoryQuality(repositoryId); } finally { store.close(); }
   }
 
   private analysisQuality(repositoryId: string) {
@@ -384,36 +369,26 @@ function configuredWorkspaceMatches(root: string | undefined, id: string): boole
 
 function reportAnalysisQuality(quality: OperationalAnalysisQuality) {
   const streams = quality.streams;
-  const desiredThrough = streams.reduce((total, stream) => total + stream.desiredThrough, 0);
-  const completedThrough = streams.reduce((total, stream) => total + stream.completedThrough, 0);
-  const backlog = Math.max(0, desiredThrough - completedThrough);
-  const retries = quality.runs.reduce((total, run) => total + Math.max(0, run.attempts - 1), 0);
-  const completedStreams = streams.filter(({ state }) => state === 'completed');
-  const coverageComplete = streams.length > 0 && completedStreams.every((stream) => {
-    const ranges = quality.runs.filter(({ state, streamId }) => state === 'completed' && streamId === stream.id);
-    return ranges.length > 0 && ranges.every((run) => quality.coverage.some(({ jobId, detector, status }) => jobId === run.id && detector === run.detectorVersion && status === 'completed'));
-  });
-  const state = streams.length === 0 ? 'not-run'
-    : streams.some(({ state }) => state === 'quarantined-input') ? 'quarantined'
-      : streams.some(({ state }) => state === 'running') ? 'running'
-        : streams.some(({ state }) => state === 'retryable-failure') || quality.coverage.some(({ status }) => status === 'failed') ? 'failed'
-          : streams.some(({ state }) => state === 'pending') ? 'pending'
-            : !coverageComplete || quality.coverage.some(({ status }) => status === 'incomplete') ? 'incomplete'
+  const backlog = Math.max(0, streams.desiredThrough - streams.completedThrough);
+  const coverageComplete = streams.total > 0 && streams.completed > 0 && quality.coverage.uncoveredCompletedRanges === 0;
+  const state = streams.total === 0 ? 'not-run'
+    : streams.quarantined > 0 ? 'quarantined'
+      : streams.running > 0 ? 'running'
+        : streams.failed > 0 || quality.coverage.detectors.some(({ status }) => status === 'failed') ? 'failed'
+          : streams.pending > 0 ? 'pending'
+            : !coverageComplete || quality.coverage.detectors.some(({ status }) => status === 'incomplete') ? 'incomplete'
               : 'completed';
   const completed = state === 'completed';
-  const range = quality.runs.length === 0
-    ? { from: 0, through: 0 }
-    : { from: Math.min(...quality.runs.map(({ inputFrom }) => inputFrom)), through: Math.max(...quality.runs.map(({ inputThrough }) => inputThrough)) };
   return Object.freeze({
     state,
-    detectorVersions: Object.freeze([...new Set(streams.map(({ detectorVersion }) => detectorVersion))].sort()),
-    desiredThrough,
-    completedThrough,
+    detectorVersions: quality.detectorVersions,
+    desiredThrough: streams.desiredThrough,
+    completedThrough: streams.completedThrough,
     backlog,
-    range: Object.freeze(range),
-    retries,
+    range: Object.freeze({ from: quality.runs.firstInput, through: quality.runs.lastInput }),
+    retries: quality.runs.retries,
     cost: quality.cost,
-    coverage: Object.freeze({ required: true as const, detectors: Object.freeze(quality.coverage.map(({ jobId: _jobId, detector, status, examinedEvents, findings }) => Object.freeze({ detector, status, examinedEvents, findings }))) }),
+    coverage: Object.freeze({ required: true as const, detectors: quality.coverage.detectors }),
     result: completed && coverageComplete ? (quality.findings > 0 ? 'findings' as const : 'no-findings' as const) : 'unavailable' as const
   });
 }

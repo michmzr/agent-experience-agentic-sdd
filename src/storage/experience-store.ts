@@ -202,6 +202,14 @@ export interface RepositoryStatistics {
   readonly sources: Readonly<Record<Session['source'], number>>;
   readonly phases: Readonly<Record<CapturedEventRecord['phase'], number>>;
 }
+export interface RepositoryQuality {
+  readonly operations: number;
+  readonly linked: number;
+  readonly unknownTotal: number;
+  readonly unknown: Readonly<Record<string, number>>;
+  readonly firstObservedAt?: string;
+  readonly lastObservedAt?: string;
+}
 
 export interface RetrievalFilter {
   readonly scope?: KnowledgeScope;
@@ -488,6 +496,27 @@ export class ExperienceStore {
     const sources = { codex: 0, cursor: 0, 'claude-code': 0 }; for (const row of sourceRows) sources[row.source] = row.count;
     const phases = { 'pre-intent': 0, 'pre-action': 0, 'post-result': 0 }; for (const row of phaseRows) phases[row.phase] = row.count;
     return Object.freeze({ sessions, events, knowledge, ...(bounds.first ? { firstRecordedAt: bounds.first } : {}), ...(bounds.last ? { lastRecordedAt: bounds.last } : {}), sources: Object.freeze(sources), phases: Object.freeze(phases) });
+  }
+
+  repositoryQuality(repositoryId: string): RepositoryQuality {
+    const row = this.database.prepare(`WITH requests AS (
+      SELECT ce.source, ce.source_event_id, e.occurred_at
+      FROM capture_events ce JOIN events e ON e.id = ce.event_id JOIN sessions s ON s.id = e.session_id
+      WHERE s.repository_id = ? AND ce.phase = 'pre-action'
+    ), matched AS (
+      SELECT r.source_event_id, p.exit_status, p.occurred_at
+      FROM requests r LEFT JOIN capture_events pc ON pc.source = r.source AND pc.related_event_id = r.source_event_id AND pc.phase = 'post-result'
+      LEFT JOIN events p ON p.id = pc.event_id
+    ) SELECT COUNT(*) AS operations,
+      SUM(CASE WHEN last_at IS NOT NULL THEN 1 ELSE 0 END) AS linked,
+      SUM(CASE WHEN last_at IS NULL THEN 1 ELSE 0 END) AS missing_results,
+      SUM(CASE WHEN last_at IS NOT NULL AND exit_status IS NULL THEN 1 ELSE 0 END) AS source_field_absent,
+      MIN(first_at) AS first_at, MAX(last_at) AS last_at
+      FROM (SELECT r.source_event_id, r.occurred_at AS first_at, m.occurred_at AS last_at, m.exit_status FROM requests r LEFT JOIN matched m ON m.source_event_id = r.source_event_id)`).get(repositoryId) as { operations: number; linked: number | null; missing_results: number | null; source_field_absent: number | null; first_at: string | null; last_at: string | null };
+    const unknown: Record<string, number> = {};
+    if ((row.missing_results ?? 0) > 0) unknown['result-not-delivered'] = row.missing_results!;
+    if ((row.source_field_absent ?? 0) > 0) unknown['source-field-absent'] = row.source_field_absent!;
+    return Object.freeze({ operations: row.operations, linked: row.linked ?? 0, unknownTotal: Object.values(unknown).reduce((total, count) => total + count, 0), unknown: Object.freeze(unknown), ...(row.first_at === null ? {} : { firstObservedAt: row.first_at, lastObservedAt: row.last_at ?? row.first_at }) });
   }
 
   loadSession(id: SessionId): Session | undefined {
