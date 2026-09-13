@@ -29,6 +29,39 @@ test('coalesces an equivalent job and persists candidates across restart', () =>
   reopened.close();
 });
 
+test('persists typed evidence before its dependent episode across restart', () => {
+  const databasePath = path();
+  const repository = new OperationalLearningRepository(databasePath);
+  const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const claimed = repository.claim();
+  repository.saveResult(claimed!.id, {
+    episodeEvidence: [
+      { id: 'closure-1', kind: 'task-transition', state: 'closed', decisionKey: 'issue-9', scopeKey: 'repository', evidenceIds: ['capture-1'] }
+    ],
+    episodes: [{ id: 'gap-1', kind: 'verification-gap', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm6-deterministic@1', state: 'unresolved', evidenceEventIds: ['closure-1'], closureEvidenceId: 'closure-1', criterionState: 'unknown' }],
+    findings: [], candidates: []
+  }, claimed!.leaseToken);
+  repository.close();
+
+  const reopened = new OperationalLearningRepository(databasePath);
+  const report = reopened.report('repo-1');
+  assert.deepEqual(report.episodeEvidence.map(({ id, kind }) => ({ id, kind })), [{ id: 'closure-1', kind: 'task-transition' }]);
+  assert.equal(report.episodes[0] !== undefined && 'kind' in report.episodes[0] ? report.episodes[0].kind : undefined, 'verification-gap');
+  reopened.close();
+});
+
+test('rejects a typed episode whose evidence was not persisted for the job scope', () => {
+  const repository = new OperationalLearningRepository(path());
+  const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-evidence', inputHighWater: 1 });
+  const claimed = repository.claim();
+  assert.throws(() => repository.saveResult(claimed!.id, {
+    episodeEvidence: [],
+    episodes: [{ id: 'gap-missing', kind: 'verification-gap', repositoryId: 'repo-1', sessionId: 'session-evidence', detector: 'm6-deterministic@1', state: 'unresolved', evidenceEventIds: ['missing-evidence'], closureEvidenceId: 'missing-evidence', criterionState: 'unknown' }],
+    findings: [], candidates: []
+  }, claimed!.leaseToken), /evidence.*job/i);
+  repository.close();
+});
+
 test('retains contradictory evidence and marks the candidate disputed', () => {
   const repository = new OperationalLearningRepository(path());
   const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 1 });
