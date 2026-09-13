@@ -49,6 +49,7 @@ export interface AnalysisWatchdogHost {
   readonly now: () => number;
   readonly delay: (delayMs: number) => Promise<void>;
   readonly spawnWorker: (dataDirectory: string, slot: AnalysisWorkerSlot) => AnalysisWorkerExecution;
+  readonly abortProcess: (cause: unknown) => never;
 }
 
 export interface AnalysisWatchdogResult {
@@ -177,40 +178,52 @@ export async function runAnalysisWorkerWatchdog(
 
   let completed = false;
   let exitCode = 1;
-  let releaseAfterStop = false;
-  void execution.completion.then((code) => {
-    exitCode = code;
-    completed = true;
-  }, () => {
-    exitCode = 1;
-    completed = true;
-  });
-  const startedAt = host.now();
-  const deadline = startedAt + WATCHDOG_EXECUTION_LIMIT_MS;
-  let nextHeartbeat = startedAt + WATCHDOG_HEARTBEAT_MS;
+  let result: AnalysisWatchdogResult | undefined;
+  let controlFailure: unknown;
+  let controlFailed = false;
   try {
+    void execution.completion.then((code) => {
+      exitCode = code;
+      completed = true;
+    }, () => {
+      exitCode = 1;
+      completed = true;
+    });
+    const startedAt = host.now();
+    const deadline = startedAt + WATCHDOG_EXECUTION_LIMIT_MS;
+    let nextHeartbeat = startedAt + WATCHDOG_HEARTBEAT_MS;
     while (!completed) {
       const now = host.now();
       if (now >= deadline) {
-        await execution.terminate();
-        releaseAfterStop = true;
-        return Object.freeze({ status: 'timed-out' });
+        result = Object.freeze({ status: 'timed-out' });
+        break;
       }
       if (now >= nextHeartbeat) {
         if (!repository.renewWorkerSlot({ ...slot, leaseMs: WORKER_SLOT_LEASE_MS })) {
-          await execution.terminate();
-          releaseAfterStop = true;
-          return Object.freeze({ status: 'lease-lost' });
+          result = Object.freeze({ status: 'lease-lost' });
+          break;
         }
         nextHeartbeat = now + WATCHDOG_HEARTBEAT_MS;
       }
       await host.delay(Math.max(1, Math.min(POLL_INTERVAL_MS, deadline - now, nextHeartbeat - now)));
     }
-    releaseAfterStop = true;
-    return Object.freeze({ status: 'completed', exitCode });
-  } finally {
-    if (releaseAfterStop) repository.releaseWorkerSlot(slot);
+    if (!result) result = Object.freeze({ status: 'completed', exitCode });
+  } catch (error) {
+    controlFailure = error;
+    controlFailed = true;
   }
+
+  if (!completed) {
+    try {
+      await execution.terminate();
+    } catch (error) {
+      host.abortProcess(error);
+      throw error;
+    }
+  }
+  repository.releaseWorkerSlot(slot);
+  if (controlFailed) throw controlFailure;
+  return result!;
 }
 
 export function createProductionAnalysisWatchdogHost(entrypoint = process.argv[1]): AnalysisWatchdogHost {
@@ -218,6 +231,7 @@ export function createProductionAnalysisWatchdogHost(entrypoint = process.argv[1
   return Object.freeze({
     now: () => Date.now(),
     delay: (delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)),
+    abortProcess: () => process.exit(1),
     spawnWorker: (dataDirectory: string, slot: AnalysisWorkerSlot) => {
       const worker = new NodeWorker(entrypoint, { argv: ['analysis', 'worker-child', '--data-dir', dataDirectory,
         '--worker-slot-id', slot.slotId, '--worker-slot-owner', slot.ownerId,

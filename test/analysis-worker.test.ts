@@ -432,7 +432,8 @@ test('watchdog fences a blocked analysis across takeover and terminates before r
         order.push('terminate');
         return 1;
       }
-    })
+    }),
+    abortProcess: (cause) => { throw cause; }
   });
 
   millis += 10_000;
@@ -451,6 +452,138 @@ test('watchdog fences a blocked analysis across takeover and terminates before r
   assert.equal(repository.releaseWorkerSlot(slot), false, 'a stale slot token cannot release its replacement');
   repository.releaseWorkerSlot(replacement!);
   repository.close();
+});
+
+test('watchdog stops the Worker before releasing its slot when heartbeat renewal throws', async () => {
+  let millis = origin;
+  const slot: AnalysisWorkerSlot = Object.freeze({ slotId: 'slot', ownerId: 'owner', attempt: 1,
+    leaseExpiresAt: new Date(origin + 45_000).toISOString(), jobId: null });
+  const order: string[] = [];
+  let renewals = 0;
+
+  await assert.rejects(runAnalysisWorkerWatchdog('/data', slot, {
+    renewWorkerSlot: () => {
+      renewals += 1;
+      if (renewals === 2) throw new Error('slot renewal failed');
+      return true;
+    },
+    releaseWorkerSlot: () => {
+      order.push('release');
+      return true;
+    }
+  }, {
+    now: () => millis,
+    delay: async (delayMs) => { millis += delayMs; },
+    spawnWorker: () => ({
+      completion: new Promise<number>(() => {}),
+      terminate: async () => {
+        order.push('terminate');
+        return 1;
+      }
+    }),
+    abortProcess: (cause) => { throw cause; }
+  }), /slot renewal failed/);
+
+  assert.deepEqual(order, ['terminate', 'release']);
+});
+
+test('watchdog fails closed without releasing the slot when Worker termination rejects', async () => {
+  let millis = origin;
+  const slot: AnalysisWorkerSlot = Object.freeze({ slotId: 'slot', ownerId: 'owner', attempt: 1,
+    leaseExpiresAt: new Date(origin + 45_000).toISOString(), jobId: null });
+  const order: string[] = [];
+  const abortError = new Error('watchdog aborted');
+
+  await assert.rejects(runAnalysisWorkerWatchdog('/data', slot, {
+    renewWorkerSlot: () => millis < origin + 5_000,
+    releaseWorkerSlot: () => {
+      order.push('release');
+      return true;
+    }
+  }, {
+    now: () => millis,
+    delay: async (delayMs) => { millis += delayMs; },
+    spawnWorker: () => ({
+      completion: new Promise<number>(() => {}),
+      terminate: async () => {
+        order.push('terminate');
+        throw new Error('termination unconfirmed');
+      }
+    }),
+    abortProcess: (cause) => {
+      assert.match(String(cause), /termination unconfirmed/);
+      order.push('abort');
+      throw abortError;
+    }
+  }), abortError);
+
+  assert.deepEqual(order, ['terminate', 'abort']);
+});
+
+test('watchdog keeps its slot until asynchronous Worker termination is confirmed', async () => {
+  let millis = origin;
+  const slot: AnalysisWorkerSlot = Object.freeze({ slotId: 'slot', ownerId: 'owner', attempt: 1,
+    leaseExpiresAt: new Date(origin + 45_000).toISOString(), jobId: null });
+  let releaseCalls = 0;
+  let terminationStarted = false;
+  let confirmTermination!: () => void;
+  const termination = new Promise<void>((resolve) => { confirmTermination = resolve; });
+
+  const watchdog = runAnalysisWorkerWatchdog('/data', slot, {
+    renewWorkerSlot: () => millis < origin + 5_000,
+    releaseWorkerSlot: () => {
+      releaseCalls += 1;
+      return true;
+    }
+  }, {
+    now: () => millis,
+    delay: async (delayMs) => {
+      millis += delayMs;
+      await nextTurn();
+    },
+    spawnWorker: () => ({
+      completion: new Promise<number>(() => {}),
+      terminate: async () => {
+        terminationStarted = true;
+        await termination;
+        return 1;
+      }
+    }),
+    abortProcess: (cause) => { throw cause; }
+  });
+
+  await waitUntil(() => terminationStarted);
+  assert.equal(releaseCalls, 0);
+  confirmTermination();
+  assert.deepEqual(await watchdog, { status: 'lease-lost' });
+  assert.equal(releaseCalls, 1);
+});
+
+test('watchdog stops and releases the Worker when its control delay rejects', async () => {
+  const slot: AnalysisWorkerSlot = Object.freeze({ slotId: 'slot', ownerId: 'owner', attempt: 1,
+    leaseExpiresAt: new Date(origin + 45_000).toISOString(), jobId: null });
+  const order: string[] = [];
+
+  await assert.rejects(runAnalysisWorkerWatchdog('/data', slot, {
+    renewWorkerSlot: () => true,
+    releaseWorkerSlot: () => {
+      order.push('release');
+      return true;
+    }
+  }, {
+    now: () => origin,
+    delay: async () => { throw new Error('control delay failed'); },
+    spawnWorker: () => ({
+      completion: new Promise<number>(() => {}),
+      terminate: async () => {
+        order.push('terminate');
+        return 1;
+      }
+    }),
+    abortProcess: (cause) => { throw cause; }
+  }), /control delay failed/);
+
+  assert.deepEqual(order, ['terminate', 'release']);
 });
 
 test('production watchdog runs the analysis command inside a Worker thread', async () => {
