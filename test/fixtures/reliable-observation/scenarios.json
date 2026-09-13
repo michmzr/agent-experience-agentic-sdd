@@ -1,6 +1,11 @@
 {
   "version": 1,
   "synthetic": true,
+  "episodeEvidence": [
+    { "id": "fixture-closure", "kind": "task-transition", "state": "closed", "decisionKey": "fixture-task", "scopeKey": "repository", "evidenceIds": ["fixture-closure"] },
+    { "id": "fixture-approval-first", "kind": "agent-claim", "state": "succeeded", "decisionKey": "approval", "scopeKey": "first-scope", "evidenceIds": ["fixture-approval-first"] },
+    { "id": "fixture-approval-changed", "kind": "agent-claim", "state": "succeeded", "decisionKey": "approval", "scopeKey": "changed-scope", "evidenceIds": ["fixture-approval-changed"] }
+  ],
   "scenarios": [
     {
       "id": "resume-after-run-end",

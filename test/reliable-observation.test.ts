@@ -5,6 +5,7 @@ import test from 'node:test';
 
 import { containsCredentialMaterial } from '../src/privacy/structured-arguments.js';
 import { detectOperationalEpisodes } from '../src/learning/detectors.js';
+import { createEpisodeEvidence, type EpisodeEvidence } from '../src/learning/contracts.js';
 
 type ReceiptDisposition = 'accepted' | 'privacy-redaction' | 'unsupported';
 type EvidenceGap = 'result-not-delivered' | 'privacy-redacted' | 'verification-not-observed';
@@ -24,6 +25,7 @@ interface Scenario {
 interface Fixture {
   readonly version: 1;
   readonly synthetic: true;
+  readonly episodeEvidence: readonly EpisodeEvidence[];
   readonly scenarios: readonly Scenario[];
   readonly transports: readonly { id: string; scenarioId: string; kind: 'lifecycle' | 'operation' }[];
   readonly receipts: readonly { id: string; scenarioId: string; operationId: string; disposition: ReceiptDisposition }[];
@@ -76,11 +78,7 @@ test('passes closure and changed-scope approval evidence through the typed detec
   assert.ok(fixture.scenarios.some(({ id }) => id === 'scope-changed-approval'));
   const result = detectOperationalEpisodes({
     repositoryId: 'fixture-repository', sessionId: 'fixture-session', events: [], conventions: [],
-    episodeEvidence: [
-      { id: 'fixture-closure', kind: 'task-transition', state: 'closed', decisionKey: 'fixture-task', scopeKey: 'repository', evidenceIds: ['fixture-closure'] },
-      { id: 'fixture-approval-first', kind: 'agent-claim', state: 'succeeded', decisionKey: 'approval', scopeKey: 'first-scope', evidenceIds: ['fixture-approval-first'] },
-      { id: 'fixture-approval-changed', kind: 'agent-claim', state: 'succeeded', decisionKey: 'approval', scopeKey: 'changed-scope', evidenceIds: ['fixture-approval-changed'] }
-    ]
+    episodeEvidence: fixture.episodeEvidence
   });
   assert.equal(result.episodes.some(({ kind }) => kind === 'verification-gap'), true);
   assert.equal(result.episodes.some(({ kind }) => kind === 'repeated-acceptance'), false);
@@ -173,11 +171,12 @@ function captureError(callback: () => void): unknown {
 function parseFixture(value: unknown): Fixture {
   assertObject(value, 'fixture');
   rejectUnsafeFixtureData(value);
-  assertClosedKeys(value, ['version', 'synthetic', 'scenarios', 'transports', 'receipts', 'results', 'analysis', 'findings', 'abstentions', 'expectedQuality'], 'fixture');
+  assertClosedKeys(value, ['version', 'synthetic', 'episodeEvidence', 'scenarios', 'transports', 'receipts', 'results', 'analysis', 'findings', 'abstentions', 'expectedQuality'], 'fixture');
   assert.equal(value.version, 1, 'fixture.version');
   assert.equal(value.synthetic, true, 'fixture.synthetic');
-  for (const key of ['scenarios', 'transports', 'receipts', 'results', 'analysis', 'findings', 'abstentions'] as const) assertArray(value[key], `fixture.${key}`);
+  for (const key of ['episodeEvidence', 'scenarios', 'transports', 'receipts', 'results', 'analysis', 'findings', 'abstentions'] as const) assertArray(value[key], `fixture.${key}`);
   assertObject(value.expectedQuality, 'fixture.expectedQuality');
+  const episodeEvidence = (value.episodeEvidence as unknown[]).map((record) => createEpisodeEvidence(record as EpisodeEvidence));
 
   const scenarioIds = new Set<string>();
   const expectedTransportIds = new Map<string, readonly string[]>();
@@ -221,7 +220,7 @@ function parseFixture(value: unknown): Fixture {
   validateExpectedEvidenceGaps(expectedEvidenceGaps, results.evidenceGaps, abstentionEvidenceGaps);
   validateExpectedQuality(value.expectedQuality);
 
-  return value as unknown as Fixture;
+  return { ...value, episodeEvidence } as unknown as Fixture;
 }
 
 function evaluateReliableObservationFixture(fixture: Fixture): QualityMeasure {
