@@ -334,6 +334,8 @@ Evidence: RED: `pnpm build && node --test dist/test/cli.test.js dist/test/reposi
 
 Review follow-up evidence: an initially failing regression showed that a completed stream without persisted detector coverage was reported as `completed` with `no-findings`. The report now requires completed coverage for every detector version before claiming `no-findings`; otherwise it returns `incomplete` and `unavailable`. Data quality now includes `admittedOperations`, a known denominator when retained source operations establish one, and required analysis coverage. Focused tests passed 19/19; the serial suite passed on 2026-09-13.
 
+Second review follow-up evidence: coverage is now keyed to its completed analysis job, so a covered second range cannot make an earlier uncovered range `no-findings`. Empty analysis in an absent database explicitly contains required empty coverage. Receipt accounting and admitted-operation counts are marked unavailable in repository reports until the receipt ledger has repository scope. Focused tests passed 20/20; the serial suite passed on 2026-09-13.
+
 ### Task 6: Preserve historical instruction and execution context for issue #8
 
 **Files:**

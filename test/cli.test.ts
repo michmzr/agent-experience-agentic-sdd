@@ -49,7 +49,7 @@ test('reports installation, delivery, data quality, and analysis independently i
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-v2-'));
   try {
     const initial = JSON.parse(runCli(['status', '--repository', process.cwd(), '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
-      schemaVersion: number; installation: { state: string }; delivery: { state: string }; dataQuality: { state: string; denominator: { state: string } }; analysis: { state: string; result: string };
+      schemaVersion: number; installation: { state: string }; delivery: { state: string }; dataQuality: { state: string; denominator: { state: string } }; analysis: { state: string; result: string; coverage: { required: boolean; detectors: unknown[] } };
     };
     assert.equal(initial.schemaVersion, 2);
     assert.equal(initial.installation.state, 'not-ready');
@@ -58,6 +58,7 @@ test('reports installation, delivery, data quality, and analysis independently i
     assert.equal(initial.dataQuality.denominator.state, 'unavailable');
     assert.equal(initial.analysis.state, 'not-run');
     assert.equal(initial.analysis.result, 'unavailable');
+    assert.deepEqual(initial.analysis.coverage, { required: true, detectors: [] });
 
     const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
     spool.admitWithReceipt({ kind: 'session-start', session: { source: 'codex', id: 'session-health' as never, startedAt: '2026-09-13T08:00:00.000Z', repositoryId: 'repo-health' as never } }, { source: 'codex', receivedAt: '2026-09-13T08:00:00.000Z' });
@@ -67,14 +68,16 @@ test('reports installation, delivery, data quality, and analysis independently i
     learning.close();
 
     const pending = JSON.parse(runCli(['status', '--repository-id', 'repo-health', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
-      delivery: { state: string }; dataQuality: { receipts: { accepted: number } }; analysis: { state: string; desiredThrough: number; completedThrough: number; result: string };
+      delivery: { state: string }; dataQuality: { admittedOperations: { state: string }; receipts: { accounting: string } }; analysis: { state: string; desiredThrough: number; completedThrough: number; result: string; coverage: { detectors: unknown[] } };
     };
     assert.equal(pending.delivery.state, 'backlogged');
-    assert.equal(pending.dataQuality.receipts.accepted, 1);
+    assert.deepEqual(pending.dataQuality.admittedOperations, { state: 'unavailable' });
+    assert.equal(pending.dataQuality.receipts.accounting, 'unavailable');
     assert.equal(pending.analysis.state, 'pending');
     assert.equal(pending.analysis.desiredThrough, 3);
     assert.equal(pending.analysis.completedThrough, 0);
     assert.equal(pending.analysis.result, 'unavailable');
+    assert.deepEqual(pending.analysis.coverage.detectors, []);
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 
@@ -99,10 +102,10 @@ test('reports unknown results and a completed no-findings analysis without leaki
     });
     store.close();
     const unknown = JSON.parse(runCli(['status', '--repository-id', repositoryId, '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
-      dataQuality: { state: string; admittedOperations: number; denominator: { state: string; count?: number }; results: { linked: number; unknown: Record<string, number> }; observedTimeRange: { first: string; last: string } }; analysis: { state: string };
+      dataQuality: { state: string; admittedOperations: { state: string }; denominator: { state: string; count?: number }; results: { linked: number; unknown: Record<string, number> }; observedTimeRange: { first: string; last: string } }; analysis: { state: string };
     };
     assert.equal(unknown.dataQuality.state, 'degraded');
-    assert.equal(unknown.dataQuality.admittedOperations, 0);
+    assert.deepEqual(unknown.dataQuality.admittedOperations, { state: 'unavailable' });
     assert.deepEqual(unknown.dataQuality.denominator, { state: 'known', count: 1 });
     assert.deepEqual(unknown.dataQuality.results, { linked: 0, unknown: { 'result-not-delivered': 1 } });
     assert.deepEqual(unknown.dataQuality.observedTimeRange, { first: '2026-09-13T09:00:00.000Z', last: '2026-09-13T09:00:00.000Z' });
@@ -126,6 +129,31 @@ test('reports unknown results and a completed no-findings analysis without leaki
     const global = runCli(['status-global', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout;
     assert.equal(global.includes(dataDir), false);
     assert.equal(global.includes('experience.sqlite'), false);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('requires coverage for every completed stream range and does not reuse repository receipts', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-ranges-'));
+  try {
+    const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+    spool.admitWithReceipt({ kind: 'session-start', session: { source: 'codex', id: 'session-a' as never, startedAt: '2026-09-13T10:00:00.000Z', repositoryId: 'repo-a' as never } }, { source: 'codex', receivedAt: '2026-09-13T10:00:00.000Z' });
+    spool.close();
+    const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    learning.enqueue({ repositoryId: 'repo-a', sessionId: 'session-a', inputHighWater: 1 });
+    const first = learning.claim('repo-a')!;
+    learning.saveResult(first.id, { episodes: [], findings: [], candidates: [] }, first.leaseToken);
+    learning.enqueue({ repositoryId: 'repo-a', sessionId: 'session-b', inputHighWater: 1 });
+    const second = learning.claim('repo-a')!;
+    learning.saveResult(second.id, { episodes: [], findings: [], candidates: [], coverage: [{ detector: 'm6-deterministic@1', status: 'completed', examinedEvents: 1, findings: 0 }] }, second.leaseToken);
+    learning.close();
+
+    const reportA = JSON.parse(runCli(['status', '--repository-id', 'repo-a', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as { dataQuality: { receipts: { accounting: string } }; analysis: { state: string; result: string } };
+    const reportB = JSON.parse(runCli(['status', '--repository-id', 'repo-b', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as { dataQuality: { receipts: { accounting: string }; admittedOperations: { state: string } } };
+    assert.equal(reportA.analysis.state, 'incomplete');
+    assert.equal(reportA.analysis.result, 'unavailable');
+    assert.equal(reportA.dataQuality.receipts.accounting, 'unavailable');
+    assert.equal(reportB.dataQuality.receipts.accounting, 'unavailable');
+    assert.deepEqual(reportB.dataQuality.admittedOperations, { state: 'unavailable' });
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 
