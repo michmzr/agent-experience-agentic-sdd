@@ -321,6 +321,51 @@ test('replay schedules durable analysis work after admission committed before ca
   }
 });
 
+test('one acknowledged record cannot wake a distinct analysis stream whose capture acknowledgement failed', () => {
+  const dataDir = dataDirectory();
+  const root = dataDirectory();
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const spoolPath = join(dataDir, 'capture-spool.sqlite');
+  const spool = new CaptureSpool(spoolPath);
+  let launches = 0;
+  try {
+    mkdirSync(join(root, '.ael'));
+    writeFileSync(join(root, '.ael', 'settings.json'), '{"version":1,"captureDeliveryDeadlineMs":100}\n');
+    spool.admit({ kind: 'session-start', session: { ...sessionStart().session, repositoryId: 'repo-1' as never } }, '2026-09-07T08:00:00.000Z');
+    const second = spool.admit({ kind: 'session-start', session: { ...sessionStart().session, id: 'session-2' as never,
+      repositoryId: 'repo-1' as never } }, '2026-09-07T08:00:00.001Z');
+    const database = new DatabaseSync(spoolPath);
+    database.exec(`CREATE TRIGGER fail_second_capture_ack BEFORE DELETE ON records
+      WHEN OLD.delivery_id = '${second.deliveryId}' BEGIN SELECT RAISE(ABORT, 'ack failed'); END;`);
+    database.close();
+
+    const learning = new OperationalLearningService(databasePath);
+    const first = drainCaptureSpool({ databasePath, projectRoot: root, now: () => '2026-09-07T08:00:01.000Z',
+      learningAdmission: learning, scheduleAnalysis() { launches += 1; } });
+    assert.equal(first.committed, 1);
+    assert.equal(first.pending, 1);
+    assert.equal(launches, 0, 'the acknowledged first stream must not wake the unacknowledged second stream');
+    const repository = new OperationalLearningRepository(databasePath);
+    try {
+      assert.equal(repository.jobsForStream('repo-1', 'session-1').length, 1);
+      assert.equal(repository.jobsForStream('repo-1', 'session-2').length, 1);
+    } finally { repository.close(); }
+
+    const repair = new DatabaseSync(spoolPath);
+    repair.exec('DROP TRIGGER fail_second_capture_ack');
+    repair.close();
+    const replay = drainCaptureSpool({ databasePath, projectRoot: root, now: () => '2026-09-07T08:00:02.000Z',
+      learningAdmission: learning, scheduleAnalysis() { launches += 1; } });
+    assert.equal(replay.committed, 2);
+    assert.equal(replay.pending, 0);
+    assert.equal(launches, 1);
+  } finally {
+    spool.close();
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('an empty drain wakes durable outstanding work but ignores completed-only analysis state', () => {
   for (const state of ['outstanding', 'completed'] as const) {
     const dataDir = dataDirectory();

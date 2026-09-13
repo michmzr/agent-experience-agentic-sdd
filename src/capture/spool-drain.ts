@@ -26,6 +26,7 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
   let store: ExperienceStore | undefined;
   let analysisWorkAdded = false;
   let captureAcknowledged = false;
+  const unacknowledgedAnalysisAdmissions = new Set<string>();
   try {
     const settings = loadProjectSettings(input.projectRoot ?? process.cwd());
     const automaticLearningEnabled = settings.automaticOperationalLearning !== false && input.learningAdmission !== undefined;
@@ -41,11 +42,13 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
         if (Date.parse(observedAt) > Date.parse(deadlineAt)) spool.recordDelayedDelivery(claimed.deliveryId, deadlineAt, observedAt);
         try {
           persistPassiveCapture(store, claimed.record);
-          const recordAddedAnalysisWork = admitCommittedSession(store, claimed.record,
+          const analysisAdmission = admitCommittedSession(store, claimed.record,
             automaticLearningEnabled ? input.learningAdmission : undefined);
+          if (analysisAdmission.admitted) unacknowledgedAnalysisAdmissions.add(claimed.deliveryId);
           spool.acknowledge(claimed.deliveryId, input.now());
+          unacknowledgedAnalysisAdmissions.delete(claimed.deliveryId);
           captureAcknowledged = true;
-          analysisWorkAdded ||= recordAddedAnalysisWork;
+          analysisWorkAdded ||= analysisAdmission.workAdded;
         } catch (error) {
           if (isRetryableCaptureError(error)) spool.retry(claimed.deliveryId, input.now());
           else if (error instanceof TypeError) spool.quarantine(claimed.deliveryId, 'CORRUPT', input.now());
@@ -59,7 +62,7 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
     const status = spool.status();
     const reachedWakeBoundary = captureAcknowledged || (status.pending === 0 && status.claimed === 0);
     const hasWakeIntent = analysisWorkAdded || (automaticLearningEnabled && hasOutstandingAnalysisWork(input.databasePath, input.now));
-    if (automaticLearningEnabled && reachedWakeBoundary && hasWakeIntent) {
+    if (automaticLearningEnabled && reachedWakeBoundary && unacknowledgedAnalysisAdmissions.size === 0 && hasWakeIntent) {
       scheduleAnalysis(input.databasePath, input.now, input.scheduleAnalysis ?? startAnalysisWorker);
     }
     return status;
@@ -70,13 +73,15 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
   }
 }
 
-function admitCommittedSession(store: ExperienceStore, record: Parameters<typeof persistPassiveCapture>[1], learningAdmission: LearningAdmission | undefined): boolean {
-  if (!learningAdmission) return false;
+interface AnalysisAdmissionResult { readonly admitted: boolean; readonly workAdded: boolean; }
+
+function admitCommittedSession(store: ExperienceStore, record: Parameters<typeof persistPassiveCapture>[1], learningAdmission: LearningAdmission | undefined): AnalysisAdmissionResult {
+  if (!learningAdmission) return { admitted: false, workAdded: false };
   const sessionId = record.kind === 'session-start' ? record.session.id : record.kind === 'session-end' ? record.sessionId : record.event.sessionId;
   const session = store.loadSession(sessionId);
-  if (!session?.repositoryId) return false;
-  try { return learningAdmission.enqueueCommittedSession(session.repositoryId, session.id); }
-  catch { return false; /* Analysis admission never affects capture delivery. */ }
+  if (!session?.repositoryId) return { admitted: false, workAdded: false };
+  try { return { admitted: true, workAdded: learningAdmission.enqueueCommittedSession(session.repositoryId, session.id) }; }
+  catch { return { admitted: false, workAdded: false }; /* Analysis admission never affects capture delivery. */ }
 }
 
 function hasOutstandingAnalysisWork(databasePath: string, now: () => string): boolean {
