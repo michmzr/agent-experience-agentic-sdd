@@ -21,7 +21,7 @@ test('coalesces an equivalent job and persists candidates across restart', () =>
     episodes: [{ id: 'episode-1', repositoryId: 'repo-1', sessionId: 'session-1', detector: 'm6-deterministic@1', state: 'solution-supported', evidenceEventIds: ['event-1'] }],
     findings: [],
     candidates: [{ id: 'candidate-1', episodeId: 'episode-1', kind: 'convention', state: 'candidate', statement: 'Use pnpm.', conditions: ['repository:repo-1'], procedure: ['Use pnpm.'], evidenceEventIds: ['event-1'], invalidationConditions: ['Instruction changes.'] }]
-  });
+  }, job!.leaseToken);
   repository.close();
 
   const reopened = new OperationalLearningRepository(databasePath);
@@ -36,7 +36,7 @@ test('retains contradictory evidence and marks the candidate disputed', () => {
   repository.saveResult(claimed!.id, {
     episodes: [{ id: 'episode-1', repositoryId: 'repo-1', sessionId: 'session-1', detector: 'm6-deterministic@1', state: 'solution-supported', evidenceEventIds: ['event-1'] }],
     findings: [], candidates: [{ id: 'candidate-1', episodeId: 'episode-1', kind: 'convention', state: 'candidate', statement: 'Use pnpm.', conditions: ['repository:repo-1'], procedure: ['Use pnpm.'], evidenceEventIds: ['event-1'], invalidationConditions: ['Instruction changes.'] }]
-  });
+  }, claimed!.leaseToken);
   repository.contradict('candidate-1', 'event-2');
   const report = repository.report('repo-1');
   assert.equal(report.candidates[0]?.state, 'disputed');
@@ -51,12 +51,12 @@ test('retries a bounded failed job and quarantines it after the fourth failure',
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const claimed = repository.claim();
     assert.equal(claimed?.state, 'running');
-    repository.retry(claimed!.id);
+    repository.retry(claimed!.id, 'execution-failure', claimed!.leaseToken);
     now = new Date(Date.parse(now) + 2 ** (attempt - 1) * 1_000).toISOString();
   }
   const fourth = repository.claim();
   assert.equal(fourth?.attempts, 4);
-  repository.retry(fourth!.id);
+  repository.retry(fourth!.id, 'execution-failure', fourth!.leaseToken);
   assert.equal(repository.jobById(fourth!.id)?.state, 'quarantined-input');
   assert.equal(repository.claim(), undefined);
   repository.close();
@@ -66,7 +66,7 @@ test('quarantines invalid input without retrying it', () => {
   const repository = new OperationalLearningRepository(path());
   const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-2', inputHighWater: 1 });
   const claimed = repository.claim();
-  repository.retry(claimed!.id, 'invalid-input');
+  repository.retry(claimed!.id, 'invalid-input', claimed!.leaseToken);
   assert.equal(repository.jobById(claimed!.id)?.state, 'quarantined-input');
   assert.equal(repository.jobById(claimed!.id)?.attempts, 1);
   repository.close();
@@ -76,7 +76,7 @@ test('retries a timed-out job as an execution failure', () => {
   const repository = new OperationalLearningRepository(path());
   const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-3', inputHighWater: 1 });
   const claimed = repository.claim();
-  repository.retry(claimed!.id, 'timeout');
+  repository.retry(claimed!.id, 'timeout', claimed!.leaseToken);
   assert.equal(repository.jobById(claimed!.id)?.state, 'retryable-failure');
   repository.close();
 });
@@ -88,12 +88,12 @@ test('persists deterministic bounded retry eligibility and completed cost counte
   try {
     repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-4', inputHighWater: 1 });
     const first = repository.claim();
-    repository.retry(first!.id);
+    repository.retry(first!.id, 'execution-failure', first!.leaseToken);
     assert.equal(repository.jobById(first!.id)?.nextEligibleAt, '2026-09-12T10:00:01.000Z');
     assert.equal(repository.claim(), undefined);
     now = '2026-09-12T10:00:01.000Z';
     const retry = repository.claim();
-    repository.saveResult(retry!.id, { episodes: [], findings: [], candidates: [], cost: 7 });
+    repository.saveResult(retry!.id, { episodes: [], findings: [], candidates: [], cost: 7 }, retry!.leaseToken);
     assert.deepEqual(repository.report('repo-1').cost, { completedRuns: 1, total: 7 });
   } finally { repository.close(); }
 });
@@ -136,7 +136,7 @@ test('merges legacy jobs with an existing completed stream without rerunning cov
   try {
     seeded.enqueue({ repositoryId: 'repo-1', sessionId: 'session-mixed', inputHighWater: 7 });
     const run = seeded.claim();
-    seeded.saveResult(run!.id, { episodes: [], findings: [], candidates: [] });
+    seeded.saveResult(run!.id, { episodes: [], findings: [], candidates: [] }, run!.leaseToken);
   } finally { seeded.close(); }
   const legacy = new DatabaseSync(databasePath);
   try {
@@ -152,4 +152,31 @@ test('merges legacy jobs with an existing completed stream without rerunning cov
     const claimed = migrated.claim();
     assert.deepEqual({ inputFrom: claimed?.inputFrom, inputThrough: claimed?.inputThrough }, { inputFrom: 8, inputThrough: 9 });
   } finally { migrated.close(); }
+});
+
+test('fences a stale worker after its lease is reclaimed', () => {
+  let now = '2026-09-13T10:00:00.000Z';
+  const repository = new OperationalLearningRepository(path(), () => now);
+  try {
+    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-fence', inputHighWater: 1 });
+    const first = repository.claim();
+    now = '2026-09-13T10:02:00.000Z';
+    const reclaimed = repository.claim();
+    assert.notEqual(first?.leaseToken, reclaimed?.leaseToken);
+    assert.throws(() => repository.saveResult(first!.id, { episodes: [], findings: [], candidates: [] }, first!.leaseToken), /lease is stale/);
+    repository.saveResult(reclaimed!.id, { episodes: [], findings: [], candidates: [] }, reclaimed!.leaseToken);
+  } finally { repository.close(); }
+});
+
+test('allows detector versions to retain separate runs at the same high-water', () => {
+  const repository = new OperationalLearningRepository(path());
+  try {
+    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-versioned', detectorVersion: 'detector@1', inputHighWater: 1 });
+    const v1 = repository.claim();
+    repository.saveResult(v1!.id, { episodes: [], findings: [], candidates: [] }, v1!.leaseToken);
+    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-versioned', detectorVersion: 'detector@2', inputHighWater: 1 });
+    const v2 = repository.claim();
+    assert.equal(v2?.detectorVersion, 'detector@2');
+    assert.notEqual(v1?.id, v2?.id);
+  } finally { repository.close(); }
 });

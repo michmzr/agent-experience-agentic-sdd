@@ -25,7 +25,7 @@ test('coalesces admission into one detector-version stream and keeps later input
     assert.equal(claimed?.inputFrom, 1);
     assert.equal(claimed?.inputThrough, 8);
     repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', detectorVersion: 'm6-deterministic@1', inputHighWater: 10 });
-    repository.saveResult(claimed!.id, { episodes: [], findings: [], candidates: [] });
+    repository.saveResult(claimed!.id, { episodes: [], findings: [], candidates: [] }, claimed!.leaseToken);
     assert.equal(repository.streamsFor('repo-1')[0]?.state, 'pending');
     assert.equal(repository.analysisRunsFor('repo-1')[0]?.inputThrough, 8);
   } finally { repository.close(); }
@@ -41,7 +41,7 @@ test('recovers a stale lease and never reruns an unchanged completed range', () 
     time = '2026-09-12T10:05:00.000Z';
     const recovered = repository.claim();
     assert.equal(recovered?.id, first?.id);
-    repository.saveResult(recovered!.id, { episodes: [], findings: [], candidates: [] });
+    repository.saveResult(recovered!.id, { episodes: [], findings: [], candidates: [] }, recovered!.leaseToken);
     repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', detectorVersion: 'm6-deterministic@1', inputHighWater: 5 });
     assert.equal(repository.claim(), undefined);
   } finally { repository.close(); }

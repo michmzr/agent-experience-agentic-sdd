@@ -272,6 +272,8 @@ Migration follow-up evidence: a pre-stream `operational_analysis_jobs` fixture w
 
 Mixed-deployment migration evidence: an existing completed stream through sequence 7 plus legacy pending jobs through 5 and 9 failed before merge-aware bounds were added (RED). Migration now preserves completion through 7, completes the covered legacy run without rerun, raises desired through 9, and retains only the 8–9 range as retryable work. Focused tests passed 32/32; `pnpm build && node --test --test-concurrency=1 dist/test/**/*.test.js` passed serially on 2026-09-13.
 
+Fencing follow-up evidence: stale analysis workers are rejected by a per-claim lease token after recovery; detector version is included in durable run uniqueness so a new detector can claim an identical high-water; drain completion is persisted and reset by a successor lock generation. Focused tests passed 34/34 and the serial suite passed on 2026-09-13.
+
 ### Task 5: Add explicit quality reporting for issue #7
 
 **Files:**

@@ -39,7 +39,7 @@ export class OperationalLearningService {
         const record = records.find(({ session }) => session.id === job.sessionId);
         const registration = store.listRepositories().find(({ id }) => id === job.repositoryId);
         if (!record || !registration) {
-          repository.retry(job.id, 'invalid-input');
+          repository.retry(job.id, 'invalid-input', job.leaseToken);
           return Object.freeze({ status: 'quarantined-input', jobId: job.id });
         }
         const startedAt = performance.now();
@@ -47,14 +47,14 @@ export class OperationalLearningService {
         try {
           const result = detectOperationalEpisodes({ repositoryId: job.repositoryId, sessionId: job.sessionId, events, conventions: readProjectToolConventions(registration.root) });
           if (performance.now() - startedAt > deadlineMs) {
-            repository.retry(job.id, 'timeout');
+            repository.retry(job.id, 'timeout', job.leaseToken);
             return Object.freeze({ status: retryState(repository, job.id), jobId: job.id });
           }
           const coverage = Object.freeze([coverageFor(events.length, job.inputThrough - job.inputFrom + 1, result.findings.length)]);
-          repository.saveResult(job.id, { ...result, coverage, inputDigest: `${job.inputFrom}:${job.inputThrough}:${events.map(({ id }) => id).join(',')}`, cost: events.length });
+          repository.saveResult(job.id, { ...result, coverage, inputDigest: `${job.inputFrom}:${job.inputThrough}:${events.map(({ id }) => id).join(',')}`, cost: events.length }, job.leaseToken);
           return Object.freeze({ status: 'completed', jobId: job.id });
         } catch {
-          repository.retry(job.id, 'execution-failure');
+          repository.retry(job.id, 'execution-failure', job.leaseToken);
           return Object.freeze({ status: retryState(repository, job.id), jobId: job.id });
         }
       } finally { store.close(); }

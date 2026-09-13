@@ -1,6 +1,5 @@
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { existsSync, rmSync, writeFileSync } from 'node:fs';
 
 import { ExperienceStore } from '../storage/experience-store.js';
 import { loadProjectSettings } from '../config/project-settings.js';
@@ -21,7 +20,6 @@ export interface DrainCaptureSpoolInput {
 
 export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolStatus {
   const spool = new CaptureSpool(join(dirname(input.databasePath), 'capture-spool.sqlite'));
-  const completionPath = workerCompletionPath(dirname(input.databasePath));
   const lockOwner = randomUUID();
   let ownsDrainLock = false;
   let store: ExperienceStore | undefined;
@@ -30,7 +28,6 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
     const lockNow = new Date().toISOString();
     if (!spool.tryAcquireDrainLock(lockOwner, lockNow, settings.captureDeliveryDeadlineMs + 1_000)) return spool.status();
     ownsDrainLock = true;
-    try { rmSync(completionPath, { force: true }); } catch { /* Completion reporting is best effort. */ }
     store = new ExperienceStore(input.databasePath);
     const idleDeadline = Date.now() + settings.captureDeliveryDeadlineMs;
     do {
@@ -60,9 +57,8 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
     return spool.status();
   } finally {
     try { store?.close(); } finally {
-      try { if (ownsDrainLock) spool.releaseDrainLock(lockOwner); } finally { spool.close(); }
+      try { if (ownsDrainLock) spool.completeDrain(lockOwner); } finally { spool.close(); }
     }
-    if (ownsDrainLock) try { writeFileSync(completionPath, 'complete\n', { mode: 0o600 }); } catch { /* No worker marker must affect capture. */ }
   }
 }
 
@@ -75,10 +71,9 @@ function admitCommittedSession(store: ExperienceStore, record: Parameters<typeof
 }
 
 export function waitForWorkerCompletion(dataDirectory: string): boolean {
-  return existsSync(workerCompletionPath(dataDirectory));
+  const spool = new CaptureSpool(join(dataDirectory, 'capture-spool.sqlite'));
+  try { return spool.isDrainComplete(); } finally { spool.close(); }
 }
-
-function workerCompletionPath(dataDirectory: string): string { return join(dataDirectory, 'capture-drain.complete'); }
 
 function isRetryableCaptureError(error: unknown): boolean {
   return error instanceof TypeError && /missing session|requires a new session record|existing related pre-action/i.test(error.message);

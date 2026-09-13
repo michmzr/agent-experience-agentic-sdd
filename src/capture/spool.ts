@@ -106,6 +106,7 @@ export class CaptureSpool {
         owner TEXT NOT NULL,
         lease_until TEXT NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS drain_completion (id INTEGER PRIMARY KEY CHECK (id = 1), generation INTEGER NOT NULL, state TEXT NOT NULL CHECK (state IN ('pending', 'complete')), owner TEXT) STRICT;
       CREATE TABLE IF NOT EXISTS receipt_secret (id INTEGER PRIMARY KEY CHECK (id = 1), secret BLOB NOT NULL) STRICT;
       CREATE TABLE IF NOT EXISTS capture_receipts (
         sequence INTEGER PRIMARY KEY, correlation_key TEXT NOT NULL, disposition TEXT NOT NULL CHECK (disposition IN ('accepted', 'duplicate', 'unsupported-tool', 'privacy-redaction', 'unsafe-normalization', 'malformed-envelope', 'admission-failure', 'delivery-retry', 'quarantine', 'legacy-unknown')),
@@ -114,6 +115,7 @@ export class CaptureSpool {
       CREATE TABLE IF NOT EXISTS receipt_accounting (id INTEGER PRIMARY KEY CHECK (id = 1), state TEXT NOT NULL CHECK (state IN ('available', 'unavailable'))) STRICT;
       INSERT OR IGNORE INTO counters (id, admitted, committed, quarantined, failed_admission) VALUES (1, 0, 0, 0, 0);
       INSERT OR IGNORE INTO receipt_accounting (id, state) VALUES (1, 'available');
+      INSERT OR IGNORE INTO drain_completion (id, generation, state) VALUES (1, 0, 'pending');
     `);
     ensureDiagnosticColumns(this.#database);
   }
@@ -351,6 +353,7 @@ export class CaptureSpool {
     try {
       this.#database.prepare('DELETE FROM drain_lock WHERE id = 1 AND lease_until <= ?').run(now);
       const result = this.#database.prepare('INSERT OR IGNORE INTO drain_lock (id, owner, lease_until) VALUES (1, ?, ?)').run(owner, leaseUntil);
+      if (result.changes === 1) this.#database.prepare("UPDATE drain_completion SET generation = generation + 1, state = 'pending', owner = ? WHERE id = 1").run(owner);
       this.#database.exec('COMMIT');
       return result.changes === 1;
     } catch (error) {
@@ -359,8 +362,17 @@ export class CaptureSpool {
     }
   }
 
+  completeDrain(owner: string): boolean {
+    this.#database.exec('BEGIN IMMEDIATE');
+    try { const released = this.#database.prepare('DELETE FROM drain_lock WHERE id = 1 AND owner = ?').run(owner); if (released.changes === 1) this.#database.prepare("UPDATE drain_completion SET state = 'complete' WHERE id = 1 AND owner = ?").run(owner); this.#database.exec('COMMIT'); return released.changes === 1; } catch (error) { rollback(this.#database); throw error; }
+  }
+
   releaseDrainLock(owner: string): void {
     this.#database.prepare('DELETE FROM drain_lock WHERE id = 1 AND owner = ?').run(owner);
+  }
+
+  isDrainComplete(): boolean {
+    return (this.#database.prepare("SELECT state FROM drain_completion WHERE id = 1").get() as { state: string }).state === 'complete';
   }
 
   close(): void {
