@@ -233,6 +233,54 @@ test('expired jobs recover once and old owners cannot acknowledge or retry', () 
   repository.close();
 });
 
+test('recovers one expired fenced attempt with observed work and never advances stream progress', () => {
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const databasePath = path();
+  const repository = new OperationalLearningRepository(databasePath, () => new Date(millis).toISOString());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 4 });
+  const job = repository.claim({ ownerId: 'worker-1', leaseMs: 10 })!;
+  millis += 10;
+
+  assert.equal(repository.recoverExpiredAttempt(job.id, {
+    ownerId: 'worker-1', attempt: 1, processedHighWater: 4,
+    metrics: { eventsLoaded: 4, findings: 2, elapsedMs: 9.5 }
+  }), true);
+  assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 0);
+  assert.equal(repository.jobById(job.id)?.state, 'retryable-failure');
+  assert.equal(repository.jobById(job.id)?.failureReason, 'lease-expired');
+  const database = new DatabaseSync(databasePath);
+  const attempt = database.prepare(`SELECT processed_high_water, events_loaded, findings, elapsed_ms, failure_category
+    FROM operational_analysis_attempts WHERE job_id = ? AND attempt = 1`).get(job.id)!;
+  assert.deepEqual({ ...attempt }, {
+    processed_high_water: 4, events_loaded: 4, findings: 2, elapsed_ms: 9.5, failure_category: 'lease-expired'
+  });
+  database.close();
+  repository.close();
+});
+
+test('specific expired-attempt recovery cannot mutate an active or transferred lease', () => {
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const databasePath = path();
+  const repository = new OperationalLearningRepository(databasePath, () => new Date(millis).toISOString());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 4 });
+  const first = repository.claim({ ownerId: 'worker-1', leaseMs: 10 })!;
+  const observed = { ownerId: 'worker-1', attempt: 1, processedHighWater: 4,
+    metrics: { eventsLoaded: 4, findings: 2, elapsedMs: 9.5 } };
+  assert.equal(repository.recoverExpiredAttempt(first.id, observed), false);
+  assert.equal(repository.jobById(first.id)?.leaseOwner, 'worker-1');
+
+  millis += 10;
+  assert.equal(repository.recoverExpiredJobs(), 1);
+  millis += 1_000;
+  assert.equal(repository.claim({ ownerId: 'worker-2', leaseMs: 60_000 })?.leaseOwner, 'worker-2');
+  assert.equal(repository.recoverExpiredAttempt(first.id, observed), false);
+  const current = repository.jobById(first.id);
+  assert.equal(current?.state, 'running');
+  assert.equal(current?.leaseOwner, 'worker-2');
+  assert.equal(current?.attempts, 2);
+  repository.close();
+});
+
 test('four expired leases quarantine without admitting an unresolved successor', () => {
   let millis = Date.parse('2026-09-13T10:00:00.000Z');
   const repository = new OperationalLearningRepository(path(), () => new Date(millis).toISOString());

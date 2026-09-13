@@ -180,13 +180,14 @@ export class OperationalLearningService {
         ...(metrics === undefined ? {} : { metrics })
       });
     } catch (error) {
-      const current = repository.jobById(job.id);
-      if (!current) throw precedingError ?? error;
-      const sameLease = current.state === 'running' && current.leaseOwner === ownerId && current.attempts === job.attempts;
-      if (sameLease) {
-        repository.recoverExpiredJobs();
-        const afterRecovery = repository.jobById(job.id);
-        if (afterRecovery?.state === 'running' && afterRecovery.leaseOwner === ownerId && afterRecovery.attempts === job.attempts) {
+      const recovered = repository.recoverExpiredAttempt(job.id, {
+        ownerId, attempt: job.attempts,
+        ...(processedHighWater === undefined ? {} : { processedHighWater }),
+        ...(metrics === undefined ? {} : { metrics })
+      });
+      if (!recovered) {
+        const current = repository.jobById(job.id);
+        if (!current || (current.state === 'running' && current.leaseOwner === ownerId && current.attempts === job.attempts)) {
           throw precedingError ?? error;
         }
       }

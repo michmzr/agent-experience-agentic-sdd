@@ -262,6 +262,16 @@ for (const point of ['failure', 'timeout', 'acknowledgement'] as const) {
     assert.equal(repository.jobsForStream('repo-1', 'session-1')[0]?.failureReason, 'lease-expired');
     assert.equal(repository.status().failureCounts['lease-expired'], 1);
     repository.close();
+    const database = new DatabaseSync(databasePath);
+    const attempt = database.prepare(`SELECT processed_high_water, events_loaded, findings, elapsed_ms
+      FROM operational_analysis_attempts WHERE attempt = 1`).get()!;
+    assert.deepEqual({ ...attempt }, {
+      processed_high_water: 4,
+      events_loaded: 4,
+      findings: point === 'failure' ? 0 : 1,
+      elapsed_ms: point === 'timeout' ? 15 : 5
+    });
+    database.close();
   });
 }
 

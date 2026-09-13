@@ -119,6 +119,11 @@ export interface AnalysisRetry extends AnalysisFence {
   readonly processedHighWater?: number;
   readonly metrics?: AnalysisMetrics;
 }
+export interface ExpiredAnalysisAttempt extends AnalysisFence {
+  /** Examined progress for this expired attempt only; it never acknowledges stream progress. */
+  readonly processedHighWater?: number;
+  readonly metrics?: AnalysisMetrics;
+}
 export interface AnalysisFilters { readonly repositoryId?: string; readonly sessionId?: string; readonly detectorSetVersion?: string; }
 export interface CoordinatorLease extends AnalysisFence { readonly leaseExpiresAt: string; }
 export type AnalysisDiagnostic = 'coordinator-launch-failed' | 'child-process-failed';
@@ -247,6 +252,19 @@ export class OperationalLearningRepository {
       const expired = this.database.prepare(`SELECT * FROM operational_analysis_jobs WHERE state = 'running' AND lease_expires_at <= ?`).all(timestamp);
       for (const row of expired) this.failAttempt(this.job(row), 'lease-expired', timestamp);
       return expired.length;
+    });
+  }
+
+  recoverExpiredAttempt(jobId: string, input: ExpiredAnalysisAttempt): boolean {
+    assertFence(input);
+    return this.transaction(() => {
+      const timestamp = this.now();
+      const row = this.database.prepare(`SELECT * FROM operational_analysis_jobs
+        WHERE id = ? AND state = 'running' AND lease_owner = ? AND attempts = ? AND lease_expires_at <= ?`)
+        .get(jobId, input.ownerId, input.attempt, timestamp);
+      if (!row) return false;
+      this.failAttempt(this.job(row), 'lease-expired', timestamp, input.processedHighWater, input.metrics);
+      return true;
     });
   }
 
