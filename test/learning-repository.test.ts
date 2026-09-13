@@ -285,6 +285,77 @@ function legacyDatabase(databasePath: string, states: readonly string[]): void {
   database.close();
 }
 
+test('legacy migration quarantines the fourth running attempt without permitting a fifth claim', () => {
+  const databasePath = path();
+  legacyDatabase(databasePath, ['pending', 'completed', 'running']);
+  const database = new DatabaseSync(databasePath);
+  database.prepare("UPDATE operational_analysis_jobs SET attempts = 4 WHERE id = 'legacy-8'").run();
+  database.close();
+  const now = () => '2026-09-13T10:00:00.000Z';
+  for (let reopen = 0; reopen < 2; reopen += 1) {
+    const repository = new OperationalLearningRepository(databasePath, now);
+    const outstanding = repository.jobsForStream('repo-1', 'session-1').find(({ state }) => state !== 'completed')!;
+    assert.equal(repository.claim({ ownerId: 'owner', leaseMs: 60_000 }), undefined, 'a migrated fourth attempt must never be claimed again');
+    assert.equal(outstanding.state, 'quarantined-input');
+    assert.equal(outstanding.attempts, 4);
+    assert.equal(outstanding.failureReason, 'lease-expired');
+    assert.equal(outstanding.retryAfter, null);
+    assert.equal(repository.claimableCount(), 0);
+    repository.close();
+  }
+});
+
+test('legacy running recovery preserves deterministic retry eligibility below four attempts', () => {
+  for (const attempt of [1, 2, 3]) {
+    const databasePath = path();
+    legacyDatabase(databasePath, ['pending', 'completed', 'running']);
+    const database = new DatabaseSync(databasePath);
+    database.prepare("UPDATE operational_analysis_jobs SET attempts = 0 WHERE id = 'legacy-2'").run();
+    database.prepare("UPDATE operational_analysis_jobs SET attempts = ? WHERE id = 'legacy-8'").run(attempt);
+    database.close();
+    let millis = Date.parse('2026-09-13T10:00:00.000Z');
+    const repository = new OperationalLearningRepository(databasePath, () => new Date(millis).toISOString());
+    const outstanding = repository.jobsForStream('repo-1', 'session-1').find(({ state }) => state !== 'completed')!;
+    const delay = [1_000, 5_000, 30_000][attempt - 1]!;
+    assert.equal(outstanding.retryAfter, new Date(millis + delay).toISOString());
+    assert.equal(outstanding.failureReason, 'lease-expired');
+    assert.equal(repository.claim({ ownerId: 'owner', leaseMs: 60_000 }), undefined);
+    millis += delay;
+    assert.equal(repository.claim({ ownerId: 'owner', leaseMs: 60_000 })?.attempts, attempt + 1);
+    repository.close();
+  }
+});
+
+test('filtered status keeps the active running count global across repositories', () => {
+  const repository = new OperationalLearningRepository(path(), () => '2026-09-13T10:00:00.000Z');
+  for (const repositoryId of ['repo-1', 'repo-2']) {
+    repository.enqueue({ repositoryId, sessionId: 'session-1', inputHighWater: 4 });
+    repository.claim({ repositoryId, ownerId: 'owner', leaseMs: 60_000 });
+  }
+  const filtered = repository.status({ repositoryId: 'unmatched', sessionId: 'unmatched' });
+  assert.equal(filtered.activeRunningCount, 2);
+  assert.deepEqual(filtered.jobs, { pending: 0, running: 0, completed: 0, 'retryable-failure': 0, 'quarantined-input': 0 });
+  assert.equal(filtered.totalAttempts, 0);
+  assert.equal(repository.status({ repositoryId: 'repo-1' }).activeRunningCount, 2);
+  repository.close();
+});
+
+test('public retry accepts lease-expired with owner fencing and normal backoff', () => {
+  const databasePath = path();
+  const repository = new OperationalLearningRepository(databasePath, () => '2026-09-13T10:00:00.000Z');
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 4 });
+  const job = repository.claim({ ownerId: 'owner', leaseMs: 60_000 })!;
+  repository.retry(job.id, { ownerId: 'owner', attempt: job.attempts, reason: 'lease-expired' });
+  assert.equal(repository.jobById(job.id)?.state, 'retryable-failure');
+  assert.equal(repository.jobById(job.id)?.retryAfter, '2026-09-13T10:00:01.000Z');
+  assert.equal(repository.jobById(job.id)?.failureReason, 'lease-expired');
+  assert.equal(repository.claimableCount(), 0);
+  assert.throws(() => repository.retry(job.id, { ownerId: 'owner', attempt: job.attempts, reason: 'lease-expired' }), /lease/i);
+  const database = new DatabaseSync(databasePath);
+  assert.equal(database.prepare('SELECT failure_category FROM operational_analysis_attempts WHERE job_id = ?').get(job.id)?.failure_category, 'lease-expired');
+  database.close(); repository.close();
+});
+
 test('migrates legacy progress and coverage once while coalescing subsequent admissions', () => {
   const databasePath = path();
   legacyDatabase(databasePath, ['pending', 'completed', 'pending']);
@@ -329,13 +400,16 @@ test('migrates legacy progress and coverage once while coalescing subsequent adm
 test('recovers legacy running rows into one retryable successor without replaying completed input', () => {
   const databasePath = path();
   legacyDatabase(databasePath, ['running', 'completed', 'retryable-failure']);
-  const repository = new OperationalLearningRepository(databasePath);
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const repository = new OperationalLearningRepository(databasePath, () => new Date(millis).toISOString());
   const active = repository.jobsForStream('repo-1', 'session-1').filter(({ state }) => state !== 'completed');
   assert.equal(active.length, 1);
   assert.equal(active[0]?.state, 'retryable-failure');
   assert.equal(active[0]?.inputHighWater, 8);
   assert.equal(active[0]?.inputLowWater, 4);
   assert.equal(active[0]?.processedHighWater, 4);
+  assert.equal(repository.claim(), undefined);
+  millis = Date.parse(active[0]!.retryAfter!);
   assert.equal(repository.claim()?.id, active[0]?.id);
   repository.close();
   const reopened = new OperationalLearningRepository(databasePath);
@@ -351,9 +425,12 @@ test('migrates unfinished empty legacy streams but does not repeat completed con
     database.prepare("DELETE FROM operational_analysis_jobs WHERE id != 'legacy-8'").run();
     database.prepare("UPDATE operational_analysis_jobs SET input_high_water = 0, state = ? WHERE id = 'legacy-8'").run(state);
     database.close();
-    const repository = new OperationalLearningRepository(databasePath);
+    let millis = Date.parse('2026-09-13T10:00:00.000Z');
+    const repository = new OperationalLearningRepository(databasePath, () => new Date(millis).toISOString());
     if (state === 'running') {
       assert.equal(repository.jobsForStream('repo-1', 'session-1')[0]?.state, 'retryable-failure');
+      assert.equal(repository.claim(), undefined);
+      millis = Date.parse(repository.jobsForStream('repo-1', 'session-1')[0]!.retryAfter!);
       assert.equal(repository.claim()?.inputHighWater, 0);
     } else {
       assert.equal(repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 0 }), undefined);

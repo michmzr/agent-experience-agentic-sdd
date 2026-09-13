@@ -113,7 +113,7 @@ export interface AnalysisAcknowledgement extends AnalysisFence {
   readonly result: LearningResult; readonly metrics: AnalysisMetrics;
 }
 export type AnalysisFailureReason = 'execution-failure' | 'timeout' | 'invalid-input' | 'lease-expired';
-export interface AnalysisRetry extends AnalysisFence { readonly reason: Exclude<AnalysisFailureReason, 'lease-expired'>; }
+export interface AnalysisRetry extends AnalysisFence { readonly reason: AnalysisFailureReason; }
 export interface AnalysisFilters { readonly repositoryId?: string; readonly sessionId?: string; readonly detectorSetVersion?: string; }
 export interface CoordinatorLease extends AnalysisFence { readonly leaseExpiresAt: string; }
 export type AnalysisDiagnostic = 'coordinator-launch-failed' | 'child-process-failed';
@@ -220,13 +220,13 @@ export class OperationalLearningRepository {
     });
   }
 
-  retry(jobId: string, input: AnalysisRetry | Exclude<AnalysisFailureReason, 'lease-expired'> = 'execution-failure'): void {
+  retry(jobId: string, input: AnalysisRetry | AnalysisFailureReason = 'execution-failure'): void {
     if (typeof input === 'string') {
       const claimed = this.legacyClaims.get(jobId);
       if (!claimed) throw new TypeError('Analysis lease is not owned by this repository.');
       return this.retry(jobId, { ownerId: this.legacyOwner, attempt: claimed.attempts, reason: input });
     }
-    if (!['execution-failure', 'timeout', 'invalid-input'].includes(input.reason)) throw new TypeError('Analysis failure category is invalid.');
+    if (!['execution-failure', 'timeout', 'invalid-input', 'lease-expired'].includes(input.reason)) throw new TypeError('Analysis failure category is invalid.');
     this.transaction(() => {
       const timestamp = this.now();
       const job = this.assertOwnedJob(jobId, input, timestamp);
@@ -405,13 +405,14 @@ export class OperationalLearningRepository {
       const filter = sqlFilters(filters);
       const rows = this.database.prepare(`SELECT j.* FROM operational_analysis_jobs j WHERE 1 = 1 ${filter.sql}`).all(...filter.values) as unknown as JobRow[];
       const jobs: Record<AnalysisJob['state'], number> = { pending: 0, running: 0, completed: 0, 'retryable-failure': 0, 'quarantined-input': 0 };
-      let oldest: string | null = null; let nextRetryAt: string | null = null; let activeRunningCount = 0;
+      let oldest: string | null = null; let nextRetryAt: string | null = null;
       for (const job of rows) {
         jobs[job.state] += 1;
         if (job.state !== 'completed' && (oldest === null || job.created_at < oldest)) oldest = job.created_at;
         if (job.state === 'retryable-failure' && job.retry_after !== null && (nextRetryAt === null || job.retry_after < nextRetryAt)) nextRetryAt = job.retry_after;
-        if (job.state === 'running' && job.lease_expires_at !== null && job.lease_expires_at > timestamp) activeRunningCount += 1;
       }
+      const { active_running_count: activeRunningCount } = this.database.prepare(`SELECT COUNT(*) AS active_running_count
+        FROM operational_analysis_jobs WHERE state = 'running' AND lease_expires_at > ?`).get(timestamp) as { active_running_count: number };
       const metrics = this.database.prepare(`SELECT COUNT(*) AS total_attempts,
         COALESCE(SUM(CASE WHEN j.outcome = 'retryable-failure' THEN 1 ELSE 0 END), 0) AS total_retries,
         COALESCE(SUM(j.events_loaded), 0) AS events_loaded,
@@ -523,7 +524,8 @@ export class OperationalLearningRepository {
       const stream = this.streamRow(legacy.repository_id, legacy.session_id, LEGACY_DETECTOR_SET_VERSION)!;
       const job = this.insertPendingJob({ ...stream, committed_high_water: legacy.outstanding_high_water }, legacy.updated_at);
       this.database.prepare('UPDATE operational_analysis_jobs SET state = ?, attempts = ? WHERE id = ?')
-        .run(legacy.was_running ? 'retryable-failure' : 'pending', legacy.attempts, job.id);
+        // The version-two migration recovers this unleased running row through the shared bounded retry path.
+        .run(legacy.was_running ? 'running' : 'pending', legacy.attempts, job.id);
     }
   }
 
