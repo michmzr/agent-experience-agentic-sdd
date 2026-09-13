@@ -164,6 +164,8 @@ test('fences a stale worker after its lease is reclaimed', () => {
     const reclaimed = repository.claim();
     assert.notEqual(first?.leaseToken, reclaimed?.leaseToken);
     assert.throws(() => repository.saveResult(first!.id, { episodes: [], findings: [], candidates: [] }, first!.leaseToken), /lease is stale/);
+    assert.throws(() => repository.retry(first!.id, 'execution-failure', first!.leaseToken), /lease is stale/);
+    assert.equal(repository.streamsFor('repo-1')[0]?.state, 'running');
     repository.saveResult(reclaimed!.id, { episodes: [], findings: [], candidates: [] }, reclaimed!.leaseToken);
   } finally { repository.close(); }
 });

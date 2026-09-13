@@ -274,6 +274,8 @@ Mixed-deployment migration evidence: an existing completed stream through sequen
 
 Fencing follow-up evidence: stale analysis workers are rejected by a per-claim lease token after recovery; detector version is included in durable run uniqueness so a new detector can claim an identical high-water; drain completion is persisted and reset by a successor lock generation. Focused tests passed 34/34 and the serial suite passed on 2026-09-13.
 
+Retry fencing follow-up evidence: retry now takes an immediate transaction, conditionally transitions exactly one lease-token-matched run, and changes stream state only after that transition. A stale retry after lease reclamation is rejected while the successor stream remains running. Focused and serial suites passed on 2026-09-13.
+
 ### Task 5: Add explicit quality reporting for issue #7
 
 **Files:**
