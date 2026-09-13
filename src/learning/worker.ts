@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
-import type { AnalysisDiagnostic, AnalysisStatus, CoordinatorLease } from './repository.js';
+import type { AnalysisDiagnostic, AnalysisStatus, AnalysisWorkerSlot, AnalysisWorkerSlotFence, CoordinatorLease } from './repository.js';
 import type { AnalysisWorkerSettings } from './worker-settings.js';
 
 const COORDINATOR_LEASE_MS = 10_000;
 const LEASE_RENEWAL_MS = COORDINATOR_LEASE_MS / 2;
+const WORKER_SLOT_LEASE_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
 
 export interface AnalysisWorkerRepository {
@@ -15,13 +16,17 @@ export interface AnalysisWorkerRepository {
   recoverExpiredJobs(): number;
   claimableCount(): number;
   status(): Pick<AnalysisStatus, 'activeRunningCount' | 'nextRetryAt'>;
+  reserveWorkerSlot(input: { readonly ownerId: string; readonly attempt: number; readonly leaseMs: number;
+    readonly maxProcesses: number }): AnalysisWorkerSlot | undefined;
+  renewWorkerSlots(input: { readonly ownerId: string; readonly attempt: number; readonly leaseMs: number }): number;
+  releaseWorkerSlot(input: AnalysisWorkerSlotFence): boolean;
   recordDiagnostic(code: AnalysisDiagnostic): void;
 }
 
 export interface AnalysisWorkerHost {
   readonly now: () => number;
   readonly delay: (delayMs: number) => Promise<void>;
-  readonly spawnChild: (dataDirectory: string) => Promise<number>;
+  readonly spawnChild: (dataDirectory: string, slot: AnalysisWorkerSlot) => Promise<number>;
 }
 
 export interface AnalysisCoordinatorResult {
@@ -52,6 +57,7 @@ export async function runAnalysisCoordinator(
         const renewed = repository.renewCoordinatorLease({ ownerId, attempt: lease.attempt, leaseMs: COORDINATOR_LEASE_MS });
         if (!renewed) return Object.freeze({ status: 'lease-held' });
         lease = renewed;
+        repository.renewWorkerSlots({ ownerId, attempt: lease.attempt, leaseMs: WORKER_SLOT_LEASE_MS });
         nextRenewal = now + LEASE_RENEWAL_MS;
       }
 
@@ -60,15 +66,15 @@ export async function runAnalysisCoordinator(
       const status = repository.status();
       if (claimable > 0 || status.activeRunningCount > 0 || active.size > 0) idleSince = now;
 
-      // Global running jobs include children inherited from an expired coordinator lease. Local active promises
-      // reserve additional slots while their job leases may not yet be visible. Counting both is deliberately
-      // conservative because a status snapshot cannot distinguish local jobs from predecessor jobs.
-      const occupied = status.activeRunningCount + active.size;
-      const launchCount = Math.min(Math.max(0, settings.maxProcesses - occupied), claimable);
+      const launchCount = Math.min(Math.max(0, settings.maxProcesses - active.size), claimable);
       for (let index = 0; index < launchCount; index += 1) {
+        const slot = repository.reserveWorkerSlot({ ownerId, attempt: lease.attempt,
+          leaseMs: WORKER_SLOT_LEASE_MS, maxProcesses: settings.maxProcesses });
+        if (!slot) break;
         let child: Promise<number>;
-        try { child = host.spawnChild(dataDirectory); }
+        try { child = host.spawnChild(dataDirectory, slot); }
         catch {
+          repository.releaseWorkerSlot(slot);
           repository.recordDiagnostic('coordinator-launch-failed');
           continue;
         }
@@ -78,6 +84,7 @@ export async function runAnalysisCoordinator(
         }, () => {
           repository.recordDiagnostic('coordinator-launch-failed');
         }).finally(() => {
+          repository.releaseWorkerSlot(slot);
           active.delete(tracked);
         });
         active.add(tracked);
@@ -102,9 +109,11 @@ export function createProductionAnalysisWorkerHost(entrypoint = process.argv[1])
   return Object.freeze({
     now: () => Date.now(),
     delay: (delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)),
-    spawnChild: (dataDirectory: string) => new Promise<number>((resolve, reject) => {
+    spawnChild: (dataDirectory: string, slot: AnalysisWorkerSlot) => new Promise<number>((resolve, reject) => {
       const child = spawn(process.execPath,
-        [entrypoint, 'analysis', 'worker-child', '--data-dir', dataDirectory], { stdio: 'ignore' });
+        [entrypoint, 'analysis', 'worker-child', '--data-dir', dataDirectory,
+          '--worker-slot-id', slot.slotId, '--worker-slot-owner', slot.ownerId,
+          '--worker-slot-attempt', String(slot.attempt)], { stdio: 'ignore' });
       let settled = false;
       child.once('error', (error) => {
         if (settled) return;

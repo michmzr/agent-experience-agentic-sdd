@@ -59,6 +59,16 @@ const leaseSchema = `
   );
 `;
 
+const workerSlotSchema = `
+  CREATE TABLE IF NOT EXISTS operational_analysis_worker_slots (
+    id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, owner_attempt INTEGER NOT NULL,
+    lease_expires_at TEXT NOT NULL, job_id TEXT REFERENCES operational_analysis_jobs(id),
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS operational_analysis_worker_slot_job
+    ON operational_analysis_worker_slots(job_id) WHERE job_id IS NOT NULL;
+`;
+
 const resultSchema = `
   CREATE TABLE IF NOT EXISTS operational_episodes (
     id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, session_id TEXT NOT NULL, detector TEXT NOT NULL, state TEXT NOT NULL,
@@ -105,8 +115,14 @@ interface JobRow {
 }
 export interface LearningResult { readonly episodes: readonly OperationalEpisode[]; readonly findings: readonly OperationalFinding[]; readonly candidates: readonly LearningCandidate[]; readonly coverage?: readonly AnalysisCoverage[]; }
 export interface LegacyLearningResult extends Omit<LearningResult, 'coverage'> { readonly coverage?: readonly LegacyAnalysisCoverage[]; }
-export interface AnalysisClaim { readonly ownerId: string; readonly leaseMs: number; readonly repositoryId?: string; }
 export interface AnalysisFence { readonly ownerId: string; readonly attempt: number; }
+export interface AnalysisWorkerSlotFence extends AnalysisFence { readonly slotId: string; }
+export interface AnalysisWorkerSlot extends AnalysisWorkerSlotFence { readonly leaseExpiresAt: string; readonly jobId: string | null; }
+export interface AnalysisWorkerSlotReservation extends AnalysisFence { readonly leaseMs: number; readonly maxProcesses: number; }
+export interface AnalysisClaim {
+  readonly ownerId: string; readonly leaseMs: number; readonly repositoryId?: string;
+  readonly workerSlot?: AnalysisWorkerSlotFence;
+}
 export interface AnalysisMetrics { readonly eventsLoaded: number; readonly findings?: number; readonly elapsedMs: number; }
 export interface AnalysisAcknowledgement extends AnalysisFence {
   readonly processedHighWater: number; readonly checkpoint: AnalysisStream['checkpoint'];
@@ -215,8 +231,15 @@ export class OperationalLearningRepository {
       return job;
     }
     assertLeaseInput(input);
+    if (input.workerSlot) assertWorkerSlotFence(input.workerSlot);
     return this.transaction(() => {
       const timestamp = this.now();
+      if (input.workerSlot) {
+        const slot = this.database.prepare(`SELECT 1 FROM operational_analysis_worker_slots
+          WHERE id = ? AND owner_id = ? AND owner_attempt = ? AND lease_expires_at > ? AND job_id IS NULL`)
+          .get(input.workerSlot.slotId, input.workerSlot.ownerId, input.workerSlot.attempt, timestamp);
+        if (!slot) throw new TypeError('Analysis worker slot is not current.');
+      }
       const row = this.claimableRows(timestamp, input.repositoryId === undefined ? {} : { repositoryId: input.repositoryId })[0];
       if (!row) return undefined;
       const stream = this.streamRow(row.repository_id, row.session_id, row.detector_set_version)!;
@@ -228,6 +251,12 @@ export class OperationalLearningRepository {
         input_low_water, requested_high_water, processed_high_water, outcome, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`)
         .run(claimed.id, claimed.attempts, claimed.repositoryId, claimed.sessionId, claimed.detectorSetVersion,
           claimed.inputLowWater, claimed.inputHighWater, claimed.inputLowWater, timestamp);
+      if (input.workerSlot) {
+        const linked = this.database.prepare(`UPDATE operational_analysis_worker_slots SET job_id = ?, updated_at = ?
+          WHERE id = ? AND owner_id = ? AND owner_attempt = ? AND lease_expires_at > ? AND job_id IS NULL`)
+          .run(claimed.id, timestamp, input.workerSlot.slotId, input.workerSlot.ownerId, input.workerSlot.attempt, timestamp);
+        if (linked.changes !== 1) throw new TypeError('Analysis worker slot is not current.');
+      }
       return claimed;
     });
   }
@@ -416,6 +445,53 @@ export class OperationalLearningRepository {
       .run(this.now(), input.ownerId, input.attempt, this.now()).changes !== 0);
   }
 
+  reserveWorkerSlot(input: AnalysisWorkerSlotReservation): AnalysisWorkerSlot | undefined {
+    assertFence(input); assertLeaseInput(input);
+    assertInteger(input.maxProcesses, 'Maximum analysis processes');
+    if (input.maxProcesses < 1 || input.maxProcesses > 16) throw new TypeError('Maximum analysis processes is invalid.');
+    return this.transaction(() => {
+      const timestamp = this.now();
+      const coordinator = this.database.prepare(`SELECT 1 FROM operational_analysis_coordinator
+        WHERE singleton = 1 AND owner_id = ? AND attempt = ? AND lease_expires_at > ?`)
+        .get(input.ownerId, input.attempt, timestamp);
+      if (!coordinator) return undefined;
+      this.database.prepare('DELETE FROM operational_analysis_worker_slots WHERE lease_expires_at <= ?').run(timestamp);
+      const occupied = this.database.prepare(`SELECT
+        (SELECT COUNT(*) FROM operational_analysis_worker_slots s WHERE s.lease_expires_at > ?) +
+        (SELECT COUNT(*) FROM operational_analysis_jobs j WHERE j.state = 'running' AND j.lease_expires_at > ?
+          AND NOT EXISTS (SELECT 1 FROM operational_analysis_worker_slots s
+            WHERE s.job_id = j.id AND s.lease_expires_at > ?)) AS count`).get(timestamp, timestamp, timestamp) as { count: number };
+      if (occupied.count >= input.maxProcesses) return undefined;
+      const slotId = randomUUID();
+      const leaseExpiresAt = expiresAt(timestamp, input.leaseMs);
+      this.database.prepare(`INSERT INTO operational_analysis_worker_slots
+        (id, owner_id, owner_attempt, lease_expires_at, job_id, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, ?)`)
+        .run(slotId, input.ownerId, input.attempt, leaseExpiresAt, timestamp, timestamp);
+      return Object.freeze({ slotId, ownerId: input.ownerId, attempt: input.attempt, leaseExpiresAt, jobId: null });
+    });
+  }
+
+  renewWorkerSlots(input: AnalysisFence & { readonly leaseMs: number }): number {
+    assertFence(input); assertLeaseInput(input);
+    return this.transaction(() => {
+      const timestamp = this.now();
+      const coordinator = this.database.prepare(`SELECT 1 FROM operational_analysis_coordinator
+        WHERE singleton = 1 AND owner_id = ? AND attempt = ? AND lease_expires_at > ?`)
+        .get(input.ownerId, input.attempt, timestamp);
+      if (!coordinator) return 0;
+      return Number(this.database.prepare(`UPDATE operational_analysis_worker_slots SET lease_expires_at = ?, updated_at = ?
+        WHERE owner_id = ? AND owner_attempt = ? AND lease_expires_at > ?`)
+        .run(expiresAt(timestamp, input.leaseMs), timestamp, input.ownerId, input.attempt, timestamp).changes);
+    });
+  }
+
+  releaseWorkerSlot(input: AnalysisWorkerSlotFence): boolean {
+    assertWorkerSlotFence(input);
+    return this.transaction(() => this.database.prepare(`DELETE FROM operational_analysis_worker_slots
+      WHERE id = ? AND owner_id = ? AND owner_attempt = ?`)
+      .run(input.slotId, input.ownerId, input.attempt).changes === 1);
+  }
+
   recordDiagnostic(code: AnalysisDiagnostic): void {
     if (!['coordinator-launch-failed', 'child-process-failed'].includes(code)) throw new TypeError('Analysis diagnostic code is invalid.');
     this.transaction(() => this.database.prepare(`INSERT INTO operational_analysis_diagnostics (code, occurrences, last_at) VALUES (?, 1, ?)
@@ -520,6 +596,7 @@ export class OperationalLearningRepository {
           this.failAttempt(job, 'lease-expired', timestamp);
         }
       }
+      this.database.exec(workerSlotSchema);
       this.database.exec('COMMIT');
     } catch (error) { this.database.exec('ROLLBACK'); throw error; }
     finally { this.database.exec('PRAGMA foreign_keys = ON'); }
@@ -713,6 +790,11 @@ function assertFence(input: AnalysisFence): void {
   assertStreamIdentity(input.ownerId, input.ownerId, input.ownerId);
   assertInteger(input.attempt, 'Attempt');
   if (input.attempt < 1) throw new TypeError('Attempt is invalid.');
+}
+
+function assertWorkerSlotFence(input: AnalysisWorkerSlotFence): void {
+  assertFence(input);
+  assertStreamIdentity(input.slotId, input.slotId, input.slotId);
 }
 
 function assertLeaseInput(input: AnalysisClaim): void {

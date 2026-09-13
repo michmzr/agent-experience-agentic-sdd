@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import type { AnalysisWorkerSlot, AnalysisWorkerSlotFence } from '../src/learning/repository.js';
 import type { AnalysisWorkerSettings } from '../src/learning/worker-settings.js';
 import {
   createProductionAnalysisWorkerHost,
@@ -18,6 +19,7 @@ class FakeRepository implements AnalysisWorkerRepository {
   pending = 0;
   running = 0;
   expired = 0;
+  linkedRunning = 0;
   retryAt: number | undefined;
   lease: { ownerId: string; attempt: number; leaseExpiresAt: string } | undefined;
   attempts = 0;
@@ -27,6 +29,8 @@ class FakeRepository implements AnalysisWorkerRepository {
   readonly acquisitionInputs: { ownerId: string; leaseMs: number }[] = [];
   readonly renewalInputs: { ownerId: string; attempt: number; leaseMs: number }[] = [];
   readonly diagnostics: string[] = [];
+  readonly slots = new Map<string, AnalysisWorkerSlot>();
+  private nextSlot = 1;
 
   constructor(private readonly currentTime: () => number) {}
 
@@ -65,6 +69,38 @@ class FakeRepository implements AnalysisWorkerRepository {
     return recovered;
   }
 
+  reserveWorkerSlot(input: { ownerId: string; attempt: number; leaseMs: number; maxProcesses: number }) {
+    for (const [slotId, slot] of this.slots) {
+      if (Date.parse(slot.leaseExpiresAt) <= this.currentTime()) this.slots.delete(slotId);
+    }
+    if (!this.lease || this.lease.ownerId !== input.ownerId || this.lease.attempt !== input.attempt ||
+      Date.parse(this.lease.leaseExpiresAt) <= this.currentTime()) return undefined;
+    const unreservedRunning = this.running - this.expired - this.linkedRunning;
+    if (this.slots.size + unreservedRunning >= input.maxProcesses) return undefined;
+    const slot = Object.freeze({ slotId: `slot-${this.nextSlot++}`, ownerId: input.ownerId, attempt: input.attempt,
+      leaseExpiresAt: new Date(this.currentTime() + input.leaseMs).toISOString(), jobId: null });
+    this.slots.set(slot.slotId, slot);
+    return slot;
+  }
+
+  renewWorkerSlots(input: { ownerId: string; attempt: number; leaseMs: number }): number {
+    let renewed = 0;
+    for (const [slotId, slot] of this.slots) {
+      if (slot.ownerId !== input.ownerId || slot.attempt !== input.attempt || Date.parse(slot.leaseExpiresAt) <= this.currentTime()) continue;
+      this.slots.set(slotId, Object.freeze({ ...slot,
+        leaseExpiresAt: new Date(this.currentTime() + input.leaseMs).toISOString() }));
+      renewed += 1;
+    }
+    return renewed;
+  }
+
+  releaseWorkerSlot(input: AnalysisWorkerSlotFence): boolean {
+    const slot = this.slots.get(input.slotId);
+    if (!slot || slot.ownerId !== input.ownerId || slot.attempt !== input.attempt) return false;
+    this.slots.delete(input.slotId);
+    return true;
+  }
+
   claimableCount(): number {
     return this.pending + (this.retryAt !== undefined && this.currentTime() >= this.retryAt ? 1 : 0);
   }
@@ -89,20 +125,28 @@ class FakeRepository implements AnalysisWorkerRepository {
     this.diagnostics.push(code);
   }
 
-  takeWork(): void {
+  takeWork(slot: AnalysisWorkerSlot): void {
     if (this.pending > 0) this.pending -= 1;
     else if (this.retryAt !== undefined && this.currentTime() >= this.retryAt) this.retryAt = undefined;
     else throw new Error('No work is available.');
     this.running += 1;
+    this.linkedRunning += 1;
+    this.slots.set(slot.slotId, Object.freeze({ ...slot, jobId: `job-${slot.slotId}` }));
   }
 
-  finishWork(): void { this.running -= 1; }
+  finishWork(claimed: boolean): void {
+    if (!claimed) return;
+    this.running -= 1;
+    this.linkedRunning -= 1;
+  }
 }
 
 interface DeferredChild { readonly finish: (code?: number) => void; }
 
-function harness(options: { pending?: number; expired?: number; retryDelayMs?: number; idleTimeoutMs?: number; maxProcesses?: number } = {}) {
+function harness(options: { pending?: number; expired?: number; unreservedRunning?: number; retryDelayMs?: number;
+  idleTimeoutMs?: number; maxProcesses?: number; claimOnSpawn?: boolean; failSpawn?: boolean } = {}) {
   let millis = origin;
+  let claimOnSpawn = options.claimOnSpawn !== false;
   let active = 0;
   let maximumActive = 0;
   const startTimes: number[] = [];
@@ -110,7 +154,7 @@ function harness(options: { pending?: number; expired?: number; retryDelayMs?: n
   const repository = new FakeRepository(() => millis);
   repository.pending = options.pending ?? 0;
   repository.expired = options.expired ?? 0;
-  repository.running = repository.expired;
+  repository.running = repository.expired + (options.unreservedRunning ?? 0);
   if (options.retryDelayMs !== undefined) repository.retryAt = millis + options.retryDelayMs;
   const host: AnalysisWorkerHost = {
     now: () => millis,
@@ -118,14 +162,16 @@ function harness(options: { pending?: number; expired?: number; retryDelayMs?: n
       millis += delayMs;
       await new Promise<void>((resolve) => setImmediate(resolve));
     },
-    spawnChild: () => {
-      repository.takeWork();
+    spawnChild: (_dataDirectory, slot) => {
+      if (options.failSpawn) return Promise.reject(new Error('spawn failed'));
+      const claimed = claimOnSpawn;
+      if (claimed) repository.takeWork(slot);
       active += 1;
       maximumActive = Math.max(maximumActive, active);
       startTimes.push(millis);
       return new Promise<number>((resolve) => {
         children.push({ finish: (code = 0) => {
-          repository.finishWork();
+          repository.finishWork(claimed);
           active -= 1;
           resolve(code);
         } });
@@ -138,7 +184,8 @@ function harness(options: { pending?: number; expired?: number; retryDelayMs?: n
     idleTimeoutMs: options.idleTimeoutMs ?? 1_000
   });
   return { repository, host, settings, children, startTimes, maximumActive: () => maximumActive,
-    now: () => millis, advanceTime: (delayMs: number) => { millis += delayMs; } };
+    now: () => millis, advanceTime: (delayMs: number) => { millis += delayMs; },
+    setClaimOnSpawn: (value: boolean) => { claimOnSpawn = value; } };
 }
 
 async function nextTurn(): Promise<void> {
@@ -203,6 +250,51 @@ test('lease takeover counts predecessor children against the global process cap'
   assert.deepEqual(await successor, { status: 'idle-timeout' });
   assert.equal(childrenAtTakeover, 3);
   assert.equal(setup.maximumActive(), 3);
+});
+
+test('unreserved running work and a local unclaimed child share the global cap', async () => {
+  const setup = harness({ pending: 2, unreservedRunning: 2, maxProcesses: 3, claimOnSpawn: false });
+  const running = runAnalysisCoordinator('/data', setup.settings, setup.repository, setup.host, 'owner');
+  await waitUntil(() => setup.children.length === 1);
+  await nextTurn();
+
+  assert.equal(setup.children.length, 1);
+  assert.equal(setup.repository.slots.size, 1);
+  setup.repository.lease = { ownerId: 'competitor', attempt: 99,
+    leaseExpiresAt: new Date(setup.now() + 60_000).toISOString() };
+  setup.children[0]!.finish();
+  assert.deepEqual(await running, { status: 'lease-held' });
+});
+
+test('takeover sees an unclaimed predecessor reservation until that child exits', async () => {
+  const setup = harness({ pending: 2, maxProcesses: 1, claimOnSpawn: false });
+  const predecessor = runAnalysisCoordinator('/data', setup.settings, setup.repository, setup.host, 'owner-1');
+  await waitUntil(() => setup.children.length === 1);
+  setup.advanceTime(10_000);
+  const successor = runAnalysisCoordinator('/data', setup.settings, setup.repository, setup.host, 'owner-2');
+  await nextTurn();
+  assert.equal(setup.children.length, 1);
+
+  setup.setClaimOnSpawn(true);
+  setup.children[0]!.finish();
+  for (let index = 1; index <= 2; index += 1) {
+    await waitUntil(() => setup.children.length > index);
+    setup.children[index]!.finish();
+  }
+  assert.deepEqual(await predecessor, { status: 'lease-held' });
+  assert.deepEqual(await successor, { status: 'idle-timeout' });
+  assert.equal(setup.maximumActive(), 1);
+});
+
+test('failed spawn releases its durable reservation', async () => {
+  const setup = harness({ pending: 1, maxProcesses: 1, failSpawn: true });
+  const running = runAnalysisCoordinator('/data', setup.settings, setup.repository, setup.host, 'owner');
+  await waitUntil(() => setup.repository.diagnostics.length > 0);
+  setup.repository.lease = { ownerId: 'competitor', attempt: 99,
+    leaseExpiresAt: new Date(setup.now() + 60_000).toISOString() };
+  assert.deepEqual(await running, { status: 'lease-held' });
+  await nextTurn();
+  assert.equal(setup.repository.slots.size, 0);
 });
 
 test('recovers expired jobs before counting work and starts a child for the recovered job', async () => {
@@ -284,9 +376,12 @@ test('releases its lease after exactly five simulated idle minutes', async () =>
 test('production host starts a one-shot worker child with the data directory', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'ael-analysis-worker-'));
   const entrypoint = join(directory, 'child.mjs');
-  writeFileSync(entrypoint, `import { writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\nconst data = process.argv.at(-1);\nwriteFileSync(join(data, 'args.json'), JSON.stringify(process.argv.slice(2)));\n`);
+  writeFileSync(entrypoint, `import { writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\nconst args = process.argv.slice(2);\nconst data = args[args.indexOf('--data-dir') + 1];\nwriteFileSync(join(data, 'args.json'), JSON.stringify(args));\n`);
 
-  assert.equal(await createProductionAnalysisWorkerHost(entrypoint).spawnChild(directory), 0);
+  assert.equal(await createProductionAnalysisWorkerHost(entrypoint).spawnChild(directory, {
+    slotId: 'slot', ownerId: 'owner', attempt: 1, leaseExpiresAt: new Date(origin + 30_000).toISOString(), jobId: null
+  }), 0);
   assert.deepEqual(JSON.parse(readFileSync(join(directory, 'args.json'), 'utf8')),
-    ['analysis', 'worker-child', '--data-dir', directory]);
+    ['analysis', 'worker-child', '--data-dir', directory, '--worker-slot-id', 'slot',
+      '--worker-slot-owner', 'owner', '--worker-slot-attempt', '1']);
 });

@@ -335,6 +335,44 @@ test('global coordinator lease lifecycle is fenced by generation and expiry', ()
   repository.close(); other.close();
 });
 
+test('durable worker slots count a linked running job once and refill after release', () => {
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const repository = new OperationalLearningRepository(path(), () => new Date(millis).toISOString());
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 1 });
+  repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-2', inputHighWater: 1 });
+  const coordinator = repository.acquireCoordinatorLease({ ownerId: 'coordinator', leaseMs: 60_000 })!;
+  const first = repository.reserveWorkerSlot({ ...coordinator, leaseMs: 30_000, maxProcesses: 2 })!;
+  assert.ok(first);
+  assert.ok(repository.claim({ ownerId: 'child-1', leaseMs: 30_000, workerSlot: first }));
+  const second = repository.reserveWorkerSlot({ ...coordinator, leaseMs: 30_000, maxProcesses: 2 });
+  assert.ok(second, 'the linked running job and its slot must consume one capacity unit');
+  assert.equal(repository.reserveWorkerSlot({ ...coordinator, leaseMs: 30_000, maxProcesses: 2 }), undefined);
+  assert.equal(repository.releaseWorkerSlot(first), true);
+  assert.equal(repository.reserveWorkerSlot({ ...coordinator, leaseMs: 30_000, maxProcesses: 2 }), undefined,
+    'a running job remains globally occupied after its process slot is released');
+  assert.equal(repository.releaseWorkerSlot(second!), true);
+  repository.close();
+});
+
+test('worker slot renewal is coordinator-fenced and expired reservations are reclaimable', () => {
+  let millis = Date.parse('2026-09-13T10:00:00.000Z');
+  const repository = new OperationalLearningRepository(path(), () => new Date(millis).toISOString());
+  const coordinator = repository.acquireCoordinatorLease({ ownerId: 'coordinator', leaseMs: 60_000 })!;
+  const slot = repository.reserveWorkerSlot({ ...coordinator, leaseMs: 10, maxProcesses: 1 })!;
+  millis += 5;
+  assert.equal(repository.renewWorkerSlots({ ...coordinator, leaseMs: 20 }), 1);
+  assert.equal(repository.renewWorkerSlots({ ownerId: 'other', attempt: coordinator.attempt, leaseMs: 20 }), 0);
+  millis += 19;
+  assert.equal(repository.reserveWorkerSlot({ ...coordinator, leaseMs: 10, maxProcesses: 1 }), undefined);
+  millis += 1;
+  const replacement = repository.reserveWorkerSlot({ ...coordinator, leaseMs: 10, maxProcesses: 1 });
+  assert.ok(replacement);
+  assert.notEqual(replacement!.slotId, slot.slotId);
+  assert.equal(repository.releaseWorkerSlot(slot), false);
+  assert.equal(repository.releaseWorkerSlot(replacement!), true);
+  repository.close();
+});
+
 test('status freezes filtered job and attempt metrics while preserving global lease and diagnostics', () => {
   let millis = Date.parse('2026-09-13T10:00:00.000Z');
   const databasePath = path();
