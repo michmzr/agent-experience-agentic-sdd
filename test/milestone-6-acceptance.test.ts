@@ -6,7 +6,7 @@ import test from 'node:test';
 
 import { ExperienceService } from '../src/application/experience-service.js';
 import { runCli } from '../src/cli.js';
-import { OperationalLearningRepository } from '../src/learning/repository.js';
+import { DETECTOR_SET_VERSION, OperationalLearningRepository } from '../src/learning/repository.js';
 import { OperationalLearningService } from '../src/learning/service.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 
@@ -36,6 +36,10 @@ test('reports scoped convention candidates and a privacy-bounded analysis shape'
     assert.deepEqual(parsed.cost, { completedRuns: 1, total: 0 });
     assert.equal((parsed.candidates as unknown[]).length, 1);
     assert.equal((parsed.unverifiedRepairs as unknown[]).length, 0);
+    assert.deepEqual(parsed.coverage, [{
+      detector: DETECTOR_SET_VERSION, detectorSetVersion: DETECTOR_SET_VERSION, status: 'completed',
+      inputLowWater: 0, requestedHighWater: 0, processedHighWater: 0, examinedEvents: 0, findings: 0
+    }]);
     assert.equal(report.stdout.includes('credential-like-marker'), false);
 
     const isolated = runCli(['analysis', 'report', '--repository-id', 'repo-2', '--data-dir', dataDir, '--json']);
@@ -58,12 +62,14 @@ test('exposes report-safe typed evidence and episodes through the versioned anal
   try {
     const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
     learning.enqueue({ repositoryId: 'repo-typed', sessionId: 'session-typed', inputHighWater: 1 });
-    const job = learning.claim();
-    learning.saveResult(job!.id, {
+    const job = learning.claim({ ownerId: 'typed-report', leaseMs: 60_000 })!;
+    learning.acknowledge(job.id, { ownerId: 'typed-report', attempt: job.attempts,
+      processedHighWater: job.inputHighWater, checkpoint: { version: 1, pendingEvents: [] },
+      metrics: { eventsLoaded: 1, findings: 0, elapsedMs: 0 }, result: {
       episodeEvidence: [{ id: 'semantic-closure', kind: 'task-transition', state: 'closed', decisionKey: 'release-approval', scopeKey: 'production-rollout', evidenceIds: ['semantic-closure'] }],
       episodes: [{ id: 'semantic-gap', kind: 'verification-gap', repositoryId: 'repo-typed', sessionId: 'session-typed', detector: 'm9-typed-evidence@1', state: 'unresolved', evidenceEventIds: ['semantic-closure'], closureEvidenceId: 'semantic-closure', criterionState: 'unknown' }],
       findings: [], candidates: []
-    }, job!.leaseToken);
+    } });
     learning.close();
 
     const result = runCli(['analysis', 'report', '--repository-id', 'repo-typed', '--schema-version', '2', '--data-dir', dataDir, '--json']);
@@ -94,8 +100,10 @@ function seedSchemaV1Report(dataDir: string, includeTypedRows: boolean): string 
   const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
   try {
     learning.enqueue({ repositoryId: 'repo-v1', sessionId: 'session-v1', inputHighWater: 1 });
-    const job = learning.claim();
-    learning.saveResult(job!.id, {
+    const job = learning.claim({ ownerId: 'schema-v1-report', leaseMs: 60_000 })!;
+    learning.acknowledge(job.id, { ownerId: 'schema-v1-report', attempt: job.attempts,
+      processedHighWater: job.inputHighWater, checkpoint: { version: 1, pendingEvents: [] },
+      metrics: { eventsLoaded: 1, findings: 0, elapsedMs: 0 }, result: {
       episodes: [{ id: 'legacy-episode', repositoryId: 'repo-v1', sessionId: 'session-v1', detector: 'm6-deterministic@1', state: 'outcome-observed', evidenceEventIds: ['legacy-event'], hypothesis: 'Legacy hypothesis.' }, ...(includeTypedRows ? [{ id: 'typed-correction', kind: 'correction' as const, repositoryId: 'repo-v1', sessionId: 'session-v1', detector: 'm9-typed-evidence@1', state: 'outcome-observed' as const, evidenceEventIds: ['typed-original', 'typed-changed', 'typed-outcome'], originalDecisionEvidenceId: 'typed-original', changedDecisionEvidenceId: 'typed-changed', outcomeEvidenceId: 'typed-outcome' }] : [])],
       episodeEvidence: includeTypedRows ? [
         { id: 'typed-original', kind: 'tool-request' as const, state: 'observed' as const, decisionKey: 'typed-decision', scopeKey: 'typed-scope', evidenceIds: ['typed-original'] },
@@ -103,7 +111,7 @@ function seedSchemaV1Report(dataDir: string, includeTypedRows: boolean): string 
         { id: 'typed-outcome', kind: 'tool-result' as const, state: 'succeeded' as const, decisionKey: 'typed-decision', scopeKey: 'typed-scope', evidenceIds: ['typed-changed'] }
       ] : [],
       findings: [], candidates: []
-    }, job!.leaseToken);
+    } });
   } finally { learning.close(); }
   const report = runCli(['analysis', 'report', '--repository-id', 'repo-v1', '--data-dir', dataDir, '--json']);
   assert.equal(report.exitCode, 0);

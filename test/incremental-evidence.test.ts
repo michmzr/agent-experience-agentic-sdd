@@ -344,3 +344,61 @@ test('paginates every incremental capture collection with bounded stable cursors
   assert.equal('listCapturedEvents' in target, false);
   target.close();
 });
+
+test('reads a captured session range in stable insertion order without crossing its requested high-water', () => {
+  const target = store();
+  const session = { id: 'session-1' as SessionId, source: 'codex' as const, startedAt: now };
+  target.appendIncremental({ session, event: preEvent('pre-first', 'push', '2026-08-25T12:00:00.000Z') });
+  target.appendIncremental({ session, event: preEvent('pre-second', 'push', '2026-08-25T10:30:00.000Z') });
+  target.appendIncremental({ session, event: preEvent('pre-third', 'push', '2026-08-25T11:00:00.000Z') });
+
+  const firstRead = target.loadCapturedSessionRange(session.id, { after: 1, through: 3, limit: 1 });
+  assert.deepEqual(firstRead.events.map(({ sourceEventId }) => sourceEventId), ['pre-second']);
+  assert.equal(firstRead.requestedHighWater, 3);
+  assert.equal(firstRead.actualHighWater, 2);
+  assert.equal(firstRead.availableHighWater, 3);
+  assert.equal(Object.isFrozen(firstRead), true);
+  assert.equal(Object.isFrozen(firstRead.events), true);
+  assert.equal(Object.isFrozen(firstRead.events[0]), true);
+
+  target.appendIncremental({ session, event: preEvent('pre-fourth', 'push', '2026-08-25T10:15:00.000Z') });
+  const repeatedRead = target.loadCapturedSessionRange(session.id, { after: 1, through: 3, limit: 10 });
+  assert.deepEqual(repeatedRead.events.map(({ sourceEventId }) => sourceEventId), ['pre-second', 'pre-third']);
+  assert.equal(repeatedRead.requestedHighWater, 3);
+  assert.equal(repeatedRead.actualHighWater, 3);
+  assert.equal(repeatedRead.availableHighWater, 4);
+
+  const atHighWater = target.loadCapturedSessionRange(session.id, { after: 3, through: 3, limit: 10 });
+  assert.deepEqual(atHighWater.events, []);
+  assert.equal(atHighWater.requestedHighWater, 3);
+  assert.equal(atHighWater.actualHighWater, 3);
+  assert.equal(atHighWater.availableHighWater, 4);
+  assert.deepEqual(target.loadCapturedSession(session.id)?.events.map(({ sourceEventId }) => sourceEventId), [
+    'pre-fourth', 'pre-second', 'pre-third', 'pre-first'
+  ]);
+  target.close();
+});
+
+test('validates captured session range bounds and returns an empty page at the requested high-water', () => {
+  const target = store();
+  const session = { id: 'session-1' as SessionId, source: 'codex' as const, startedAt: now };
+  target.appendIncremental({ session, event: preEvent() });
+
+  for (const after of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => target.loadCapturedSessionRange(session.id, { after, through: 1, limit: 1 }), /after.*safe nonnegative integer/i);
+  }
+  for (const through of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => target.loadCapturedSessionRange(session.id, { after: 0, through, limit: 1 }), /through.*safe nonnegative integer/i);
+  }
+  for (const limit of [-1, 0, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => target.loadCapturedSessionRange(session.id, { after: 0, through: 1, limit }), /limit.*safe positive integer/i);
+  }
+  assert.throws(() => target.loadCapturedSessionRange(session.id, { after: 2, through: 1, limit: 1 }), /after.*through/i);
+
+  const empty = target.loadCapturedSessionRange(session.id, { after: 1, through: 1, limit: 1 });
+  assert.deepEqual(empty.events, []);
+  assert.equal(empty.requestedHighWater, 1);
+  assert.equal(empty.actualHighWater, 1);
+  assert.equal(empty.availableHighWater, 1);
+  target.close();
+});

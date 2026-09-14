@@ -6,10 +6,34 @@ import test from 'node:test';
 
 import { runCli, runCliAsync } from '../src/cli.js';
 import { CaptureSpool } from '../src/capture/spool.js';
-import { OperationalLearningRepository } from '../src/learning/repository.js';
+import {
+  OperationalLearningRepository,
+  type AnalysisJob,
+  type LearningResult
+} from '../src/learning/repository.js';
 import { normalizeMappedCapture } from '../src/capture/normalization.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 import { initializeGitRepository } from './helpers/git-repository.js';
+
+function acknowledgeForCli(
+  repository: OperationalLearningRepository,
+  job: AnalysisJob,
+  ownerId: string,
+  result: LearningResult
+): void {
+  repository.acknowledge(job.id, {
+    ownerId,
+    attempt: job.attempts,
+    processedHighWater: job.inputHighWater,
+    checkpoint: { version: 1, pendingEvents: [] },
+    result,
+    metrics: {
+      eventsLoaded: job.inputHighWater - job.inputLowWater,
+      findings: result.findings.length,
+      elapsedMs: 0
+    }
+  });
+}
 
 test('returns an error for an unknown command', () => {
   const result = runCli(['unknown']);
@@ -27,6 +51,80 @@ test('exposes the repository observability command forms', () => {
     const result = runCli(args);
     assert.notEqual(result.exitCode, 2, result.stderr);
   }
+});
+
+test('reports filtered analysis metrics with global worker configuration and live children', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-analysis-status-'));
+  try {
+    writeFileSync(join(dataDir, 'analysis-worker.json'), JSON.stringify({ version: 1, maxProcesses: 5, idleTimeoutMs: 1_234 }));
+    const repository = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
+    repository.enqueue({ repositoryId: 'repo-a', sessionId: 'session-a', inputHighWater: 2 });
+    repository.enqueue({ repositoryId: 'repo-b', sessionId: 'session-b', inputHighWater: 1 });
+    const job = repository.claim({ ownerId: 'manual', leaseMs: 60_000, repositoryId: 'repo-a' })!;
+    repository.retry(job.id, { ownerId: 'manual', attempt: job.attempts, reason: 'execution-failure' });
+    const coordinator = repository.acquireCoordinatorLease({ ownerId: 'coordinator', leaseMs: 60_000 })!;
+    repository.reserveWorkerSlot({ ...coordinator, leaseMs: 30_000, maxProcesses: 5 });
+    repository.close();
+
+    const result = runCli(['analysis', 'status', '--repository-id', 'repo-b', '--session', 'session-b', '--data-dir', dataDir, '--json']);
+    assert.equal(result.exitCode, 0, result.stderr);
+    const status = JSON.parse(result.stdout);
+    assert.deepEqual(status.workerConfig, { version: 1, maxProcesses: 5, idleTimeoutMs: 1_234 });
+    assert.equal(status.activeChildren, 1);
+    assert.equal(status.jobs.pending, 1);
+    assert.equal(status.jobs['retryable-failure'], 0);
+    assert.equal(status.totalAttempts, 0);
+    assert.equal(status.totalRetries, 0);
+    assert.equal(status.failureCounts['execution-failure'], 0);
+    assert.equal(status.coordinatorLease.ownerId, 'coordinator');
+    assert.equal(typeof status.oldestOutstandingAgeMs, 'number');
+    assert.equal(status.nextRetryAt, null);
+    assert.equal(status.eventsLoaded, 0);
+    assert.equal(status.uniqueAcknowledgedEvents, 0);
+    assert.equal(status.rereadRatio, 0);
+
+    const human = runCli(['analysis', 'status', '--data-dir', dataDir]);
+    assert.equal(human.exitCode, 0, human.stderr);
+    assert.match(human.stdout, /Scheduled retries: 1/);
+    assert.match(human.stdout, /Failure attempts: execution-failure=1/);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('bounds analysis worker configuration and internal argument errors without affecting passive capture', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ael-analysis-config-'));
+  const marker = 'private-worker-token';
+  try {
+    writeFileSync(join(dataDir, 'analysis-worker.json'), `{\"version\":1,\"maxProcesses\":99,\"idleTimeoutMs\":300000,\"private\":\"${marker}\"}`);
+    const worker = await runCliAsync(['analysis', 'worker', '--data-dir', dataDir]);
+    assert.equal(worker.exitCode, 1);
+    assert.equal(worker.stdout, '');
+    assert.match(worker.stderr, /^ANALYSIS_CONFIGURATION_ERROR: Analysis worker configuration is invalid\.\n$/);
+    assert.equal(worker.stderr.includes(marker), false);
+
+    const status = runCli(['analysis', 'status', '--data-dir', dataDir, '--json']);
+    assert.equal(status.exitCode, 1);
+    assert.deepEqual(JSON.parse(status.stdout), { error: {
+      code: 'ANALYSIS_CONFIGURATION_ERROR', message: 'Analysis worker configuration is invalid.'
+    } });
+    assert.equal(status.stdout.includes(marker), false);
+
+    const invalidChild = await runCliAsync(['analysis', 'worker-child', '--data-dir', dataDir,
+      '--worker-slot-id', marker, '--worker-slot-owner', 'owner', '--worker-slot-attempt', 'not-an-integer']);
+    assert.equal(invalidChild.exitCode, 2);
+    assert.equal(invalidChild.stdout, '');
+    assert.match(invalidChild.stderr, /^INVALID_SYNTAX: Analysis worker arguments are invalid\.\n$/);
+    assert.equal(invalidChild.stderr.includes(marker), false);
+
+    const lostWatchdog = await runCliAsync(['analysis', 'worker-watchdog', '--data-dir', dataDir,
+      '--worker-slot-id', '00000000-0000-4000-8000-000000000000', '--worker-slot-owner', 'owner', '--worker-slot-attempt', '1']);
+    assert.equal(lostWatchdog.exitCode, 1);
+    assert.equal(lostWatchdog.stdout, '');
+    assert.equal(lostWatchdog.stderr, 'ANALYSIS_WORKER_FAILED: Analysis worker failed.\n');
+
+    const capture = await runCliAsync(['capture', 'hook', '--source', 'codex', '--data-dir', dataDir], { hookInput: '{}'});
+    assert.equal(capture.exitCode, 0);
+    assert.equal(capture.stdout, '');
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 
 test('accepts a Git top-level repository path and rejects a nested path', () => {
@@ -114,8 +212,8 @@ test('renders only version 2 dimensions and derives status exit from installatio
 
     const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
     learning.enqueue({ repositoryId: 'repo-failed', sessionId: 'session-failed', inputHighWater: 1 });
-    const job = learning.claim('repo-failed')!;
-    learning.retry(job.id, 'execution-failure', job.leaseToken);
+    const job = learning.claim({ ownerId: 'cli-failed', leaseMs: 60_000, repositoryId: 'repo-failed' })!;
+    learning.retry(job.id, { ownerId: 'cli-failed', attempt: job.attempts, reason: 'execution-failure' });
     learning.close();
     const failed = runCli(['analysis', 'report', '--repository-id', 'repo-failed', '--schema-version', '2', '--data-dir', dataDir]);
     assert.equal(failed.exitCode, 0);
@@ -146,8 +244,11 @@ test('reports unknown results and a completed no-findings analysis without leaki
 
     const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
     learning.enqueue({ repositoryId, sessionId: 'session-quality', inputHighWater: 2 });
-    const job = learning.claim(repositoryId)!;
-    learning.saveResult(job.id, { episodes: [], findings: [], candidates: [], coverage: [{ detector: job.detectorVersion, status: 'completed', examinedEvents: 2, findings: 0 }], cost: 3 }, job.leaseToken);
+    const job = learning.claim({ ownerId: 'cli-complete', leaseMs: 60_000, repositoryId })!;
+    const completedCoverage = [{ detector: job.detectorSetVersion, detectorSetVersion: job.detectorSetVersion,
+      status: 'completed' as const, inputLowWater: job.inputLowWater, requestedHighWater: job.inputHighWater,
+      processedHighWater: job.inputHighWater, examinedEvents: 2, findings: 0 }];
+    acknowledgeForCli(learning, job, 'cli-complete', { episodes: [], findings: [], candidates: [], coverage: completedCoverage });
     learning.close();
     const complete = JSON.parse(runCli(['analysis', 'report', '--repository-id', repositoryId, '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
       schemaVersion: number; analysis: { state: string; result: string; cost: { completedRuns: number; total: number }; range: { from: number; through: number }; coverage: { required: boolean; detectors: unknown[] } };
@@ -155,9 +256,9 @@ test('reports unknown results and a completed no-findings analysis without leaki
     assert.equal(complete.schemaVersion, 2);
     assert.equal(complete.analysis.state, 'completed');
     assert.equal(complete.analysis.result, 'no-findings');
-    assert.deepEqual(complete.analysis.cost, { completedRuns: 1, total: 3 });
+    assert.deepEqual(complete.analysis.cost, { completedRuns: 1, total: 2 });
     assert.deepEqual(complete.analysis.range, { from: 1, through: 2 });
-    assert.deepEqual(complete.analysis.coverage, { required: true, total: 1, truncated: false, detectors: [{ detector: job.detectorVersion, status: 'completed', examinedEvents: 2, findings: 0 }] });
+    assert.deepEqual(complete.analysis.coverage, { required: true, total: 1, truncated: false, detectors: completedCoverage });
 
     const global = runCli(['status-global', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout;
     assert.equal(global.includes(dataDir), false);
@@ -173,11 +274,15 @@ test('requires coverage for every completed stream range and does not reuse repo
     spool.close();
     const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
     learning.enqueue({ repositoryId: 'repo-a', sessionId: 'session-a', inputHighWater: 1 });
-    const first = learning.claim('repo-a')!;
-    learning.saveResult(first.id, { episodes: [], findings: [], candidates: [] }, first.leaseToken);
+    const first = learning.claim({ ownerId: 'cli-uncovered', leaseMs: 60_000, repositoryId: 'repo-a' })!;
+    acknowledgeForCli(learning, first, 'cli-uncovered', { episodes: [], findings: [], candidates: [] });
     learning.enqueue({ repositoryId: 'repo-a', sessionId: 'session-b', inputHighWater: 1 });
-    const second = learning.claim('repo-a')!;
-    learning.saveResult(second.id, { episodes: [], findings: [], candidates: [], coverage: [{ detector: 'm6-deterministic@1', status: 'completed', examinedEvents: 1, findings: 0 }] }, second.leaseToken);
+    const second = learning.claim({ ownerId: 'cli-covered', leaseMs: 60_000, repositoryId: 'repo-a' })!;
+    acknowledgeForCli(learning, second, 'cli-covered', { episodes: [], findings: [], candidates: [], coverage: [{
+      detector: second.detectorSetVersion, detectorSetVersion: second.detectorSetVersion, status: 'completed',
+      inputLowWater: second.inputLowWater, requestedHighWater: second.inputHighWater,
+      processedHighWater: second.inputHighWater, examinedEvents: 1, findings: 0
+    }] });
     learning.close();
 
     const reportA = JSON.parse(runCli(['status', '--repository-id', 'repo-a', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as { dataQuality: { receipts: { accounting: string } }; analysis: { state: string; result: string } };
@@ -195,8 +300,8 @@ test('does not call an uncovered completed stream a no-findings analysis', () =>
   try {
     const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
     learning.enqueue({ repositoryId: 'repo-uncovered', sessionId: 'session-uncovered', inputHighWater: 1 });
-    const job = learning.claim('repo-uncovered')!;
-    learning.saveResult(job.id, { episodes: [], findings: [], candidates: [] }, job.leaseToken);
+    const job = learning.claim({ ownerId: 'cli-uncovered', leaseMs: 60_000, repositoryId: 'repo-uncovered' })!;
+    acknowledgeForCli(learning, job, 'cli-uncovered', { episodes: [], findings: [], candidates: [] });
     learning.close();
 
     const report = JSON.parse(runCli(['analysis', 'report', '--repository-id', 'repo-uncovered', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as {
@@ -212,7 +317,7 @@ test('bounds version 2 detector summaries while retaining aggregate high waters'
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-health-bounds-'));
   try {
     const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
-    for (let index = 0; index < 70; index += 1) learning.enqueue({ repositoryId: 'repo-bounded', sessionId: `session-${index}`, detectorVersion: `detector-${index}@1`, inputHighWater: 1 });
+    for (let index = 0; index < 70; index += 1) learning.enqueue({ repositoryId: 'repo-bounded', sessionId: `session-${index}`, detectorSetVersion: `detector-${index}@1`, inputHighWater: 1 });
     learning.close();
     const report = JSON.parse(runCli(['analysis', 'report', '--repository-id', 'repo-bounded', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as { analysis: { detectorVersions: string[]; detectorVersionTotal: number; detectorVersionsTruncated: boolean; desiredThrough: number; coverage: { detectors: unknown[] } } };
     assert.equal(report.analysis.desiredThrough, 70);
@@ -228,9 +333,15 @@ test('uses coverage failures beyond the displayed sample when deriving analysis 
   try {
     const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
     for (let index = 0; index < 65; index += 1) {
-      learning.enqueue({ repositoryId: 'repo-coverage-total', sessionId: `coverage-${index}`, detectorVersion: `coverage-${index}@1`, inputHighWater: 1 });
-      const job = learning.claim('repo-coverage-total')!;
-      learning.saveResult(job.id, { episodes: [], findings: [], candidates: [], coverage: [{ detector: `coverage-${index}@1`, status: index === 64 ? 'failed' : 'completed', examinedEvents: 1, findings: 0 }] }, job.leaseToken);
+      learning.enqueue({ repositoryId: 'repo-coverage-total', sessionId: `coverage-${index}`, detectorSetVersion: `coverage-${index}@1`, inputHighWater: 1 });
+      const ownerId = `coverage-owner-${index}`;
+      const job = learning.claim({ ownerId, leaseMs: 60_000, repositoryId: 'repo-coverage-total' })!;
+      acknowledgeForCli(learning, job, ownerId, { episodes: [], findings: [], candidates: [], coverage: [{
+        detector: job.detectorSetVersion, detectorSetVersion: job.detectorSetVersion,
+        status: index === 64 ? 'failed' : 'completed', inputLowWater: job.inputLowWater,
+        requestedHighWater: job.inputHighWater, processedHighWater: job.inputHighWater,
+        examinedEvents: 1, findings: 0
+      }] });
     }
     learning.close();
     const report = JSON.parse(runCli(['analysis', 'report', '--repository-id', 'repo-coverage-total', '--schema-version', '2', '--json', '--data-dir', dataDir]).stdout) as { analysis: { state: string; coverage: { total: number; truncated: boolean; detectors: unknown[] } } };

@@ -3,18 +3,75 @@ import { createHmac } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
+import { adaptCodexCapture } from '../src/capture/adapters/codex.js';
+import type { NormalizedCaptureEvent } from '../src/capture/contracts.js';
+import type { SessionId } from '../src/domain/types.js';
+import { detectOperationalEpisodes } from '../src/learning/detectors.js';
+import { DETECTOR_SET_VERSION, OperationalLearningRepository } from '../src/learning/repository.js';
 import { OperationalLearningService } from '../src/learning/service.js';
-import { OperationalLearningRepository } from '../src/learning/repository.js';
 import { normalizeMappedCapture } from '../src/capture/normalization.js';
 import type { EpisodeEvidence } from '../src/learning/contracts.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 import { initializeGitRepository } from './helpers/git-repository.js';
 
-test('returns false when no committed analysis job is pending', () => {
+const startedAt = '2026-09-13T10:00:00.000Z';
+
+function fixture(input: { readonly register?: boolean; readonly session?: boolean } = {}): {
+  readonly databasePath: string;
+  readonly store: ExperienceStore;
+} {
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-learning-service-'));
-  const service = new OperationalLearningService(join(dataDir, 'experience.sqlite'));
+  const root = join(dataDir, 'repository');
+  mkdirSync(root);
+  const databasePath = join(dataDir, 'experience.sqlite');
+  const store = new ExperienceStore(databasePath);
+  if (input.register !== false) store.registerRepository({ id: 'repo-1', root, observedAt: startedAt });
+  if (input.session !== false) store.appendIncremental({
+    session: { id: 'session-1' as SessionId, source: 'codex', startedAt, repositoryId: 'repo-1' as never }
+  });
+  return { databasePath, store };
+}
+
+function event(input: {
+  readonly id: string;
+  readonly phase: 'pre-action' | 'post-result';
+  readonly action: string;
+  readonly second: number;
+  readonly outcome?: 'succeeded' | 'failed';
+  readonly relatedEventId?: string;
+}): NormalizedCaptureEvent {
+  return adaptCodexCapture({
+    event_id: input.id,
+    session_id: 'session-1',
+    event_kind: input.phase === 'pre-action' ? 'pre_action' : 'post_result',
+    occurred_at: `2026-09-13T10:00:${String(input.second).padStart(2, '0')}.000Z`,
+    tool: 'shell', action: input.action, arguments: ['install'], cwd: '/work/repo', summary: 'Sanitized capture.',
+    ...(input.phase === 'post-result' ? {
+      outcome: input.outcome, exit_status: input.outcome === 'succeeded' ? 0 : 1, related_event_id: input.relatedEventId
+    } : {})
+  });
+}
+
+function repairEvents(): readonly NormalizedCaptureEvent[] {
+  return [
+    event({ id: 'failed-request', phase: 'pre-action', action: 'npm', second: 1 }),
+    event({ id: 'failed-result', phase: 'post-result', action: 'npm', second: 2, outcome: 'failed', relatedEventId: 'failed-request' }),
+    event({ id: 'changed-request', phase: 'pre-action', action: 'pnpm', second: 3 }),
+    event({ id: 'changed-result', phase: 'post-result', action: 'pnpm', second: 4, outcome: 'succeeded', relatedEventId: 'changed-request' })
+  ];
+}
+
+function append(store: ExperienceStore, events: readonly NormalizedCaptureEvent[]): void {
+  for (const captured of events) store.appendIncremental({ event: captured });
+}
+
+test('returns idle when no committed analysis job is pending', () => {
+  const { databasePath, store } = fixture();
+  store.close();
+  const service = new OperationalLearningService(databasePath);
   assert.deepEqual(service.runNext(), { status: 'idle' });
 });
 
@@ -29,7 +86,7 @@ test('rejects malformed or duplicate supplied evidence before claiming a valid a
     const { databasePath, service } = pendingLearningService();
     assert.throws(() => service.runNext({ repositoryId: 'repo-pending', episodeEvidence: supplied }), /evidence|duplicate|kind/i);
     const repository = new OperationalLearningRepository(databasePath);
-    try { assert.equal(repository.streamsFor('repo-pending')[0]?.state, 'pending'); } finally { repository.close(); }
+    try { assert.equal(repository.jobsForStream('repo-pending', 'session-pending')[0]?.state, 'pending'); } finally { repository.close(); }
     assert.equal(service.runNext({ repositoryId: 'repo-pending' }).status, 'completed');
   }
 });
@@ -39,16 +96,22 @@ test('coalesces admission into one detector-version stream and keeps later input
   const databasePath = join(dataDir, 'experience.sqlite');
   const repository = new OperationalLearningRepository(databasePath, () => '2026-09-12T10:00:00.000Z');
   try {
-    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', detectorVersion: 'm6-deterministic@1', inputHighWater: 5 });
-    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', detectorVersion: 'm6-deterministic@1', inputHighWater: 8 });
-    assert.equal(repository.streamsFor('repo-1')[0]?.desiredThrough, 8);
-    const claimed = repository.claim();
-    assert.equal(claimed?.inputFrom, 1);
-    assert.equal(claimed?.inputThrough, 8);
-    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', detectorVersion: 'm6-deterministic@1', inputHighWater: 10 });
-    repository.saveResult(claimed!.id, { episodes: [], findings: [], candidates: [] }, claimed!.leaseToken);
-    assert.equal(repository.streamsFor('repo-1')[0]?.state, 'pending');
-    assert.equal(repository.analysisRunsFor('repo-1')[0]?.inputThrough, 8);
+    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', detectorSetVersion: DETECTOR_SET_VERSION, inputHighWater: 5 });
+    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', detectorSetVersion: DETECTOR_SET_VERSION, inputHighWater: 8 });
+    assert.equal(repository.stream('repo-1', 'session-1')?.committedHighWater, 8);
+    const claimed = repository.claim({ ownerId: 'coalesced-owner', leaseMs: 60_000 })!;
+    assert.equal(claimed.inputLowWater, 0);
+    assert.equal(claimed.inputHighWater, 8);
+    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', detectorSetVersion: DETECTOR_SET_VERSION, inputHighWater: 10 });
+    repository.acknowledge(claimed.id, { ownerId: 'coalesced-owner', attempt: claimed.attempts,
+      processedHighWater: 8, checkpoint: { version: 1, pendingEvents: [] },
+      result: { episodes: [], findings: [], candidates: [] },
+      metrics: { eventsLoaded: 8, findings: 0, elapsedMs: 0 } });
+    assert.equal(repository.stream('repo-1', 'session-1')?.committedHighWater, 10);
+    assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 8);
+    assert.equal(repository.jobById(claimed.id)?.inputHighWater, 8);
+    assert.equal(repository.jobsForStream('repo-1', 'session-1').some(({ state, inputHighWater }) =>
+      state === 'pending' && inputHighWater === 10), true);
   } finally { repository.close(); }
 });
 
@@ -57,14 +120,19 @@ test('recovers a stale lease and never reruns an unchanged completed range', () 
   let time = '2026-09-12T10:00:00.000Z';
   const repository = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'), () => time);
   try {
-    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', detectorVersion: 'm6-deterministic@1', inputHighWater: 5 });
-    const first = repository.claim();
+    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', detectorSetVersion: DETECTOR_SET_VERSION, inputHighWater: 5 });
+    const first = repository.claim({ ownerId: 'stale-owner', leaseMs: 60_000 });
     time = '2026-09-12T10:05:00.000Z';
-    const recovered = repository.claim();
+    assert.equal(repository.recoverExpiredJobs(), 1);
+    time = '2026-09-12T10:05:01.000Z';
+    const recovered = repository.claim({ ownerId: 'recovered-owner', leaseMs: 60_000 });
     assert.equal(recovered?.id, first?.id);
-    repository.saveResult(recovered!.id, { episodes: [], findings: [], candidates: [] }, recovered!.leaseToken);
-    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', detectorVersion: 'm6-deterministic@1', inputHighWater: 5 });
-    assert.equal(repository.claim(), undefined);
+    repository.acknowledge(recovered!.id, { ownerId: 'recovered-owner', attempt: recovered!.attempts,
+      processedHighWater: 5, checkpoint: { version: 1, pendingEvents: [] },
+      result: { episodes: [], findings: [], candidates: [] },
+      metrics: { eventsLoaded: 5, findings: 0, elapsedMs: 0 } });
+    assert.equal(repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', detectorSetVersion: DETECTOR_SET_VERSION, inputHighWater: 5 }), undefined);
+    assert.equal(repository.claim({ ownerId: 'unchanged-owner', leaseMs: 60_000 }), undefined);
   } finally { repository.close(); }
 });
 
@@ -182,7 +250,10 @@ test('projects retained tool activity into bounded typed evidence without leakin
   ].sort((left, right) => left.kind.localeCompare(right.kind)));
   assert.equal(report.episodes.some(({ kind }) => kind === 'verification-gap'), true);
   assert.equal(report.episodes.some(({ kind }) => kind === 'repeated-acceptance'), false);
-  assert.deepEqual(report.coverage, [{ detector: 'm9-typed-evidence@1', status: 'completed', examinedEvents: 2, findings: 0 }]);
+  assert.deepEqual(report.coverage, [{
+    detector: DETECTOR_SET_VERSION, detectorSetVersion: DETECTOR_SET_VERSION, status: 'completed',
+    inputLowWater: 0, requestedHighWater: 2, processedHighWater: 2, examinedEvents: 2, findings: 0
+  }]);
   assert.equal(JSON.stringify(report).includes('Liquibase'), false);
 });
 
@@ -205,4 +276,266 @@ function pendingLearningService(): { readonly databasePath: string; readonly ser
   const service = new OperationalLearningService(databasePath);
   service.enqueueCommittedSession('repo-pending', 'session-pending');
   return { databasePath, service };
+}
+
+test('passes a complete durable worker slot fence into the job claim', () => {
+  const { databasePath, store } = fixture();
+  append(store, repairEvents());
+  store.close();
+  const service = new OperationalLearningService(databasePath);
+  service.enqueueCommittedSession('repo-1', 'session-1');
+  const repository = new OperationalLearningRepository(databasePath);
+  const coordinator = repository.acquireCoordinatorLease({ ownerId: 'coordinator', leaseMs: 60_000 })!;
+  const slot = repository.reserveWorkerSlot({ ...coordinator, leaseMs: 30_000, maxProcesses: 1 })!;
+  repository.close();
+
+  assert.equal(service.runNext({ ownerId: 'worker-child', workerSlot: slot }).status, 'completed');
+  const reopened = new OperationalLearningRepository(databasePath);
+  assert.equal(reopened.status().activeRunningCount, 1, 'watchdog owns the live slot until it releases it');
+  reopened.close();
+});
+
+test('analyzes only the claimed high-water when later events already exist', () => {
+  const { databasePath, store } = fixture();
+  append(store, repairEvents());
+  const service = new OperationalLearningService(databasePath);
+  service.enqueueCommittedSession('repo-1', 'session-1');
+  append(store, [
+    event({ id: 'later-request', phase: 'pre-action', action: 'git', second: 5 }),
+    event({ id: 'later-result', phase: 'post-result', action: 'git', second: 6, outcome: 'succeeded', relatedEventId: 'later-request' })
+  ]);
+  store.close();
+
+  assert.equal(service.runNext({ ownerId: 'worker-1', maxEvents: 10 }).status, 'completed');
+  assert.deepEqual(service.report('repo-1').coverage, [{
+    detector: DETECTOR_SET_VERSION, detectorSetVersion: DETECTOR_SET_VERSION, status: 'completed',
+    inputLowWater: 0, requestedHighWater: 4, processedHighWater: 4, examinedEvents: 4, findings: 1
+  }]);
+  const repository = new OperationalLearningRepository(databasePath);
+  assert.equal(repository.status().eventsLoaded, 4);
+  assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 4);
+  repository.close();
+});
+
+test('partially acknowledges the actual page and resumes with checkpoint continuity', () => {
+  const { databasePath, store } = fixture();
+  append(store, repairEvents());
+  store.close();
+  const service = new OperationalLearningService(databasePath);
+  service.enqueueCommittedSession('repo-1', 'session-1');
+
+  assert.equal(service.runNext({ ownerId: 'worker-1', maxEvents: 2 }).status, 'completed');
+  let repository = new OperationalLearningRepository(databasePath);
+  assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 2);
+  assert.deepEqual(repository.stream('repo-1', 'session-1')?.checkpoint.pendingEvents.map((item) =>
+    (item as { sourceEventId: string }).sourceEventId), ['failed-request', 'failed-result']);
+  repository.close();
+  assert.deepEqual(service.report('repo-1').coverage, [{
+    detector: DETECTOR_SET_VERSION, detectorSetVersion: DETECTOR_SET_VERSION, status: 'incomplete',
+    inputLowWater: 0, requestedHighWater: 4, processedHighWater: 2, examinedEvents: 2, findings: 0
+  }]);
+
+  assert.equal(service.runNext({ ownerId: 'worker-2', maxEvents: 2 }).status, 'completed');
+  repository = new OperationalLearningRepository(databasePath);
+  assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 4);
+  assert.equal(repository.status().eventsLoaded, 4);
+  assert.equal(repository.status().uniqueAcknowledgedEvents, 4);
+  assert.equal(repository.status().rereadRatio, 1);
+  repository.close();
+  const report = service.report('repo-1');
+  assert.equal(report.findings.length, 1);
+  assert.deepEqual(report.coverage.map(({ inputLowWater, requestedHighWater, processedHighWater, status }) =>
+    ({ inputLowWater, requestedHighWater, processedHighWater, status })).sort((left, right) => left.inputLowWater - right.inputLowWater), [
+    { inputLowWater: 0, requestedHighWater: 4, processedHighWater: 2, status: 'incomplete' },
+    { inputLowWater: 2, requestedHighWater: 4, processedHighWater: 4, status: 'completed' }
+  ]);
+});
+
+test('does not create another job when completed input is admitted unchanged', () => {
+  const { databasePath, store } = fixture();
+  append(store, repairEvents());
+  store.close();
+  const service = new OperationalLearningService(databasePath);
+  assert.equal(service.enqueueCommittedSession('repo-1', 'session-1'), true);
+  assert.equal(service.enqueueCommittedSession('repo-1', 'session-1'), false);
+  assert.equal(service.runNext({ ownerId: 'worker-1' }).status, 'completed');
+  assert.equal(service.enqueueCommittedSession('repo-1', 'session-1'), false);
+  assert.deepEqual(service.runNext({ ownerId: 'worker-2' }), { status: 'idle' });
+});
+
+test('quarantines missing session, registration, or claimed capture input immediately', () => {
+  for (const missing of ['session', 'registration', 'captured-input'] as const) {
+    const { databasePath, store } = fixture({ register: missing !== 'registration', session: missing !== 'session' });
+    store.close();
+    const repository = new OperationalLearningRepository(databasePath);
+    const job = repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 1 })!;
+    repository.close();
+
+    const result = new OperationalLearningService(databasePath).runNext({ ownerId: 'worker-1' });
+    assert.deepEqual(result, { status: 'quarantined-input', jobId: job.id });
+    const reopened = new OperationalLearningRepository(databasePath);
+    assert.equal(reopened.jobById(job.id)?.failureReason, 'invalid-input');
+    assert.equal(reopened.status().failureCounts['invalid-input'], 1);
+    reopened.close();
+  }
+});
+
+test('records loaded work on execution failure without advancing acknowledged progress', () => {
+  const { databasePath, store } = fixture();
+  append(store, repairEvents().slice(0, 2));
+  store.close();
+  const service = new OperationalLearningService(databasePath, {
+    monotonicNow: sequenceClock(10, 22.5),
+    detect() { throw new Error('detector failed'); }
+  });
+  service.enqueueCommittedSession('repo-1', 'session-1');
+
+  assert.equal(service.runNext({ ownerId: 'worker-1' }).status, 'retryable-failure');
+  const repository = new OperationalLearningRepository(databasePath);
+  assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 0);
+  assert.equal(repository.status().eventsLoaded, 2);
+  assert.equal(repository.status().uniqueAcknowledgedEvents, 0);
+  assert.equal(repository.status().failureCounts['execution-failure'], 1);
+  repository.close();
+  const database = new DatabaseSync(databasePath);
+  const attempt = database.prepare('SELECT processed_high_water, events_loaded, findings, elapsed_ms FROM operational_analysis_attempts').get()!;
+  assert.deepEqual({ ...attempt }, { processed_high_water: 2, events_loaded: 2, findings: 0, elapsed_ms: 12.5 });
+  database.close();
+});
+
+test('records loaded work and findings on deadline timeout without acknowledging the stream', () => {
+  const { databasePath, store } = fixture();
+  append(store, repairEvents());
+  store.close();
+  const service = new OperationalLearningService(databasePath, { monotonicNow: sequenceClock(10, 22.5) });
+  service.enqueueCommittedSession('repo-1', 'session-1');
+
+  assert.equal(service.runNext({ ownerId: 'worker-1', deadlineMs: 10 }).status, 'retryable-failure');
+  const repository = new OperationalLearningRepository(databasePath);
+  assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 0);
+  assert.equal(repository.status().eventsLoaded, 4);
+  assert.equal(repository.status().uniqueAcknowledgedEvents, 0);
+  assert.equal(repository.status().failureCounts.timeout, 1);
+  assert.equal(repository.status().totalRetries, 1);
+  repository.close();
+  const database = new DatabaseSync(databasePath);
+  const attempt = database.prepare('SELECT processed_high_water, events_loaded, findings, elapsed_ms FROM operational_analysis_attempts').get()!;
+  assert.deepEqual({ ...attempt }, { processed_high_water: 4, events_loaded: 4, findings: 1, elapsed_ms: 12.5 });
+  database.close();
+});
+
+test('retries an unexpected captured-range I/O failure instead of quarantining input', () => {
+  const { databasePath, store } = fixture();
+  append(store, repairEvents().slice(0, 2));
+  store.close();
+  const service = new OperationalLearningService(databasePath, {
+    openStore(path: string) {
+      const target = new ExperienceStore(path);
+      target.loadCapturedSessionRange = () => { throw new Error('storage unavailable'); };
+      return target;
+    }
+  });
+  service.enqueueCommittedSession('repo-1', 'session-1');
+
+  assert.equal(service.runNext({ ownerId: 'worker-1' }).status, 'retryable-failure');
+  const repository = new OperationalLearningRepository(databasePath);
+  assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 0);
+  assert.equal(repository.status().failureCounts['execution-failure'], 1);
+  assert.equal(repository.status().failureCounts['invalid-input'], 0);
+  repository.close();
+});
+
+test('records convention read failure before loading captured work', () => {
+  const { databasePath, store } = fixture();
+  append(store, repairEvents().slice(0, 2));
+  store.close();
+  const service = new OperationalLearningService(databasePath, {
+    monotonicNow: sequenceClock(10, 15),
+    readConventions() { throw new Error('instruction storage unavailable'); }
+  });
+  service.enqueueCommittedSession('repo-1', 'session-1');
+
+  assert.equal(service.runNext({ ownerId: 'worker-1' }).status, 'retryable-failure');
+  const repository = new OperationalLearningRepository(databasePath);
+  assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 0);
+  assert.equal(repository.status().eventsLoaded, 0);
+  assert.equal(repository.status().failureCounts['execution-failure'], 1);
+  repository.close();
+});
+
+for (const point of ['failure', 'timeout', 'acknowledgement'] as const) {
+  test(`controls lease expiry before ${point} without stale-owner mutation`, () => {
+    const { databasePath, store } = fixture();
+    append(store, repairEvents());
+    store.close();
+    const service = new OperationalLearningService(databasePath, {
+      monotonicNow: sequenceClock(10, point === 'timeout' ? 25 : 15),
+      detect(input) {
+        const result = detectOperationalEpisodes(input);
+        expireLease(databasePath);
+        if (point === 'failure') throw new Error('detector failed after lease expiry');
+        return result;
+      }
+    });
+    service.enqueueCommittedSession('repo-1', 'session-1');
+
+    const result = service.runNext({ ownerId: 'worker-1', deadlineMs: point === 'timeout' ? 10 : 250 });
+    assert.equal(result.status, 'retryable-failure');
+    const repository = new OperationalLearningRepository(databasePath);
+    assert.equal(repository.stream('repo-1', 'session-1')?.processedHighWater, 0);
+    assert.equal(repository.jobsForStream('repo-1', 'session-1')[0]?.state, 'retryable-failure');
+    assert.equal(repository.jobsForStream('repo-1', 'session-1')[0]?.failureReason, 'lease-expired');
+    assert.equal(repository.status().failureCounts['lease-expired'], 1);
+    repository.close();
+    const database = new DatabaseSync(databasePath);
+    const attempt = database.prepare(`SELECT processed_high_water, events_loaded, findings, elapsed_ms
+      FROM operational_analysis_attempts WHERE attempt = 1`).get()!;
+    assert.deepEqual({ ...attempt }, {
+      processed_high_water: 4,
+      events_loaded: 4,
+      findings: point === 'failure' ? 0 : 1,
+      elapsed_ms: point === 'timeout' ? 15 : 5
+    });
+    database.close();
+  });
+}
+
+test('does not recover or mutate a current lease acquired by another owner', () => {
+  const { databasePath, store } = fixture();
+  append(store, repairEvents());
+  store.close();
+  const service = new OperationalLearningService(databasePath, {
+    monotonicNow: sequenceClock(10, 15),
+    detect(input) {
+      const result = detectOperationalEpisodes(input);
+      expireLease(databasePath);
+      let millis = Date.now() + 31_000;
+      const other = new OperationalLearningRepository(databasePath, () => new Date(millis).toISOString());
+      assert.equal(other.recoverExpiredJobs(), 1);
+      millis += 1_000;
+      assert.equal(other.claim({ ownerId: 'worker-2', leaseMs: 60_000 })?.leaseOwner, 'worker-2');
+      other.close();
+      return result;
+    }
+  });
+  service.enqueueCommittedSession('repo-1', 'session-1');
+
+  assert.equal(service.runNext({ ownerId: 'worker-1' }).status, 'retryable-failure');
+  const repository = new OperationalLearningRepository(databasePath);
+  const job = repository.jobsForStream('repo-1', 'session-1')[0];
+  assert.equal(job?.state, 'running');
+  assert.equal(job?.leaseOwner, 'worker-2');
+  assert.equal(job?.attempts, 2);
+  repository.close();
+});
+
+function sequenceClock(...values: number[]): () => number {
+  let index = 0;
+  return () => values[Math.min(index++, values.length - 1)]!;
+}
+
+function expireLease(databasePath: string): void {
+  const database = new DatabaseSync(databasePath);
+  database.prepare("UPDATE operational_analysis_jobs SET lease_expires_at = '2000-01-01T00:00:00.000Z' WHERE state = 'running'").run();
+  database.close();
 }

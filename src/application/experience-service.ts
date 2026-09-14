@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync } from 'node:fs';
 import { verifyInstalledHooks } from '../cli/hook-installation.js';
 import { resolveRepositoryRoot } from '../repository/local-repository.js';
 
@@ -18,8 +17,15 @@ import { ExperienceStore, type KnowledgeScope, type RetrievalFilter, type Retrie
 import { projectCapturedSessionEvidence } from '../evidence/capture-projection.js';
 import { sourceEvidenceCapabilities } from '../evidence/capabilities.js';
 import { SessionEvidenceRepository } from '../evidence/repository.js';
-import { OperationalLearningRepository, type OperationalAnalysisQuality } from '../learning/repository.js';
 import { OperationalLearningService } from '../learning/service.js';
+import {
+  OperationalLearningRepository,
+  type AnalysisFilters,
+  type AnalysisWorkerSlotFence,
+  type OperationalAnalysisQuality
+} from '../learning/repository.js';
+import type { AnalysisWorkerScheduler } from '../learning/worker-launcher.js';
+import { loadAnalysisWorkerSettings } from '../learning/worker-settings.js';
 import type { SessionId } from '../domain/types.js';
 import {
   RuntimeService,
@@ -39,6 +45,7 @@ export interface LessonFilter {
 
 export interface ExperienceServiceOptions {
   readonly dataDir?: string;
+  readonly scheduleAnalysis?: AnalysisWorkerScheduler;
 }
 
 export interface CursorCaptureDiagnosticsReport {
@@ -52,11 +59,13 @@ export class ExperienceService {
   private readonly dataDirectory: string;
   private readonly databasePath: string;
   private readonly runtime: RuntimeService;
+  private readonly scheduleAnalysis: AnalysisWorkerScheduler | undefined;
 
   constructor(options: ExperienceServiceOptions = {}) {
-    this.databasePath = options.dataDir ? join(options.dataDir, 'experience.sqlite') : defaultDatabasePath();
-    this.dataDirectory = options.dataDir ?? dirname(this.databasePath);
+    this.databasePath = resolve(options.dataDir === undefined ? defaultDatabasePath() : join(options.dataDir, 'experience.sqlite'));
+    this.dataDirectory = dirname(this.databasePath);
     this.runtime = new RuntimeService({ dataDir: this.dataDirectory });
+    this.scheduleAnalysis = options.scheduleAnalysis;
   }
 
   init(): { databasePath: string } {
@@ -233,12 +242,29 @@ export class ExperienceService {
   }
 
   captureDrain(now: () => string = () => new Date().toISOString()) {
-    return drainCaptureSpool({ databasePath: this.databasePath, now, learningAdmission: new OperationalLearningService(this.databasePath) });
+    return drainCaptureSpool({ databasePath: this.databasePath, now, learningAdmission: new OperationalLearningService(this.databasePath),
+      ...(this.scheduleAnalysis === undefined ? {} : { scheduleAnalysis: this.scheduleAnalysis }) });
   }
 
   runOperationalAnalysis(repositoryId: string) {
     const service = new OperationalLearningService(this.databasePath);
     return service.runNext({ repositoryId });
+  }
+
+  runNextOperationalAnalysis(workerSlot: AnalysisWorkerSlotFence) {
+    const service = new OperationalLearningService(this.databasePath);
+    return service.runNext({ workerSlot });
+  }
+
+  operationalAnalysisStatus(filters: AnalysisFilters = {}) {
+    let workerConfig;
+    try { workerConfig = loadAnalysisWorkerSettings(this.dataDirectory); }
+    catch { throw new DomainError('ANALYSIS_CONFIGURATION_ERROR', 'Analysis worker configuration is invalid.'); }
+    const repository = new OperationalLearningRepository(this.databasePath);
+    try {
+      const status = repository.status(filters);
+      return Object.freeze({ version: 1 as const, workerConfig, ...status });
+    } finally { repository.close(); }
   }
 
   operationalAnalysisReport(repositoryId: string, sessionId?: string) {
