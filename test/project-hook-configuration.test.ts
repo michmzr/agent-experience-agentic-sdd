@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 import type { SessionId } from '../src/domain/types.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
+import { removeTemporaryDirectory } from '../src/cli/temporary-directory.js';
 
 test('registers only passive technical and session hooks', () => {
   const cursor = JSON.parse(readFileSync('.cursor/hooks.json', 'utf8')) as { version: number; hooks: Record<string, Array<{ command: string }>> };
@@ -69,7 +70,7 @@ test('resolves the Codex wrapper from a repository subdirectory', async () => {
     assert.equal(probe.stderr, '');
     assert.equal((await waitForSession(dataDirectory, 'configuration-probe'))?.source, 'codex');
   } finally {
-    rmSync(dataDirectory, { recursive: true, force: true });
+    await removeTemporaryDirectory(dataDirectory);
   }
 });
 
@@ -86,7 +87,7 @@ test('uses a supported Node when hook PATH only contains git', async () => {
     assert.equal(probe.stdout, '');
     assert.equal(probe.stderr, '');
     assert.equal((await waitForSession(dataDirectory, 'node-path-probe'))?.source, 'codex');
-  } finally { rmSync(dataDirectory, { recursive: true, force: true }); }
+  } finally { await removeTemporaryDirectory(dataDirectory); }
 });
 
 async function waitForSession(dataDirectory: string, sessionId: string) {

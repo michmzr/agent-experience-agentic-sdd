@@ -1,9 +1,10 @@
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
 import { ExperienceStore } from '../storage/experience-store.js';
 import { loadProjectSettings } from '../config/project-settings.js';
+import { removeTemporaryDirectory } from './temporary-directory.js';
 
 export type HookReadinessSource = 'codex' | 'cursor';
 export type HookReadinessResult =
@@ -34,7 +35,7 @@ export async function verifyHookReadiness(options: HookReadinessOptions): Promis
     }
     return { status: 'ready', sources: ready };
   } finally {
-    rmSync(dataDir, { recursive: true, force: true });
+    await removeTemporaryDirectory(dataDir);
   }
 }
 
