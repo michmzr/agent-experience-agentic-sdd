@@ -6,6 +6,7 @@ import { after, test } from 'node:test';
 
 import { resolveCliContext } from '../src/cli/context.js';
 import { removeTemporaryDirectory } from '../src/cli/temporary-directory.js';
+import { runCli } from '../src/cli.js';
 import { initializeGitRepository } from './helpers/git-repository.js';
 
 const temporaryDirectories: string[] = [];
@@ -80,6 +81,62 @@ test('rejects a symlinked workspace metadata directory', () => {
   symlinkSync(join(external, '.ael'), join(root, '.ael'));
 
   assert.throws(() => resolveCliContext(root), /workspace configuration is invalid/i);
+});
+
+test('defaults repository-scoped commands to a configured workspace identity', () => {
+  const workspace = temporaryDirectory('ael-cli-command-workspace-');
+  const nested = join(workspace, 'src');
+  const dataDirectory = temporaryDirectory('ael-cli-command-data-');
+  mkdirSync(nested);
+  configureWorkspace(workspace, 'configured-workspace');
+  assert.equal(runCli(['init', '--scope', 'global', '--data-dir', dataDirectory]).exitCode, 0);
+
+  const unregister = runCli(['unregister', '--json', '--data-dir', dataDirectory], { workingDirectory: nested });
+  const lessons = runCli(['lessons', 'list', '--scope', 'repo', '--json', '--data-dir', dataDirectory], { workingDirectory: nested });
+  const retrieve = runCli(['retrieve', '--scope', 'repo', '--json', '--data-dir', dataDirectory], { workingDirectory: nested });
+  const exported = runCli(['export', '--scope', 'repo', '--json', '--data-dir', dataDirectory], { workingDirectory: nested });
+
+  assert.deepEqual(JSON.parse(unregister.stdout), { repositoryId: 'configured-workspace', removed: false });
+  assert.deepEqual(JSON.parse(lessons.stdout), []);
+  assert.deepEqual(JSON.parse(retrieve.stdout), []);
+  assert.deepEqual(JSON.parse(exported.stdout).knowledge, []);
+});
+
+test('defaults path and identity commands to Git context from a nested directory', () => {
+  const repository = temporaryDirectory('ael-cli-command-git-');
+  const nested = join(repository, 'src');
+  const dataDirectory = temporaryDirectory('ael-cli-command-git-data-');
+  const missingInput = join(repository, 'missing.json');
+  initializeGitRepository(repository);
+  mkdirSync(nested);
+  assert.equal(runCli(['init', '--scope', 'global', '--data-dir', dataDirectory]).exitCode, 0);
+
+  const analysisRun = runCli(['analysis', 'run', '--json', '--data-dir', dataDirectory], { workingDirectory: nested });
+  const analysisReport = runCli(['analysis', 'report', '--json', '--data-dir', dataDirectory], { workingDirectory: nested });
+  const validation = runCli(['knowledge', 'validate', '--json', '--data-dir', dataDirectory], { workingDirectory: nested });
+  const promotion = runCli(['knowledge', 'promote', '--input', missingInput, '--json', '--data-dir', dataDirectory], { workingDirectory: nested });
+  const refresh = runCli(['knowledge', 'refresh-runtime', '--trusted-ref', 'HEAD', '--json', '--data-dir', dataDirectory], { workingDirectory: nested });
+
+  for (const result of [analysisRun, analysisReport, validation, promotion, refresh]) {
+    assert.notEqual(result.exitCode, 2, result.stderr || result.stdout);
+    assert.doesNotMatch(result.stderr || result.stdout, /Option is required: --(?:repository|repository-id)/);
+  }
+});
+
+test('keeps explicit context ahead of workspace discovery and preserves inferred JSON', () => {
+  const workspace = temporaryDirectory('ael-cli-explicit-workspace-');
+  const nested = join(workspace, 'nested');
+  const inferredData = temporaryDirectory('ael-cli-inferred-data-');
+  const explicitData = temporaryDirectory('ael-cli-explicit-data-');
+  mkdirSync(nested);
+  configureWorkspace(workspace, 'configured-workspace');
+
+  const explicit = runCli(['unregister', '--repository-id', 'explicit-repository', '--json', '--data-dir', explicitData], { workingDirectory: nested });
+  assert.deepEqual(JSON.parse(explicit.stdout), { repositoryId: 'explicit-repository', removed: false });
+
+  const inferred = runCli(['runtime', 'config', 'explain', '--json', '--data-dir', inferredData], { workingDirectory: nested });
+  const selected = runCli(['runtime', 'config', 'explain', '--workspace', workspace, '--json', '--data-dir', explicitData], { workingDirectory: nested });
+  assert.equal(inferred.stdout, selected.stdout);
 });
 
 function temporaryDirectory(prefix: string): string {

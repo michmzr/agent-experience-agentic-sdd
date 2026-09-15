@@ -13,6 +13,7 @@ import type { SessionIngestionDiagnostic } from './review/ingestion.js';
 import { createProcessDebriefTerminalHost, runSessionDebrief, type DebriefTerminalHost } from './review/debrief-terminal.js';
 import { createProcessTerminalHost, TerminalReviewSelectionPrompt, type TerminalHost } from './review/terminal-prompt.js';
 import { verifyHookReadiness } from './cli/hook-readiness.js';
+import { resolveCliContext } from './cli/context.js';
 import { resolveRepository, resolveRepositoryRoot } from './repository/local-repository.js';
 import { resolveConfiguredWorkspaceRoot } from './capture/diagnostic-scope.js';
 import { installHooks, parseHookSelection, type HookSelectionPrompt, verifyInstalledHooks } from './cli/hook-installation.js';
@@ -267,7 +268,7 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   }
   if (command === 'unregister' && subcommand === undefined && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id']);
-    return service.unregisterRepository(requiredString(parsed.options, 'repository-id'));
+    return service.unregisterRepository(contextualRepositoryId(parsed.options, options.workingDirectory));
   }
   if (command === 'experience' && subcommand === 'add' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'input']); return service.add(requiredString(parsed.options, 'input'));
@@ -280,14 +281,14 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   }
   if (command === 'analysis' && subcommand === 'run' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id']);
-    return service.runOperationalAnalysis(requiredString(parsed.options, 'repository-id'));
+    return service.runOperationalAnalysis(contextualRepositoryId(parsed.options, options.workingDirectory));
   }
   if (command === 'analysis' && subcommand === 'report' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'session', 'schema-version']);
     const schemaVersion = optionalSchemaVersion(parsed.options);
     return schemaVersion === 2
-      ? service.operationalAnalysisReportV2(requiredString(parsed.options, 'repository-id'))
-      : service.operationalAnalysisReport(requiredString(parsed.options, 'repository-id'), optionalString(parsed.options, 'session'));
+      ? service.operationalAnalysisReportV2(contextualRepositoryId(parsed.options, options.workingDirectory))
+      : service.operationalAnalysisReport(contextualRepositoryId(parsed.options, options.workingDirectory), optionalString(parsed.options, 'session'));
   }
   if (command === 'analysis' && subcommand === 'status' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'session']);
@@ -309,17 +310,17 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   }
   if (command === 'lessons' && subcommand === 'list' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'scope', 'repository-id', 'state', 'tag']);
-    return service.list(filterOptions(parsed.options));
+    return service.list(filterOptions(parsed.options, options.workingDirectory));
   }
   if (command === 'retrieve' && subcommand === undefined && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'scope', 'repository-id', 'path', 'tool', 'tag', 'state']);
     const tag = optionalString(parsed.options, 'tag');
-    return service.retrieve({ ...filterOptions(parsed.options), path: optionalString(parsed.options, 'path'), tool: optionalString(parsed.options, 'tool'), ...(tag ? { tags: [tag] } : {}) });
+    return service.retrieve({ ...filterOptions(parsed.options, options.workingDirectory), path: optionalString(parsed.options, 'path'), tool: optionalString(parsed.options, 'tool'), ...(tag ? { tags: [tag] } : {}) });
   }
   if (command === 'export' && subcommand === undefined && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'scope', 'repository-id', 'state', 'tag', 'format']);
     const format = optionalString(parsed.options, 'format'); if (format && format !== 'json') throw new SyntaxError('Export format must be json.');
-    return service.export(filterOptions(parsed.options));
+    return service.export(filterOptions(parsed.options, options.workingDirectory));
   }
   if (command === 'list' && subcommand === 'records' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository']); return service.listRecords(repositoryId(parsed.options, options.workingDirectory));
@@ -350,23 +351,23 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   }
   if (command === 'runtime' && subcommand === 'config' && rest.length === 1 && rest[0] === 'explain') {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'remote', 'workspace']);
-    return service.runtimeConfigExplain(requiredString(parsed.options, 'workspace'), optionalString(parsed.options, 'remote'));
+    return service.runtimeConfigExplain(contextualRoot(parsed.options, 'workspace', options.workingDirectory), optionalString(parsed.options, 'remote'));
   }
   if (command === 'knowledge' && subcommand === 'validate' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository', 'trusted-ref']);
-    return service.knowledgeValidate(requiredString(parsed.options, 'repository'), optionalString(parsed.options, 'trusted-ref'));
+    return service.knowledgeValidate(contextualRoot(parsed.options, 'repository', options.workingDirectory), optionalString(parsed.options, 'trusted-ref'));
   }
   if (command === 'knowledge' && subcommand === 'refresh-runtime' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository', 'repository-id', 'trusted-ref']);
     return service.knowledgeRefreshRuntime(
-      requiredString(parsed.options, 'repository'),
-      requiredString(parsed.options, 'repository-id'),
+      contextualRoot(parsed.options, 'repository', options.workingDirectory),
+      contextualRepositoryId(parsed.options, options.workingDirectory),
       requiredString(parsed.options, 'trusted-ref')
     );
   }
   if (command === 'knowledge' && subcommand === 'promote' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'input', 'json', 'repository']);
-    return service.knowledgePromote(requiredString(parsed.options, 'repository'), requiredString(parsed.options, 'input'));
+    return service.knowledgePromote(contextualRoot(parsed.options, 'repository', options.workingDirectory), requiredString(parsed.options, 'input'));
   }
   if (command === 'hooks' && subcommand === 'verify' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['worktree', 'json']);
@@ -513,8 +514,11 @@ function optionalCaptureRepositoryId(options: Map<string, string | true>): Repos
 function optionalState(options: Map<string, string | true>): KnowledgeState | undefined {
   const state = optionalString(options, 'state'); if (state === undefined) return undefined; if (!states.has(state as KnowledgeState)) throw new SyntaxError('Knowledge state is unsupported.'); return state as KnowledgeState;
 }
-function filterOptions(options: Map<string, string | true>) {
-  return { scope: optionalScope(options), repositoryId: optionalString(options, 'repository-id'), state: optionalState(options), tag: optionalString(options, 'tag') };
+function filterOptions(options: Map<string, string | true>, workingDirectory?: string) {
+  const scope = optionalScope(options);
+  const explicitRepositoryId = optionalString(options, 'repository-id');
+  const repositoryId = explicitRepositoryId ?? (scope === 'repository' ? contextualRepositoryId(options, workingDirectory) : undefined);
+  return { scope, repositoryId, state: optionalState(options), tag: optionalString(options, 'tag') };
 }
 function optionalRepositoryId(options: Map<string, string | true>): { readonly id: string; readonly root?: string } | undefined {
   const explicit = optionalString(options, 'repository-id'); const path = optionalString(options, 'repository');
@@ -527,12 +531,28 @@ function optionalRepositoryId(options: Map<string, string | true>): { readonly i
 function repositorySelection(options: Map<string, string | true>, workingDirectory?: string): { readonly id: string; readonly root?: string } {
   const selected = optionalRepositoryId(options);
   if (selected !== undefined) return selected;
-  const repository = resolveRepository(workingDirectory ?? process.cwd());
-  if (repository === undefined) throw new DomainError('REPOSITORY_REQUIRED', 'A Git repository is required.');
-  return repository;
+  const context = resolveCliContext(workingDirectory ?? process.cwd());
+  if (context === undefined) return requiredContext('repository or workspace', '--repository-id');
+  return { id: context.id, root: context.root };
 }
 function repositoryId(options: Map<string, string | true>, workingDirectory?: string): string {
   return repositorySelection(options, workingDirectory).id;
+}
+function contextualRepositoryId(options: Map<string, string | true>, workingDirectory?: string): string {
+  const explicit = optionalString(options, 'repository-id');
+  if (explicit !== undefined) return explicit;
+  const selectedRoot = optionalString(options, 'repository');
+  const context = resolveCliContext(selectedRoot ?? workingDirectory ?? process.cwd());
+  return context?.id ?? requiredContext('repository or workspace', '--repository-id');
+}
+function contextualRoot(options: Map<string, string | true>, option: 'repository' | 'workspace', workingDirectory?: string): string {
+  const explicit = optionalString(options, option);
+  if (explicit !== undefined) return explicit;
+  const context = resolveCliContext(workingDirectory ?? process.cwd());
+  return context?.root ?? requiredContext('repository or workspace', `--${option}`);
+}
+function requiredContext(kind: string, option: string): never {
+  throw new DomainError('CONTEXT_REQUIRED', `A ${kind} is required. Pass ${option} or run the command inside a configured AEL workspace.`);
 }
 function success(value: unknown, json: boolean, positionals: readonly string[]): CliResult {
   const version2 = value as { schemaVersion?: number; installation?: { state?: string } };
