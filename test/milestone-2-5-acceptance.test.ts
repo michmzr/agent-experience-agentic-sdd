@@ -11,6 +11,7 @@ import { loadProjectSettings } from '../src/config/project-settings.js';
 import type { SessionId } from '../src/domain/types.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 import { CaptureSpool } from '../src/capture/spool.js';
+import { removeTemporaryDirectory } from '../src/cli/temporary-directory.js';
 
 const startTime = '2026-08-26T08:00:00.000Z';
 const eventTime = '2026-08-26T08:01:00.000Z';
@@ -361,8 +362,8 @@ test('keeps non-Git workspace capture diagnostics scope-scoped and private', asy
     }
     for (const output of outputs) assert.equal(output.includes(workspace), false, 'CLI output contains the technical event path');
   } finally {
-    rmSync(workspace, { recursive: true, force: true });
-    rmSync(dataDir, { recursive: true, force: true });
+    await removeTemporaryDirectory(workspace);
+    await removeTemporaryDirectory(dataDir);
   }
 });
 
