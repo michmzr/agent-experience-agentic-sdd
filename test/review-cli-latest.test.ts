@@ -9,6 +9,13 @@ test('rejects the latest session selector outside the interactive repository-sco
   assert.deepEqual(result, {
     exitCode: 2,
     stdout: '',
-    stderr: 'INVALID_SYNTAX: Interactive repository scope is required for session selection.\n'
+    stderr: [
+      'Error',
+      '',
+      'Message    Interactive repository scope is required for session selection.',
+      'Code       INVALID_SYNTAX',
+      'Next step  Run `ael --help` to inspect supported command forms.',
+      ''
+    ].join('\n')
   });
 });

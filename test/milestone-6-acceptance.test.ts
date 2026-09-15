@@ -52,9 +52,15 @@ test('reports scoped convention candidates and a privacy-bounded analysis shape'
 });
 
 test('rejects an analysis command without repository selection', () => {
-  const result = runCli(['analysis', 'report', '--json']);
-  assert.equal(result.exitCode, 2);
-  assert.equal(result.stdout.includes('credential-like-marker'), false);
+  const workingDirectory = mkdtempSync(join(tmpdir(), 'ael-m6-no-context-'));
+  try {
+    const result = runCli(['analysis', 'report', '--json'], { workingDirectory });
+    assert.equal(result.exitCode, 1);
+    assert.equal(JSON.parse(result.stdout).error.code, 'CONTEXT_REQUIRED');
+    assert.equal(result.stdout.includes('credential-like-marker'), false);
+  } finally {
+    rmSync(workingDirectory, { recursive: true, force: true });
+  }
 });
 
 test('exposes report-safe typed evidence and episodes through the versioned analysis report', () => {

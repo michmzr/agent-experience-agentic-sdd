@@ -34,7 +34,7 @@ test('exposes worktree readiness through the CLI', async () => {
   try {
     assert.deepEqual(await runCliAsync(['hooks', 'verify', '--worktree', process.cwd()]), {
       exitCode: 0,
-      stdout: 'Hook readiness passed for codex, cursor.\n',
+      stdout: 'Hook readiness  [ready]\n\nSources  codex, cursor\n',
       stderr: ''
     });
   } finally {

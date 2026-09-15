@@ -13,7 +13,14 @@ test('rejects session-only options on review sessions with the standard invalid-
     assert.deepEqual(result, {
       exitCode: 2,
       stdout: '',
-      stderr: `INVALID_SYNTAX: Unsupported option: --${option}.\n`
+      stderr: [
+        'Error',
+        '',
+        `Message    Unsupported option: --${option}.`,
+        'Code       INVALID_SYNTAX',
+        'Next step  Run `ael --help` to inspect supported command forms.',
+        ''
+      ].join('\n')
     });
   }
 });

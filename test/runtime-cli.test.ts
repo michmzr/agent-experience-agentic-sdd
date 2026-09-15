@@ -41,7 +41,14 @@ test('evaluates a runtime input from a snapshot with profile-specific exit codes
   assert.equal(JSON.parse(blocked.stdout).outcome, 'BLOCK');
   assert.equal(learning.exitCode, 0);
   assert.equal(JSON.parse(learning.stdout).outcome, 'WARN');
-  assert.equal(runCli(['runtime', 'evaluate', '--input', input, '--profile', 'observe-only', '--data-dir', dataDir]).stdout, 'ALLOW: 1 matching rule. Runtime healthy (snapshot).\n');
+  assert.equal(runCli(['runtime', 'evaluate', '--input', input, '--profile', 'observe-only', '--data-dir', dataDir]).stdout, [
+    'Runtime decision  [ALLOW]',
+    '',
+    'Matching rules  1',
+    'Runtime health  healthy',
+    'Fallback        snapshot',
+    ''
+  ].join('\n'));
 }));
 
 test('creates an empty snapshot only when the target snapshot is absent or refresh is explicit', () => withDirectory((dataDir) => {
@@ -171,14 +178,25 @@ test('explains target configuration without echoing the workspace or credential-
 
   const human = runCli(['runtime', 'config', 'explain', '--workspace', workspace, '--remote', remote, '--data-dir', dataDir]);
   assert.equal(human.stdout, [
-    'Runtime profile normal.',
-    'id=normal [built-in-default:normal]',
-    'hardBlocking=true [built-in-default:normal]',
-    'warningsEnabled=true [built-in-default:normal]',
-    'captureEnabled=true [built-in-default:normal]',
-    'retrievalEnabled=true [built-in-default:normal]',
-    'degradedOutcomes=normal=ALLOW,caution=WARN,protected=BLOCK [built-in-default:normal]'
-  ].join('\n') + '\n');
+    'Runtime configuration  [normal]',
+    '',
+    'Profile',
+    'Profile            normal',
+    'Hard blocking      true',
+    'Warnings           true',
+    'Capture            true',
+    'Retrieval          true',
+    'Degraded outcomes  normal=ALLOW, caution=WARN, protected=BLOCK',
+    '',
+    'Sources',
+    'id                built-in-default:normal',
+    'hardBlocking      built-in-default:normal',
+    'warningsEnabled   built-in-default:normal',
+    'captureEnabled    built-in-default:normal',
+    'retrievalEnabled  built-in-default:normal',
+    'degradedOutcomes  built-in-default:normal',
+    ''
+  ].join('\n'));
   assert.equal(human.stdout.includes(workspace), false);
   assert.equal(human.stdout.includes('secret'), false);
 }));
@@ -201,8 +219,14 @@ test('promotes and validates repository knowledge with concise deterministic out
   assert.equal(promoted.exitCode, 0);
   assert.deepEqual(JSON.parse(promoted.stdout), { identity: 'fact-1', state: 'verified', activation: 'local' });
   assert.deepEqual(JSON.parse(validated.stdout), { valid: true, entries: 1, authoritativeEntries: 0, trustedRefActive: false });
-  assert.equal(runCli(['knowledge', 'promote', '--repository', repository, '--input', input, '--data-dir', directory]).stdout, 'Promoted fact-1 as branch-local knowledge.\n');
-  assert.equal(runCli(['knowledge', 'validate', '--repository', repository, '--data-dir', directory]).stdout, 'Validated 1 knowledge entry; trusted-ref activation inactive.\n');
+  assert.equal(runCli(['knowledge', 'promote', '--repository', repository, '--input', input, '--data-dir', directory]).stdout, 'Knowledge promote  [complete]\n\nIdentity  fact-1\n');
+  assert.equal(runCli(['knowledge', 'validate', '--repository', repository, '--data-dir', directory]).stdout, [
+    'Knowledge validate  [complete]',
+    '',
+    'Entries      1',
+    'Trusted ref  inactive',
+    ''
+  ].join('\n'));
 }));
 
 test('activates repository knowledge only from an explicit trusted local Git ref', () => withDirectory((directory) => {

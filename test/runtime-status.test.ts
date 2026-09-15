@@ -35,7 +35,14 @@ test('reports degraded status without creating a missing snapshot', () => {
       health: 'degraded', profileId: 'normal', hardBlocking: true,
       retrievalMode: 'degraded', fallbackSource: 'degraded-policy', circuitState: 'closed'
     });
-    assert.equal(runCli(['runtime', 'status', '--data-dir', dataDir]).stdout, 'Runtime degraded; profile normal; fallback degraded-policy; circuit closed.\n');
+    assert.equal(runCli(['runtime', 'status', '--data-dir', dataDir]).stdout, [
+      'Runtime status  [degraded]',
+      '',
+      'Profile   normal',
+      'Fallback  degraded-policy',
+      'Circuit   closed',
+      ''
+    ].join('\n'));
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 test('reports a healthy current snapshot after evaluation initialized it', () => {
