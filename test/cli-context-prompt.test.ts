@@ -27,7 +27,8 @@ test('prompts once for missing human context and resolves the selected workspace
   );
 
   assert.equal(result.exitCode, 0, result.stderr);
-  assert.equal(result.stdout, 'Repository selected-workspace was not registered.\n');
+  assert.match(result.stdout, /^Repository registration  \[not registered\]/);
+  assert.match(result.stdout, /^Repository\s+selected-workspace$/m);
   assert.deepEqual(probe.requests, ['Repository or workspace path: ']);
 });
 
@@ -72,7 +73,8 @@ test('returns one bounded context error for an unresolved selected path', async 
 
   assert.equal(result.exitCode, 1);
   assert.equal(result.stdout, '');
-  assert.match(result.stderr, /^CONTEXT_REQUIRED: /);
+  assert.match(result.stderr, /^Error$/m);
+  assert.match(result.stderr, /^Code\s+CONTEXT_REQUIRED$/m);
   assert.deepEqual(probe.requests, ['Repository or workspace path: ']);
 });
 

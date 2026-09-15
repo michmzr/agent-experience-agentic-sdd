@@ -42,6 +42,28 @@ test('returns an error for an unknown command', () => {
   assert.match(result.stderr, /Unknown command\./);
 });
 
+test('renders structured human errors and optional terminal color', () => {
+  const workingDirectory = mkdtempSync(join(tmpdir(), 'ael-cli-human-error-'));
+  try {
+    const plain = runCli(['unregister'], { workingDirectory });
+    const colored = runCli(['unregister'], { workingDirectory, humanOutput: { color: true, width: 100 } });
+
+    assert.equal(plain.exitCode, 1);
+    assert.equal(plain.stderr, [
+      'Error',
+      '',
+      'Message    A repository or workspace is required. Pass --repository-id or run the command inside a configured AEL workspace.',
+      'Code       CONTEXT_REQUIRED',
+      'Next step  Run `ael init` in the workspace or pass --repository-id.',
+      ''
+    ].join('\n'));
+    assert.match(colored.stderr, /\u001b\[1mError\u001b\[0m/);
+    assert.match(colored.stderr, /CONTEXT_REQUIRED/);
+  } finally {
+    rmSync(workingDirectory, { recursive: true, force: true });
+  }
+});
+
 test('exposes the repository observability command forms', () => {
   for (const args of [
     ['list', 'records', '--repository-id', 'repo-a', '--json'],
@@ -85,8 +107,8 @@ test('reports filtered analysis metrics with global worker configuration and liv
 
     const human = runCli(['analysis', 'status', '--data-dir', dataDir]);
     assert.equal(human.exitCode, 0, human.stderr);
-    assert.match(human.stdout, /Scheduled retries: 1/);
-    assert.match(human.stdout, /Failure attempts: execution-failure=1/);
+    assert.match(human.stdout, /^Scheduled retries\s+1$/m);
+    assert.match(human.stdout, /^execution-failure\s+1$/m);
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 
@@ -196,8 +218,8 @@ test('renders only version 2 dimensions and derives status exit from installatio
     initializeGitRepository(root);
     const notReady = runCli(['status', '--repository', root, '--schema-version', '2', '--data-dir', dataDir]);
     assert.equal(notReady.exitCode, 1);
-    assert.match(notReady.stdout, /^Installation: not-ready$/m);
-    assert.match(notReady.stdout, /^Delivery: unknown$/m);
+    assert.match(notReady.stdout, /^Installation\s+not-ready$/m);
+    assert.match(notReady.stdout, /^Delivery\s+unknown$/m);
     assert.equal(notReady.stdout.includes('Root:'), false);
     assert.equal(notReady.stdout.includes('Database:'), false);
 
@@ -208,7 +230,7 @@ test('renders only version 2 dimensions and derives status exit from installatio
     assert.equal((JSON.parse(readyJson.stdout) as { installation: { state: string } }).installation.state, 'ready');
     const ready = runCli(['status', '--repository', root, '--schema-version', '2', '--data-dir', dataDir]);
     assert.equal(ready.exitCode, 0);
-    assert.match(ready.stdout, /^Installation: ready$/m);
+    assert.match(ready.stdout, /^Installation\s+ready$/m);
 
     const learning = new OperationalLearningRepository(join(dataDir, 'experience.sqlite'));
     learning.enqueue({ repositoryId: 'repo-failed', sessionId: 'session-failed', inputHighWater: 1 });
@@ -217,7 +239,7 @@ test('renders only version 2 dimensions and derives status exit from installatio
     learning.close();
     const failed = runCli(['analysis', 'report', '--repository-id', 'repo-failed', '--schema-version', '2', '--data-dir', dataDir]);
     assert.equal(failed.exitCode, 0);
-    assert.match(failed.stdout, /^Analysis: failed$/m);
+    assert.match(failed.stdout, /^Analysis report  \[failed\]/m);
     assert.equal(failed.stdout.includes('findings'), false);
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(dataDir, { recursive: true, force: true }); }
 });

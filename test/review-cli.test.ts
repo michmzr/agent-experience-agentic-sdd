@@ -58,7 +58,10 @@ test('reports truthful non-JSON completion and keeps the async review path canon
   writeFileSync(join(root, 'session.jsonl'), `${JSON.stringify({ kind: 'message', occurredAt: '2026-08-24T10:00:00.000Z' })}\n`);
   const result = await runCliAsync(['review', 'session', '--source', 'codex', '--root', root, '--session', 'session.jsonl', '--allow-expensive-checks']);
   assert.equal(result.exitCode, 0);
-  assert.match(result.stdout, /^Review completed: 1 finding groups, 1 candidates, 1 proposals\./);
+  assert.match(result.stdout, /^Session review  \[complete\]/);
+  assert.match(result.stdout, /^Finding groups\s+1$/m);
+  assert.match(result.stdout, /^Candidates\s+1$/m);
+  assert.match(result.stdout, /^Proposals\s+1$/m);
   const sync = runCli(['review', 'session', '--source', 'codex', '--root', root, '--session', 'session.jsonl']);
   assert.equal(sync.exitCode, 2);
   assert.match(sync.stderr, /Unknown command/);

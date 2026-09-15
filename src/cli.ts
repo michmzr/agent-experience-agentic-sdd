@@ -15,11 +15,13 @@ import { createProcessTerminalHost, TerminalReviewSelectionPrompt, type Terminal
 import { verifyHookReadiness } from './cli/hook-readiness.js';
 import { resolveCliContext } from './cli/context.js';
 import { createProcessContextPrompt, prepareContextArguments, type CliContextPrompt } from './cli/context-prompt.js';
+import { renderCommandResult } from './cli/human-presentations.js';
+import { renderHumanError, type HumanRenderOptions } from './cli/human-renderer.js';
 import { resolveRepository, resolveRepositoryRoot } from './repository/local-repository.js';
 import { resolveConfiguredWorkspaceRoot } from './capture/diagnostic-scope.js';
 import { installHooks, parseHookSelection, type HookSelectionPrompt, verifyInstalledHooks } from './cli/hook-installation.js';
 import { AelSkillError, inspectAelSkill, installAelSkill, uninstallAelSkill, updateAelSkill, validateAelSkill, type AelSkillLocation, type AelSkillScope } from './skill/ael-skill.js';
-import { OperationalLearningRepository, type AnalysisStatus, type AnalysisWorkerSlotFence } from './learning/repository.js';
+import { OperationalLearningRepository, type AnalysisWorkerSlotFence } from './learning/repository.js';
 import { createProductionAnalysisWatchdogHost, createProductionAnalysisWorkerHost, runAnalysisCoordinator, runAnalysisWorkerWatchdog } from './learning/worker.js';
 import { loadAnalysisWorkerSettings } from './learning/worker-settings.js';
 
@@ -37,6 +39,7 @@ export interface RunCliAsyncOptions {
   readonly now?: () => string;
   readonly ingestionDiagnosticWrite?: (line: string) => void | Promise<void>;
   readonly contextPrompt?: CliContextPrompt;
+  readonly humanOutput?: HumanRenderOptions;
 }
 
 interface ParsedArguments { readonly positionals: string[]; readonly options: Map<string, string | true>; }
@@ -47,25 +50,25 @@ const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'v
 const reviewSources = new Set(['codex', 'claude-code', 'cursor'] as const);
 const knownCommands = new Set(['init', 'unregister', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence', 'capture', 'analysis']);
 
-export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory'> = {}): CliResult {
+export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory' | 'humanOutput'> = {}): CliResult {
   if (args.length === 1 && args[0] === '--help') return { exitCode: 0, stdout: `${usage()}\n`, stderr: '' };
   try {
     const parsed = parseArguments(args);
     const json = parsed.options.has('json');
     const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
-    return success(execute(service, parsed, options), json, parsed.positionals);
+    return success(execute(service, parsed, options), json, parsed.positionals, options.humanOutput);
   } catch (error) {
     const syntax = error instanceof SyntaxError;
     const diagnostic = toDiagnostic(error, syntax ? 'INVALID_SYNTAX' : 'STORAGE_ERROR');
     return args.includes('--json')
       ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' }
-      : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${diagnostic.code}: ${diagnostic.message}\n` };
+      : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${renderHumanError(diagnostic, nextStep(diagnostic.code), options.humanOutput)}\n` };
   }
 }
 
 export async function runCliAsync(args: string[], options: RunCliAsyncOptions = {}): Promise<CliResult> {
   if (isCaptureHookCommand(args)) return runCaptureHookCli(args, options);
-  if (args[0] === 'hooks' && args[1] === 'verify') return runHookReadinessCli(args);
+  if (args[0] === 'hooks' && args[1] === 'verify') return runHookReadinessCli(args, options.humanOutput);
   if (isInternalAnalysisWorkerCommand(args)) return runInternalAnalysisWorkerCli(args, options);
   if (args[0] !== 'review') {
     const prepared = await prepareContextArguments(args, {
@@ -73,7 +76,7 @@ export async function runCliAsync(args: string[], options: RunCliAsyncOptions = 
       ...(options.contextPrompt === undefined ? {} : { prompt: options.contextPrompt })
     });
     if (prepared.status === 'cancelled') return { exitCode: 130, stdout: '', stderr: '' };
-    if (prepared.status === 'invalid') return contextRequiredResult(args.includes('--json'));
+    if (prepared.status === 'invalid') return contextRequiredResult(args.includes('--json'), options.humanOutput);
     return runCli([...prepared.args], options);
   }
   try {
@@ -93,22 +96,22 @@ export async function runCliAsync(args: string[], options: RunCliAsyncOptions = 
       : baseDependencies;
     if (request.kind === 'discover') {
       const value = (await discoverReviewSessions(request)).map(({ source, id, updatedAt }) => ({ source, id, updatedAt }));
-      return success(value, json, parsed.positionals);
+      return success(value, json, parsed.positionals, options.humanOutput);
     }
-    if (!request.interactive || json) return success(await runManualReview(request, reviewDependencies), json, parsed.positionals);
+    if (!request.interactive || json) return success(await runManualReview(request, reviewDependencies), json, parsed.positionals, options.humanOutput);
 
     const execution = await runManualReviewExecution(request, reviewDependencies);
     const terminal = options.debriefTerminal ?? createProcessDebriefTerminalHost();
-    if (!terminal.interactive) return success(execution.result, false, parsed.positionals);
+    if (!terminal.interactive) return success(execution.result, false, parsed.positionals, options.humanOutput);
     const debrief = await runSessionDebrief(execution.debrief, terminal);
     if (debrief.status === 'completed') return { exitCode: 0, stdout: '', stderr: '' };
     if (debrief.status === 'interrupted') return { exitCode: 130, stdout: '', stderr: '' };
-    const fallback = success(execution.result, false, parsed.positionals);
+    const fallback = success(execution.result, false, parsed.positionals, options.humanOutput);
     return { ...fallback, stderr: 'REVIEW_TUI_UNAVAILABLE: Interactive debrief unavailable; printed text fallback.\n' };
   } catch (error) {
     const syntax = error instanceof SyntaxError;
     const diagnostic = syntax ? toDiagnostic(error, 'INVALID_SYNTAX') : { code: 'REVIEW_ERROR', message: 'Review failed.' };
-    return args.includes('--json') ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' } : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${diagnostic.code}: ${diagnostic.message}\n` };
+    return args.includes('--json') ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' } : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${renderHumanError(diagnostic, nextStep(diagnostic.code), options.humanOutput)}\n` };
   }
 }
 
@@ -184,15 +187,15 @@ function formatIngestionDiagnostic(value: SessionIngestionDiagnostic): string {
   return `${JSON.stringify(value)}\n`;
 }
 
-async function runHookReadinessCli(args: string[]): Promise<CliResult> {
+async function runHookReadinessCli(args: string[], humanOutput?: HumanRenderOptions): Promise<CliResult> {
   try {
     const parsed = parseArguments(args);
     assertNoUnknownOptions(parsed.options, ['worktree', 'json']);
     if (parsed.positionals.length !== 2) throw new SyntaxError('Unknown command form for hooks.');
-    return success(await verifyHookReadiness({ worktreePath: requiredString(parsed.options, 'worktree') }), parsed.options.has('json'), parsed.positionals);
+    return success(await verifyHookReadiness({ worktreePath: requiredString(parsed.options, 'worktree') }), parsed.options.has('json'), parsed.positionals, humanOutput);
   } catch (error) {
     const diagnostic = toDiagnostic(error, error instanceof SyntaxError ? 'INVALID_SYNTAX' : 'STORAGE_ERROR');
-    return args.includes('--json') ? { exitCode: 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' } : { exitCode: 1, stdout: '', stderr: `${diagnostic.code}: ${diagnostic.message}\n` };
+    return args.includes('--json') ? { exitCode: 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' } : { exitCode: 1, stdout: '', stderr: `${renderHumanError(diagnostic, nextStep(diagnostic.code), humanOutput)}\n` };
   }
 }
 
@@ -231,14 +234,14 @@ function hookCliResult(result: HookIngressResult): CliResult {
   };
 }
 
-function contextRequiredResult(json: boolean): CliResult {
+function contextRequiredResult(json: boolean, humanOutput?: HumanRenderOptions): CliResult {
   const diagnostic = {
     code: 'CONTEXT_REQUIRED',
     message: 'A repository or workspace is required. Pass an explicit context option or run the command inside a configured AEL workspace.'
   };
   return json
     ? { exitCode: 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' }
-    : { exitCode: 1, stdout: '', stderr: `${diagnostic.code}: ${diagnostic.message}\n` };
+    : { exitCode: 1, stdout: '', stderr: `${renderHumanError(diagnostic, nextStep(diagnostic.code), humanOutput)}\n` };
 }
 
 async function readBoundedStdin(): Promise<{ readonly input: string; readonly oversized: boolean }> {
@@ -574,190 +577,12 @@ function contextualRoot(options: Map<string, string | true>, option: 'repository
 function requiredContext(kind: string, option: string): never {
   throw new DomainError('CONTEXT_REQUIRED', `A ${kind} is required. Pass ${option} or run the command inside a configured AEL workspace.`);
 }
-function success(value: unknown, json: boolean, positionals: readonly string[]): CliResult {
+function success(value: unknown, json: boolean, positionals: readonly string[], humanOutput?: HumanRenderOptions): CliResult {
   const version2 = value as { schemaVersion?: number; installation?: { state?: string } };
   const exitCode = (positionals[0] === 'runtime' && positionals[1] === 'evaluate' && (value as { outcome?: string }).outcome === 'BLOCK')
     || (positionals[0] === 'status' && (version2.schemaVersion === 2 ? version2.installation?.state !== 'ready' : (value as { status?: string }).status !== 'ready'))
     || (positionals[0] === 'hooks' && positionals[1] === 'verify' && (value as { status?: string }).status !== 'ready') ? 1 : 0;
-  return json ? { exitCode, stdout: `${JSON.stringify(value)}\n`, stderr: '' } : { exitCode, stdout: `${humanOutput(value, positionals)}\n`, stderr: '' };
-}
-function humanOutput(value: unknown, positionals: readonly string[]): string {
-  const [command, subcommand] = positionals;
-  if ((command === 'status' || command === 'status-global' || (command === 'analysis' && subcommand === 'report')) && (value as { schemaVersion?: number }).schemaVersion === 2) return formatVersion2Health(value as Version2HealthReport, command, subcommand);
-  if (command === 'init') {
-    const workspace = value as { kind?: string; id?: string; databasePath?: string };
-    return workspace.kind === 'workspace' ? `Initialized workspace ${workspace.id}.` : `Initialized local experience store at ${workspace.databasePath}.`;
-  }
-  if (command === 'unregister') {
-    const result = value as { repositoryId: string; removed: boolean };
-    return result.removed ? `Unregistered ${result.repositoryId}.` : `Repository ${result.repositoryId} was not registered.`;
-  }
-  if ((command === 'hooks' && subcommand === 'diagnostics') || (command === 'experience' && subcommand === 'inspect')) {
-    return formatCaptureDiagnostics(value as { scope: { kind: string; id: string }; counts: Record<string, number> });
-  }
-  if (command === 'experience' && subcommand === 'add') return `Imported ${countLabel((value as { imported: number }).imported, 'knowledge entry')}.`;
-  if (command === 'validate') return 'Validation passed.';
-  if (command === 'inspect') return formatKnowledge(value as KnowledgeRecord, true);
-  if (command === 'lessons' || command === 'retrieve') return formatKnowledgeList(value as KnowledgeRecord[]);
-  if (command === 'list' && subcommand === 'records') return formatRecords(value as Array<{ session: { id: string; source: string; startedAt: string; endedAt?: string }; events: Array<{ phase: string; occurredAt: string; summary: string; outcome?: string }> }>);
-  if (command === 'stats') return formatStatistics(value as { sessions: number; events: number; knowledge: number; firstRecordedAt?: string; lastRecordedAt?: string; sources: Record<string, number>; phases: Record<string, number> });
-  if (command === 'evidence' && subcommand === 'session') {
-    const stored = value as { version: number; report: { sessionId: string; lifecycle: { state: string }; operations: readonly unknown[]; metrics: { tokenUsage?: unknown } } };
-    return [
-      `Session ${stored.report.sessionId} evidence version ${stored.version}.`,
-      `Lifecycle: ${stored.report.lifecycle.state}`,
-      `Operations: ${stored.report.operations.length}`,
-      `Token usage: ${stored.report.metrics.tokenUsage === undefined ? 'unavailable' : 'source-provided'}`
-    ].join('\n');
-  }
-  if (command === 'status') return formatRepositoryStatus(value as { status: string; repository: { id: string; root?: string }; selectedSources: readonly string[]; cli: { entrypoint: string; available: boolean }; database: { path: string; available: boolean }; sources: readonly { source: string; status: string; code?: string }[] });
-  if (command === 'status-global') {
-    const status = value as { status: string; database: { path: string; available: boolean }; cli: { entrypoint: string; available: boolean }; repositories: Array<{ status: string; repository: { id: string; root?: string }; selectedSources: readonly string[]; sources: readonly { source: string; status: string; code?: string }[] }> };
-    return [`AEL: ${status.status}`, `CLI: ${status.cli.available ? 'available' : 'unavailable'} (${status.cli.entrypoint})`, `Database: ${status.database.available ? 'available' : 'unavailable'} (${status.database.path})`, status.repositories.length ? status.repositories.map((repository) => formatRepositoryStatus(repository)).join('\n\n') : 'No registered repositories.'].join('\n');
-  }
-  if (command === 'analysis' && subcommand === 'status') return formatAnalysisStatus(value as AnalysisStatus & {
-    readonly workerConfig: { readonly maxProcesses: number; readonly idleTimeoutMs: number };
-    readonly activeChildren: number;
-  });
-  if (command === 'export') {
-    const knowledge = (value as { knowledge: KnowledgeRecord[] }).knowledge;
-    return `Exported ${countLabel(knowledge.length, 'knowledge entry')}.${knowledge.length ? `\n${formatKnowledgeList(knowledge)}` : ''}`;
-  }
-  if (command === 'review' && subcommand === 'session') {
-    const review = value as { findings: readonly unknown[]; candidates: readonly unknown[]; proposals: readonly unknown[]; skippedReviewerIds: readonly string[]; ingestionCoverage?: { skippedTechnicalRecords: number; unsupportedRecords: number; truncatedTextFields: number; omittedStructuredOutputs: number } };
-    const coverage = review.ingestionCoverage;
-    const omissions = coverage && (coverage.skippedTechnicalRecords + coverage.unsupportedRecords + coverage.truncatedTextFields + coverage.omittedStructuredOutputs > 0)
-      ? ` Ingestion: ${coverage.skippedTechnicalRecords} technical skipped, ${coverage.unsupportedRecords} unsupported, ${coverage.truncatedTextFields} text fields truncated, ${coverage.omittedStructuredOutputs} structured outputs omitted.`
-      : '';
-    return `Review completed: ${review.findings.length} finding groups, ${review.candidates.length} candidates, ${review.proposals.length} proposals.${review.skippedReviewerIds.length ? ` Skipped reviewers: ${review.skippedReviewerIds.join(', ')}.` : ''}${omissions}`;
-  }
-  if (command === 'review' && subcommand === 'sessions') return (value as readonly { id: string }[]).map(({ id }) => id).join('\n') || 'No sessions found.';
-  if (command === 'runtime' && subcommand === 'evaluate') {
-    const decision = value as { outcome: string; explanations: readonly unknown[]; status: { health: string; fallbackSource: string } };
-    return `${decision.outcome}: ${countLabel(decision.explanations.length, 'matching rule')}. Runtime ${decision.status.health} (${decision.status.fallbackSource}).`;
-  }
-  if (command === 'runtime' && subcommand === 'status') {
-    const status = value as { health: string; profileId: string; fallbackSource: string; circuitState: string };
-    return `Runtime ${status.health}; profile ${status.profileId}; fallback ${status.fallbackSource}; circuit ${status.circuitState}.`;
-  }
-  if (command === 'hooks' && subcommand === 'verify') {
-    const result = value as { status: string; sources: readonly { source: string }[]; code?: string };
-    return result.status === 'ready' ? `Hook readiness passed for ${result.sources.map(({ source }) => source).join(', ')}.` : `Hook readiness failed: ${result.code}.`;
-  }
-  if (command === 'skill' && subcommand === 'validate') return `AEL skill validation: ${(value as { status: string }).status}.`;
-  if (command === 'skill' && subcommand === 'status') {
-    const result = value as { status: string; destination: string };
-    return `AEL skill ${result.status} at ${result.destination}.`;
-  }
-  if (command === 'skill') {
-    const result = value as { status: string; destination: string };
-    return `AEL skill ${result.status} at ${result.destination}.`;
-  }
-  if (command === 'runtime' && subcommand === 'config') return formatRuntimeConfiguration(value as RuntimeConfigurationExplanation);
-  if (command === 'knowledge' && subcommand === 'promote') return `Promoted ${(value as { identity: string }).identity} as branch-local knowledge.`;
-  if (command === 'knowledge' && subcommand === 'validate') {
-    const result = value as { entries: number; trustedRefActive: boolean };
-    return `Validated ${countLabel(result.entries, 'knowledge entry')}; trusted-ref activation ${result.trustedRefActive ? 'active' : 'inactive'}.`;
-  }
-  if (command === 'knowledge' && subcommand === 'refresh-runtime') {
-    const result = value as { rules: number; trustedCommit: string };
-    return `Refreshed ${countLabel(result.rules, 'runtime rule')} from trusted commit ${result.trustedCommit}.`;
-  }
-  return JSON.stringify(value);
-}
-interface Version2HealthReport {
-  readonly installation?: { readonly state: string };
-  readonly delivery?: { readonly state: string };
-  readonly dataQuality?: { readonly state: string; readonly denominator?: { readonly state: string } };
-  readonly analysis?: { readonly state: string; readonly result: string; readonly coverage: { readonly total?: number; readonly truncated?: boolean; readonly detectors: readonly unknown[] } };
-  readonly repositories?: readonly { readonly repository: { readonly id: string }; readonly installation: { readonly state: string }; readonly delivery: { readonly state: string }; readonly dataQuality: { readonly state: string }; readonly analysis: { readonly state: string; readonly result: string } }[];
-}
-function formatVersion2Health(report: Version2HealthReport, command: string | undefined, subcommand: string | undefined): string {
-  if (command === 'analysis' && subcommand === 'report') {
-    const analysis = report.analysis!;
-    return [`Analysis: ${analysis.state}`, `Result: ${analysis.result}`, `Coverage: ${analysis.coverage.total ?? analysis.coverage.detectors.length}${analysis.coverage.truncated ? ' (truncated)' : ''}`].join('\n');
-  }
-  if (command === 'status-global') {
-    return [`Installation: ${report.installation?.state ?? 'unknown'}`, ...(report.repositories ?? []).map(({ repository, installation, delivery, dataQuality, analysis }) => `${repository.id}: installation=${installation.state}; delivery=${delivery.state}; dataQuality=${dataQuality.state}; analysis=${analysis.state}/${analysis.result}`)].join('\n');
-  }
-  return [`Installation: ${report.installation!.state}`, `Delivery: ${report.delivery!.state}`, `Data quality: ${report.dataQuality!.state}`, `Analysis: ${report.analysis!.state}`, `Analysis result: ${report.analysis!.result}`, `Coverage: ${report.analysis!.coverage.total ?? report.analysis!.coverage.detectors.length}${report.analysis!.coverage.truncated ? ' (truncated)' : ''}`].join('\n');
-}
-interface KnowledgeRecord { readonly id: string; readonly state: string; readonly statement: string; readonly evidenceIds: readonly string[]; readonly authoritative?: boolean; }
-function formatRecords(records: readonly { session: { id: string; source: string; startedAt: string; endedAt?: string }; events: readonly { phase: string; occurredAt: string; summary: string; outcome?: string }[] }[]): string {
-  return records.length ? records.map(({ session, events }) => [`${session.id} [${session.source}]`, `Started: ${session.startedAt}`, ...(session.endedAt ? [`Ended: ${session.endedAt}`] : []), ...events.map((event) => `  ${event.occurredAt} ${event.phase}: ${event.summary}${event.outcome ? ` (${event.outcome})` : ''}`)].join('\n')).join('\n\n') : 'No records found.';
-}
-function formatStatistics(stats: { sessions: number; events: number; knowledge: number; firstRecordedAt?: string; lastRecordedAt?: string; sources: Record<string, number>; phases: Record<string, number> }): string {
-  return [
-    `Sessions: ${stats.sessions}`,
-    `Events: ${stats.events}`,
-    `Knowledge: ${stats.knowledge}`,
-    ...(stats.firstRecordedAt ? [`First recorded: ${stats.firstRecordedAt}`] : []),
-    ...(stats.lastRecordedAt ? [`Last recorded: ${stats.lastRecordedAt}`] : []),
-    `Sources: ${Object.entries(stats.sources).map(([source, count]) => `${source}=${count}`).join(', ')}`,
-    `Phases: ${Object.entries(stats.phases).map(([phase, count]) => `${phase}=${count}`).join(', ')}`
-  ].join('\n');
-}
-function formatRepositoryStatus(status: { status: string; repository: { id: string; root?: string }; selectedSources: readonly string[]; cli?: { entrypoint: string; available: boolean }; database?: { path: string; available: boolean }; sources: readonly { source: string; status: string; code?: string }[] }): string {
-  return [
-    `Repository ${status.repository.id}: ${status.status}`,
-    ...(status.repository.root ? [`Root: ${status.repository.root}`] : []),
-    `Required hooks: ${status.selectedSources.length ? status.selectedSources.join(', ') : 'none'}`,
-    ...(status.cli ? [`CLI: ${status.cli.available ? 'available' : 'unavailable'} (${status.cli.entrypoint})`] : []),
-    ...(status.database ? [`Database: ${status.database.available ? 'available' : 'unavailable'} (${status.database.path})`] : []),
-    ...status.sources.map((source) => `${source.source}: ${source.status}${source.code ? ` (${source.code})` : ''}`)
-  ].join('\n');
-}
-function formatCaptureDiagnostics(report: { scope: { kind: string; id: string }; counts: Record<string, number> }): string {
-  return [`Scope: ${report.scope.kind} ${report.scope.id}`, ...Object.keys(report.counts).sort().map((category) => `${category}: ${report.counts[category]}`)].join('\n');
-}
-function formatAnalysisStatus(status: AnalysisStatus & {
-  readonly workerConfig: { readonly maxProcesses: number; readonly idleTimeoutMs: number };
-  readonly activeChildren: number;
-}): string {
-  const queue = Object.entries(status.jobs).map(([state, count]) => `${state}=${count}`).join(', ');
-  const failures = Object.entries(status.failureCounts).map(([reason, count]) => `${reason}=${count}`).join(', ');
-  const diagnostics = Object.entries(status.diagnostics).map(([code, count]) => `${code}=${count}`).join(', ');
-  return [
-    `Worker config: maxProcesses=${status.workerConfig.maxProcesses}, idleTimeoutMs=${status.workerConfig.idleTimeoutMs}`,
-    `Coordinator lease: ${status.coordinatorLease === null ? 'none' : `active (attempt ${status.coordinatorLease.attempt}, expires ${status.coordinatorLease.leaseExpiresAt})`}`,
-    `Active children: ${status.activeChildren}`,
-    `Queue: ${queue}`,
-    `Oldest outstanding age ms: ${status.oldestOutstandingAgeMs ?? 'none'}`,
-    `Next retry: ${status.nextRetryAt ?? 'none'}`,
-    `Attempts: ${status.totalAttempts}`,
-    `Scheduled retries: ${status.totalRetries}`,
-    `Events loaded: ${status.eventsLoaded}`,
-    `Unique acknowledged events: ${status.uniqueAcknowledgedEvents}`,
-    `Reread ratio: ${status.rereadRatio}`,
-    `Failure attempts: ${failures}`,
-    `Worker diagnostics: ${diagnostics}`
-  ].join('\n');
-}
-function formatKnowledgeList(entries: readonly KnowledgeRecord[]): string { return entries.length ? entries.map((entry) => formatKnowledge(entry, false)).join('\n') : 'No knowledge entries found.'; }
-function formatKnowledge(entry: KnowledgeRecord, includeEvidence: boolean): string { return `${entry.id} [${entry.state}]${entry.authoritative ? ' [authoritative]' : ''}\n${entry.statement}${includeEvidence ? `\nEvidence: ${entry.evidenceIds.join(', ')}` : ''}`; }
-function countLabel(count: number, singular: string): string { return `${count} ${count === 1 ? singular : `${singular}s`}`; }
-interface RuntimeConfigurationExplanation {
-  readonly profile: {
-    readonly id: string;
-    readonly hardBlocking: boolean;
-    readonly warningsEnabled: boolean;
-    readonly captureEnabled: boolean;
-    readonly retrievalEnabled: boolean;
-    readonly degradedOutcomes: Readonly<Record<'normal' | 'caution' | 'protected', string>>;
-  };
-  readonly trace: Readonly<Record<'id' | 'hardBlocking' | 'warningsEnabled' | 'captureEnabled' | 'retrievalEnabled' | 'degradedOutcomes', { readonly source: string; readonly profileId?: string }>>;
-}
-function formatRuntimeConfiguration(value: RuntimeConfigurationExplanation): string {
-  const fields = ['id', 'hardBlocking', 'warningsEnabled', 'captureEnabled', 'retrievalEnabled', 'degradedOutcomes'] as const;
-  const rendered = fields.map((field) => {
-    const raw = field === 'degradedOutcomes'
-      ? `normal=${value.profile.degradedOutcomes.normal},caution=${value.profile.degradedOutcomes.caution},protected=${value.profile.degradedOutcomes.protected}`
-      : String(value.profile[field]);
-    const trace = value.trace[field];
-    const profileId = trace.profileId !== undefined && /^[A-Za-z0-9._-]+$/.test(trace.profileId) ? `:${trace.profileId}` : '';
-    return `${field}=${raw} [${trace.source}${profileId}]`;
-  });
-  return [`Runtime profile ${value.profile.id}.`, ...rendered].join('\n');
+  return json ? { exitCode, stdout: `${JSON.stringify(value)}\n`, stderr: '' } : { exitCode, stdout: `${renderCommandResult(value, positionals, humanOutput)}\n`, stderr: '' };
 }
 function invalidCommand(command: string | undefined): SyntaxError {
   return new SyntaxError(command !== undefined && knownCommands.has(command)
@@ -773,8 +598,25 @@ function toDiagnostic(error: unknown, fallbackCode: string): { code: string; mes
     : { code: fallbackCode, message: errorMessage(error) };
 }
 
+function nextStep(code: string): string | undefined {
+  if (code === 'CONTEXT_REQUIRED' || code === 'REPOSITORY_REQUIRED' || code === 'REPOSITORY_ROOT_REQUIRED') {
+    return 'Run `ael init` in the workspace or pass --repository-id.';
+  }
+  if (code === 'INVALID_SYNTAX') return 'Run `ael --help` to inspect supported command forms.';
+  if (code === 'NOT_FOUND') return 'Check the requested identifier and selected repository or workspace.';
+  return undefined;
+}
+
 if (process.argv[1] && basename(process.argv[1]) === basename(fileURLToPath(import.meta.url))) {
-  const result = await runCliAsync(process.argv.slice(2), { ingestionDiagnosticWrite: writeProcessStderr, contextPrompt: createProcessContextPrompt() }); process.stdout.write(result.stdout); process.stderr.write(result.stderr); process.exitCode = result.exitCode;
+  const result = await runCliAsync(process.argv.slice(2), {
+    ingestionDiagnosticWrite: writeProcessStderr,
+    contextPrompt: createProcessContextPrompt(),
+    humanOutput: {
+      color: Boolean(process.stdout.isTTY && process.env.NO_COLOR === undefined),
+      ...(process.stdout.columns === undefined ? {} : { width: process.stdout.columns })
+    }
+  });
+  process.stdout.write(result.stdout); process.stderr.write(result.stderr); process.exitCode = result.exitCode;
 }
 
 function writeProcessStderr(line: string): Promise<void> {

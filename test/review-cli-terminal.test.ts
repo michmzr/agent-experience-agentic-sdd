@@ -61,7 +61,7 @@ test('uses the existing text response when the injected debrief terminal is not 
   const result = await runCliAsync(reviewArgs(root), { terminal, debriefTerminal });
 
   assert.equal(result.exitCode, 0);
-  assert.match(result.stdout, /^Review completed:/);
+  assert.match(result.stdout, /^Session review  \[complete\]/);
   assert.equal(result.stderr, '');
   assert.equal(debriefTerminal.enterCalls, 0);
 });
@@ -73,7 +73,7 @@ test('falls back to static text with the generic diagnostic when the debrief fra
   const result = await runCliAsync(reviewArgs(root), { terminal, debriefTerminal });
 
   assert.equal(result.exitCode, 0);
-  assert.match(result.stdout, /^Review completed:/);
+  assert.match(result.stdout, /^Session review  \[complete\]/);
   assert.equal(result.stderr, 'REVIEW_TUI_UNAVAILABLE: Interactive debrief unavailable; printed text fallback.\n');
 });
 

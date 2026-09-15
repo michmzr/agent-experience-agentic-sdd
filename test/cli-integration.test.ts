@@ -62,7 +62,7 @@ test('reports the same path-free workspace diagnostic scope through both CLI for
       counts: { 'invalid-working-directory': 0, 'persistence-failure': 0, 'unsafe-command-shape': 1, 'unsupported-tool': 0 }
     });
     assert.equal(automatic.stdout.includes(workspace), false);
-    assert.match(runCli(['hooks', 'diagnostics', '--data-dir', dataDir], { workingDirectory: workspace }).stdout, /Scope: workspace workspace-diagnostics/);
+    assert.match(runCli(['hooks', 'diagnostics', '--data-dir', dataDir], { workingDirectory: workspace }).stdout, /^Scope\s+workspace workspace-diagnostics$/m);
     assert.deepEqual(resolveDiagnosticScope(alias), scope);
   } finally {
     rmSync(alias, { recursive: true, force: true });
@@ -166,7 +166,7 @@ test('exposes the package bin as an executable compiled CLI', () => {
     assert.equal(packageJson.bin.ael, './dist/src/cli.js');
     assert.equal(readFileSync(join(process.cwd(), packageJson.bin.ael), 'utf8').startsWith('#!/usr/bin/env node\n'), true);
     const output = execFileSync(process.execPath, [join(process.cwd(), packageJson.bin.ael), 'init', '--scope', 'global', '--data-dir', dataDir], { encoding: 'utf8' });
-    assert.match(output, /^Initialized local experience store at /);
+    assert.match(output, /^AEL initialization  \[ready\]/);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
@@ -248,7 +248,7 @@ test('runs the declared development script and an installed package bin', () => 
   const repository = mkdtempSync(join(tmpdir(), 'ael-package-repository-'));
   try {
     const developmentOutput = execFileSync('pnpm', ['run', 'ael', '--', 'init', '--scope', 'global', '--data-dir', dataDir], { cwd: process.cwd(), encoding: 'utf8' });
-    assert.match(developmentOutput, /^Initialized local experience store at /m);
+    assert.match(developmentOutput, /^AEL initialization  \[ready\]/m);
 
     execFileSync('pnpm', ['pack', '--pack-destination', packageDirectory], { cwd: process.cwd(), encoding: 'utf8' });
     const tarball = join(packageDirectory, readdirSync(packageDirectory).find((name) => name.endsWith('.tgz'))!);
@@ -289,13 +289,14 @@ test('runs the declared development script and an installed package bin', () => 
 test('renders deterministic command-specific human success output', () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-human-'));
   try {
-    assert.match(runCli(['init', '--scope', 'global', '--data-dir', dataDir]).stdout, /^Initialized local experience store at /);
-    assert.equal(runCli(['experience', 'add', '--input', fixture('positive-workflow.json'), '--data-dir', dataDir]).stdout, 'Imported 1 knowledge entry.\n');
-    assert.equal(runCli(['validate', '--data-dir', dataDir]).stdout, 'Validation passed.\n');
-    assert.equal(runCli(['inspect', 'knowledge-1', '--data-dir', dataDir]).stdout, 'knowledge-1 [verified]\nUse the reviewed workflow for safety-sensitive changes.\nEvidence: evidence-1\n');
-    assert.equal(runCli(['lessons', 'list', '--data-dir', dataDir]).stdout, 'knowledge-1 [verified] [authoritative]\nUse the reviewed workflow for safety-sensitive changes.\n');
-    assert.equal(runCli(['retrieve', '--scope', 'repo', '--repository-id', 'repo-a', '--data-dir', dataDir]).stdout, 'knowledge-1 [verified] [authoritative]\nUse the reviewed workflow for safety-sensitive changes.\n');
-    assert.equal(runCli(['export', '--scope', 'repo', '--repository-id', 'repo-a', '--data-dir', dataDir]).stdout, 'Exported 1 knowledge entry.\nknowledge-1 [verified] [authoritative]\nUse the reviewed workflow for safety-sensitive changes.\n');
+    assert.match(runCli(['init', '--scope', 'global', '--data-dir', dataDir]).stdout, /^AEL initialization  \[ready\]\n\nScope     global\nDatabase  /);
+    assert.equal(runCli(['experience', 'add', '--input', fixture('positive-workflow.json'), '--data-dir', dataDir]).stdout, 'Experience import  [complete]\n\nImported  1 knowledge entry\n');
+    assert.equal(runCli(['validate', '--data-dir', dataDir]).stdout, 'Validation  [passed]\n');
+    assert.match(runCli(['inspect', 'knowledge-1', '--data-dir', dataDir]).stdout, /^Knowledge knowledge-1  \[verified\]\n\nStatement\nUse the reviewed workflow/);
+    assert.match(runCli(['lessons', 'list', '--data-dir', dataDir]).stdout, /^Knowledge  \[1 entry\]\n\nknowledge-1  \[verified\]/);
+    assert.match(runCli(['retrieve', '--scope', 'repo', '--repository-id', 'repo-a', '--data-dir', dataDir]).stdout, /^Knowledge  \[1 entry\]/);
+    assert.match(runCli(['export', '--scope', 'repo', '--repository-id', 'repo-a', '--data-dir', dataDir]).stdout, /^Knowledge export  \[complete\]\n\nExported  1 knowledge entry/);
+    assert.match(runCli(['validate', '--data-dir', dataDir], { humanOutput: { color: true, width: 100 } }).stdout, /\u001b\[1mValidation\u001b\[0m/);
     assert.match(runCli(['inspect', 'knowledge-1', '--json', '--data-dir', dataDir]).stdout, /^\{"id":"knowledge-1"/);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
