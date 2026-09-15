@@ -32,13 +32,19 @@ test('styles only trusted presentation labels and escapes control characters in 
   const output = renderHumanDocument({
     title: 'Runtime',
     status: { tone: 'warning', text: 'degraded' },
-    sections: [{ blocks: [{ kind: 'fields', rows: [{ label: 'Value', value: '\u001b[31muntrusted' }] }] }]
+    sections: [{ blocks: [{ kind: 'fields', rows: [{ label: 'Value', value: '\u001b[31muntrusted\u009b32m\u009dtitle\nspoofed' }] }] }]
   }, { color: true });
 
   assert.match(output, /\u001b\[1mRuntime\u001b\[0m/);
   assert.match(output, /\u001b\[33m\[degraded\]\u001b\[0m/);
   assert.match(output, /\\u001b\[31muntrusted/);
   assert.equal(output.includes('\u001b[31muntrusted'), false);
+  assert.match(output, /\\u009b32m/);
+  assert.equal(output.includes('\u009b32m'), false);
+  assert.match(output, /\\u009dtitle/);
+  assert.equal(output.includes('\u009dtitle'), false);
+  assert.match(output, /\\u000aspoofed/);
+  assert.equal(output.includes('\nspoofed'), false);
 });
 
 test('renders a table in wide output and stacks its rows in narrow output', () => {
@@ -83,14 +89,24 @@ test('keeps an actionable empty state and renders structured errors', () => {
     sections: [{ blocks: [{ kind: 'empty', value: 'No knowledge entries found. Run `ael review session` first.' }] }]
   }), 'Knowledge\n\nNo knowledge entries found. Run `ael review session` first.');
 
-  assert.equal(renderHumanError(
+  const plainError = renderHumanError(
     { code: 'CONTEXT_REQUIRED', message: 'A repository or workspace is required.' },
     'Run `ael init` or pass --repository-id.'
-  ), [
-    'Error',
+  );
+  assert.equal(plainError, [
+    'Error  [failed]',
     '',
     'Message    A repository or workspace is required.',
     'Code       CONTEXT_REQUIRED',
     'Next step  Run `ael init` or pass --repository-id.'
   ].join('\n'));
+  assert.equal(stripAnsi(renderHumanError(
+    { code: 'CONTEXT_REQUIRED', message: 'A repository or workspace is required.' },
+    'Run `ael init` or pass --repository-id.',
+    { color: true }
+  )), plainError);
 });
+
+function stripAnsi(value: string): string {
+  return value.replace(/\u001b\[[0-9;]*m/g, '');
+}

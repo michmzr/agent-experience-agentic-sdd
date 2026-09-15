@@ -79,6 +79,27 @@ test('captures a Codex hook with empty stdout and exit zero', async () => {
   }
 });
 
+test('keeps the passive hook protocol when options precede the command', async () => {
+  const dataDir = temporaryDataDirectory();
+  try {
+    const result = await runCliAsync(
+      ['--data-dir', dataDir, 'capture', 'hook', '--source', 'codex'],
+      {
+        hookInput: JSON.stringify({
+          session_id: 'option-first-session', cwd: '/work/repo', hook_event_name: 'SessionStart', source: 'startup'
+        }),
+        now
+      }
+    );
+
+    assert.deepEqual(result, { exitCode: 0, stdout: '', stderr: '' });
+    const session = await waitFor(dataDir, () => readSession(dataDir, 'option-first-session'));
+    assert.equal(session.source, 'codex');
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test('attributes a non-Git workspace hook to the identifier supplied by its wrapper', async () => {
   const workspace = mkdtempSync(join(tmpdir(), 'ael-hook-workspace-'));
   const dataDir = temporaryDataDirectory();
@@ -233,7 +254,7 @@ test('fails open for missing or unsupported sources while preserving ordinary sy
   const ordinary = await runCliAsync(['unknown'], { hookInput: '{not-json', now });
   assert.equal(ordinary.exitCode, 2);
   assert.equal(ordinary.stdout, '');
-  assert.match(ordinary.stderr, /^Error$/m);
+  assert.match(ordinary.stderr, /^Error  \[failed\]$/m);
   assert.match(ordinary.stderr, /^Code\s+INVALID_SYNTAX$/m);
 });
 

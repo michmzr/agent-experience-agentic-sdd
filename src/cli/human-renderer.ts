@@ -38,7 +38,7 @@ export function renderHumanError(
 ): string {
   return renderHumanDocument({
     title: 'Error',
-    status: options.color ? { tone: 'failure', text: 'failed' } : undefined,
+    status: { tone: 'failure', text: 'failed' },
     sections: [{
       blocks: [{
         kind: 'fields',
@@ -88,10 +88,12 @@ function renderTable(columns: readonly string[], rows: readonly (readonly string
   ].join('\n');
 }
 
-function safeValue(value: string): string {
-  return value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g,
+export function safeTerminalValue(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g,
     (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
+
+const safeValue = safeTerminalValue;
 
 function style(value: string, code: string, options: HumanRenderOptions): string {
   return options.color ? `${code}${value}${ANSI.reset}` : value;

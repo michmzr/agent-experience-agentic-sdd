@@ -10,7 +10,7 @@ test('rejects the latest session selector outside the interactive repository-sco
     exitCode: 2,
     stdout: '',
     stderr: [
-      'Error',
+      'Error  [failed]',
       '',
       'Message    Interactive repository scope is required for session selection.',
       'Code       INVALID_SYNTAX',

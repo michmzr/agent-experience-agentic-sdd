@@ -219,7 +219,14 @@ test('promotes and validates repository knowledge with concise deterministic out
   assert.equal(promoted.exitCode, 0);
   assert.deepEqual(JSON.parse(promoted.stdout), { identity: 'fact-1', state: 'verified', activation: 'local' });
   assert.deepEqual(JSON.parse(validated.stdout), { valid: true, entries: 1, authoritativeEntries: 0, trustedRefActive: false });
-  assert.equal(runCli(['knowledge', 'promote', '--repository', repository, '--input', input, '--data-dir', directory]).stdout, 'Knowledge promote  [complete]\n\nIdentity  fact-1\n');
+  assert.equal(runCli(['knowledge', 'promote', '--repository', repository, '--input', input, '--data-dir', directory]).stdout, [
+    'Knowledge promote  [complete]',
+    '',
+    'Identity    fact-1',
+    'State       verified',
+    'Activation  local',
+    ''
+  ].join('\n'));
   assert.equal(runCli(['knowledge', 'validate', '--repository', repository, '--data-dir', directory]).stdout, [
     'Knowledge validate  [complete]',
     '',

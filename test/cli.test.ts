@@ -65,7 +65,7 @@ test('renders structured human errors and optional terminal color', () => {
 
     assert.equal(plain.exitCode, 1);
     assert.equal(plain.stderr, [
-      'Error',
+      'Error  [failed]',
       '',
       'Message    A repository or workspace is required. Pass --repository-id or run the command inside a configured AEL workspace.',
       'Code       CONTEXT_REQUIRED',
@@ -137,6 +137,13 @@ test('bounds analysis worker configuration and internal argument errors without 
     assert.equal(worker.stdout, '');
     assert.match(worker.stderr, /^ANALYSIS_CONFIGURATION_ERROR: Analysis worker configuration is invalid\.\n$/);
     assert.equal(worker.stderr.includes(marker), false);
+
+    const optionFirstWorker = await runCliAsync(['--data-dir', dataDir, 'analysis', 'worker']);
+    assert.deepEqual(optionFirstWorker, {
+      exitCode: 1,
+      stdout: '',
+      stderr: 'ANALYSIS_CONFIGURATION_ERROR: Analysis worker configuration is invalid.\n'
+    });
 
     const status = runCli(['analysis', 'status', '--data-dir', dataDir, '--json']);
     assert.equal(status.exitCode, 1);
@@ -425,11 +432,23 @@ test('initializes a repository when its hook scope is explicit', async () => {
     const result = await runCliAsync(['init', '--scope', 'repo', '--hooks', 'codex,cursor', '--data-dir', dataDir, '--json'], { terminal, workingDirectory: root, cliEntrypoint: join(process.cwd(), 'dist', 'src', 'cli.js') });
     assert.equal(result.exitCode, 0, result.stderr);
     assert.equal(runCli(['init', '--scope', 'repo', '--hooks', 'codex', '--data-dir', dataDir, '--json'], { workingDirectory: root, cliEntrypoint: join(process.cwd(), 'dist', 'src', 'cli.js') }).exitCode, 0);
+    const humanInitialization = runCli(['init', '--scope', 'repo', '--hooks', 'codex', '--data-dir', dataDir], { workingDirectory: root, cliEntrypoint: join(process.cwd(), 'dist', 'src', 'cli.js') });
+    assert.match(humanInitialization.stdout, /^Scope\s+repository$/m);
+    assert.match(humanInitialization.stdout, /^Repository\s+[a-f0-9]{64}$/m);
+    assert.equal(humanInitialization.stdout.split('\n').find((line) => line.startsWith('Root'))?.endsWith(realpathSync(root)), true);
+    assert.equal(humanInitialization.stdout.split('\n').find((line) => line.startsWith('Database'))?.endsWith(join(dataDir, 'experience.sqlite')), true);
     const global = runCli(['status-global', '--data-dir', dataDir, '--json']);
     assert.equal(global.exitCode, 0);
-    const report = JSON.parse(global.stdout) as { repositories: Array<{ selectedSources: string[]; status: string }> };
+    const report = JSON.parse(global.stdout) as { repositories: Array<{ repository: { id: string }; selectedSources: string[]; status: string }> };
     assert.deepEqual(report.repositories.map((repository) => repository.selectedSources), [['codex', 'cursor']]);
     assert.deepEqual(report.repositories.map((repository) => repository.status), ['ready']);
+    const humanGlobal = runCli(['status-global', '--data-dir', dataDir]).stdout;
+    assert.match(humanGlobal, new RegExp(`^Repository ${report.repositories[0]?.repository.id}$`, 'm'));
+    assert.match(humanGlobal, /^Status\s+ready$/m);
+    assert.match(humanGlobal, /^Required hooks\s+codex, cursor$/m);
+    assert.equal(humanGlobal.split('\n').find((line) => line.startsWith('Root'))?.endsWith(realpathSync(root)), true);
+    assert.match(humanGlobal, /^codex\s+ready$/m);
+    assert.match(humanGlobal, /^cursor\s+ready$/m);
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(dataDir, { recursive: true, force: true });
@@ -445,6 +464,14 @@ test('initializes a non-Git workspace with hooks and reports it as ready', () =>
       { workingDirectory: root, cliEntrypoint: join(process.cwd(), 'dist', 'src', 'cli.js') }
     );
     assert.equal(initialized.exitCode, 0, initialized.stderr);
+    const humanInitialization = runCli(
+      ['init', '--scope', 'workspace', '--hooks', 'codex,cursor', '--data-dir', dataDir],
+      { workingDirectory: root, cliEntrypoint: join(process.cwd(), 'dist', 'src', 'cli.js') }
+    );
+    assert.match(humanInitialization.stdout, /^Scope\s+workspace$/m);
+    assert.match(humanInitialization.stdout, /^Workspace\s+ael-init-workspace-[a-z0-9]+$/m);
+    assert.equal(humanInitialization.stdout.split('\n').find((line) => line.startsWith('Root'))?.endsWith(realpathSync(root)), true);
+    assert.equal(humanInitialization.stdout.split('\n').find((line) => line.startsWith('Database'))?.endsWith(join(dataDir, 'experience.sqlite')), true);
 
     const report = JSON.parse(runCli(['status-global', '--data-dir', dataDir, '--json']).stdout) as {
       repositories: Array<{ repository: { id: string; root: string }; selectedSources: string[]; status: string }>;

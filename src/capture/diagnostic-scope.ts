@@ -27,6 +27,11 @@ export interface ConfiguredWorkspace {
 
 const WORKSPACE_DIRECTORY_MODE = 0o755;
 const WORKSPACE_CONFIGURATION_MODE = 0o644;
+
+export class DiagnosticWorkspaceConfigurationError extends TypeError {
+  readonly code = 'WORKSPACE_CONFIGURATION_ERROR';
+}
+
 const WORKSPACE_CLAIM_DIRECTORY_MODE = 0o700;
 const WORKSPACE_CLAIM_MODE = 0o600;
 const WORKSPACE_HASH_SUFFIX_LENGTH = 8;
@@ -60,7 +65,7 @@ export function initializeDiagnosticWorkspace(
   options: DiagnosticScopeResolutionOptions = {}
 ): DiagnosticScope {
   const workspaceRoot = normalizeRealDirectory(directory);
-  const existing = readWorkspaceConfiguration(workspaceRoot);
+  const existing = readWorkspaceConfiguration(workspaceRoot, true);
   if (existing !== undefined) return workspaceScope(existing.workspaceId);
 
   const id = workspaceId === undefined
@@ -75,8 +80,8 @@ export function initializeDiagnosticWorkspace(
     chmodSync(configurationPath, WORKSPACE_CONFIGURATION_MODE);
   } catch (error) {
     if (!isExistingPath(error)) throw error;
-    const configuration = readWorkspaceConfiguration(workspaceRoot);
-    if (configuration === undefined) throw new TypeError('Diagnostic workspace configuration is invalid.');
+    const configuration = readWorkspaceConfiguration(workspaceRoot, true);
+    if (configuration === undefined) throw invalidWorkspaceConfiguration();
     return workspaceScope(configuration.workspaceId);
   }
   return workspaceScope(id);
@@ -115,7 +120,7 @@ function normalizeRealDirectory(directory: string): string {
   return normalize(realpathSync(directory));
 }
 
-function readWorkspaceConfiguration(workspaceRoot: string): WorkspaceConfiguration | undefined {
+function readWorkspaceConfiguration(workspaceRoot: string, repairPermissions = false): WorkspaceConfiguration | undefined {
   const configurationDirectory = join(workspaceRoot, workspaceConfigurationDirectory);
   const configurationPath = join(configurationDirectory, workspaceConfigurationName);
   let directory;
@@ -125,7 +130,7 @@ function readWorkspaceConfiguration(workspaceRoot: string): WorkspaceConfigurati
     if (isMissingPath(error)) return undefined;
     throw error;
   }
-  if (!directory.isDirectory() || directory.isSymbolicLink()) throw new TypeError('Diagnostic workspace configuration is invalid.');
+  if (!directory.isDirectory() || directory.isSymbolicLink()) throw invalidWorkspaceConfiguration();
 
   let metadata;
   try {
@@ -134,38 +139,44 @@ function readWorkspaceConfiguration(workspaceRoot: string): WorkspaceConfigurati
     if (isMissingPath(error)) return undefined;
     throw error;
   }
-  if (!metadata.isFile() || metadata.isSymbolicLink()) throw new TypeError('Diagnostic workspace configuration is invalid.');
+  if (!metadata.isFile() || metadata.isSymbolicLink()) throw invalidWorkspaceConfiguration();
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(configurationPath, 'utf8')) as unknown;
   } catch {
-    throw new TypeError('Diagnostic workspace configuration is invalid.');
+    throw invalidWorkspaceConfiguration();
   }
   const configuration = checkedWorkspaceConfiguration(parsed);
-  chmodSync(configurationDirectory, WORKSPACE_DIRECTORY_MODE);
-  chmodSync(configurationPath, WORKSPACE_CONFIGURATION_MODE);
+  if (repairPermissions) {
+    chmodSync(configurationDirectory, WORKSPACE_DIRECTORY_MODE);
+    chmodSync(configurationPath, WORKSPACE_CONFIGURATION_MODE);
+  }
   return configuration;
 }
 
 function ensureWorkspaceConfigurationDirectory(directory: string): void {
   mkdirSync(directory, { recursive: true, mode: WORKSPACE_DIRECTORY_MODE });
   const metadata = lstatSync(directory);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new TypeError('Diagnostic workspace configuration is invalid.');
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw invalidWorkspaceConfiguration();
   chmodSync(directory, WORKSPACE_DIRECTORY_MODE);
 }
 
 function checkedWorkspaceConfiguration(value: unknown): WorkspaceConfiguration {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Diagnostic workspace configuration is invalid.');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalidWorkspaceConfiguration();
   const record = value as Record<string, unknown>;
   if (Object.keys(record).length !== 2 || record.version !== 1 || typeof record.workspaceId !== 'string') {
-    throw new TypeError('Diagnostic workspace configuration is invalid.');
+    throw invalidWorkspaceConfiguration();
   }
   try {
     return Object.freeze({ version: 1, workspaceId: checkedWorkspaceId(record.workspaceId) });
   } catch {
-    throw new TypeError('Diagnostic workspace configuration is invalid.');
+    throw invalidWorkspaceConfiguration();
   }
+}
+
+function invalidWorkspaceConfiguration(): DiagnosticWorkspaceConfigurationError {
+  return new DiagnosticWorkspaceConfigurationError('Diagnostic workspace configuration is invalid.');
 }
 
 function checkedWorkspaceId(value: unknown): string {

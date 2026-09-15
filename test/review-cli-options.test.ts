@@ -14,7 +14,7 @@ test('rejects session-only options on review sessions with the standard invalid-
       exitCode: 2,
       stdout: '',
       stderr: [
-        'Error',
+        'Error  [failed]',
         '',
         `Message    Unsupported option: --${option}.`,
         'Code       INVALID_SYNTAX',
@@ -23,4 +23,15 @@ test('rejects session-only options on review sessions with the standard invalid-
       ].join('\n')
     });
   }
+});
+
+test('routes review commands when options precede the command', async () => {
+  const result = await runCliAsync([
+    '--json', 'review', 'sessions', '--source', 'codex', '--root', '/unused', '--session', 'session-123'
+  ]);
+
+  assert.equal(result.exitCode, 2);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    error: { code: 'INVALID_SYNTAX', message: 'Unsupported option: --session.' }
+  });
 });

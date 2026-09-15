@@ -34,15 +34,24 @@ interface RuntimeConfigurationExplanation {
   readonly trace: Readonly<Record<'id' | 'hardBlocking' | 'warningsEnabled' | 'captureEnabled' | 'retrievalEnabled' | 'degradedOutcomes', { readonly source: string; readonly profileId?: string }>>;
 }
 
+export interface CommandPresentationContext {
+  readonly initialization?: {
+    readonly scope: 'global' | 'repo' | 'workspace';
+    readonly id?: string;
+    readonly root?: string;
+  };
+}
+
 export function renderCommandResult(
   value: unknown,
   positionals: readonly string[],
-  options: HumanRenderOptions = {}
+  options: HumanRenderOptions = {},
+  context: CommandPresentationContext = {}
 ): string {
   const [command, subcommand] = positionals;
   if ((command === 'status' || command === 'status-global' || (command === 'analysis' && subcommand === 'report'))
     && (value as { schemaVersion?: number }).schemaVersion === 2) return renderVersion2Health(value as Version2HealthReport, command, subcommand, options);
-  if (command === 'init') return renderInitialization(value, options);
+  if (command === 'init') return renderInitialization(value, options, context);
   if (command === 'unregister') {
     const result = value as { repositoryId: string; removed: boolean };
     return renderHumanDocument({
@@ -85,18 +94,24 @@ export function renderCommandResult(
   return renderGeneric('AEL result', value, options);
 }
 
-function renderInitialization(value: unknown, options: HumanRenderOptions): string {
+function renderInitialization(value: unknown, options: HumanRenderOptions, context: CommandPresentationContext): string {
   const initialized = value as { kind?: string; id?: string; databasePath?: string; repository?: { id?: string; root?: string } };
   const rows: Array<readonly [string, string]> = [];
-  if (initialized.kind === 'workspace') {
+  if (context.initialization?.scope === 'repo') {
+    rows.push(['Scope', 'repository'], ['Repository', context.initialization.id ?? 'unknown']);
+    if (context.initialization.root !== undefined) rows.push(['Root', context.initialization.root]);
+  } else if (context.initialization?.scope === 'workspace') {
+    rows.push(['Scope', 'workspace'], ['Workspace', context.initialization.id ?? initialized.id ?? 'unknown']);
+    if (context.initialization.root !== undefined) rows.push(['Root', context.initialization.root]);
+  } else if (initialized.kind === 'workspace') {
     rows.push(['Scope', 'workspace'], ['Workspace', initialized.id ?? 'unknown']);
   } else if (initialized.repository !== undefined) {
     rows.push(['Scope', 'repository'], ['Repository', initialized.repository.id ?? 'unknown']);
     if (initialized.repository.root !== undefined) rows.push(['Root', initialized.repository.root]);
   } else {
     rows.push(['Scope', 'global']);
-    if (initialized.databasePath !== undefined) rows.push(['Database', initialized.databasePath]);
   }
+  if (initialized.databasePath !== undefined) rows.push(['Database', initialized.databasePath]);
   return renderHumanDocument({ title: 'AEL initialization', status: status('ready', 'success'), sections: [fields(rows)] }, options);
 }
 
@@ -195,12 +210,25 @@ function renderGlobalStatus(value: unknown, options: HumanRenderOptions): string
     status: status(report.status, toneForState(report.status)),
     sections: [
       fields([['CLI', `${report.cli.available ? 'available' : 'unavailable'} (${report.cli.entrypoint})`], ['Database', `${report.database.available ? 'available' : 'unavailable'} (${report.database.path})`]], 'Installation'),
-      report.repositories.length === 0 ? empty('No registered repositories.', 'Repositories') : {
-        heading: 'Repositories',
-        blocks: [{ kind: 'table', columns: ['ID', 'Status', 'Hooks'], rows: report.repositories.map((entry) => [entry.repository.id, entry.status, entry.selectedSources.join(', ') || 'none']) }]
-      }
+      ...(report.repositories.length === 0
+        ? [empty('No registered repositories.', 'Repositories')]
+        : report.repositories.map(repositoryStatusSection))
     ]
   }, options);
+}
+
+function repositoryStatusSection(report: { status: string; repository: { id: string; root?: string }; selectedSources: readonly string[]; sources: readonly { source: string; status: string; code?: string }[] }): HumanDocument['sections'][number] {
+  return {
+    heading: `Repository ${report.repository.id}`,
+    blocks: [
+      { kind: 'fields', rows: [
+        { label: 'Status', value: report.status },
+        { label: 'Required hooks', value: report.selectedSources.join(', ') || 'none' },
+        ...(report.repository.root === undefined ? [] : [{ label: 'Root', value: report.repository.root }])
+      ] },
+      ...(report.sources.length === 0 ? [] : [{ kind: 'table' as const, columns: ['Source', 'Status', 'Code'], rows: report.sources.map((source) => [source.source, source.status, source.code ?? '']) }])
+    ]
+  };
 }
 
 function renderVersion2Health(report: Version2HealthReport, command: string | undefined, subcommand: string | undefined, options: HumanRenderOptions): string {
@@ -303,9 +331,11 @@ function renderSkill(value: unknown, subcommand: string | undefined, options: Hu
 }
 
 function renderKnowledgeOperation(value: unknown, subcommand: string | undefined, options: HumanRenderOptions): string {
-  const result = value as { identity?: string; entries?: number; trustedRefActive?: boolean; rules?: number; trustedCommit?: string };
+  const result = value as { identity?: string; state?: string; activation?: string; entries?: number; trustedRefActive?: boolean; rules?: number; trustedCommit?: string };
   const rows: Array<readonly [string, string]> = [];
   if (result.identity !== undefined) rows.push(['Identity', result.identity]);
+  if (result.state !== undefined) rows.push(['State', result.state]);
+  if (result.activation !== undefined) rows.push(['Activation', result.activation]);
   if (result.entries !== undefined) rows.push(['Entries', String(result.entries)]);
   if (result.trustedRefActive !== undefined) rows.push(['Trusted ref', result.trustedRefActive ? 'active' : 'inactive']);
   if (result.rules !== undefined) rows.push(['Rules', String(result.rules)]);

@@ -13,12 +13,13 @@ import type { SessionIngestionDiagnostic } from './review/ingestion.js';
 import { createProcessDebriefTerminalHost, runSessionDebrief, type DebriefTerminalHost } from './review/debrief-terminal.js';
 import { createProcessTerminalHost, TerminalReviewSelectionPrompt, type TerminalHost } from './review/terminal-prompt.js';
 import { verifyHookReadiness } from './cli/hook-readiness.js';
+import { parseArguments, type ParsedArguments } from './cli/arguments.js';
 import { resolveCliContext } from './cli/context.js';
 import { createProcessContextPrompt, prepareContextArguments, type CliContextPrompt } from './cli/context-prompt.js';
-import { renderCommandResult } from './cli/human-presentations.js';
+import { renderCommandResult, type CommandPresentationContext } from './cli/human-presentations.js';
 import { renderHumanError, type HumanRenderOptions } from './cli/human-renderer.js';
 import { resolveRepository, resolveRepositoryRoot } from './repository/local-repository.js';
-import { resolveConfiguredWorkspaceRoot } from './capture/diagnostic-scope.js';
+import { DiagnosticWorkspaceConfigurationError, resolveConfiguredWorkspaceRoot } from './capture/diagnostic-scope.js';
 import { installHooks, parseHookSelection, type HookSelectionPrompt, verifyInstalledHooks } from './cli/hook-installation.js';
 import { AelSkillError, inspectAelSkill, installAelSkill, uninstallAelSkill, updateAelSkill, validateAelSkill, type AelSkillLocation, type AelSkillScope } from './skill/ael-skill.js';
 import { OperationalLearningRepository, type AnalysisWorkerSlotFence } from './learning/repository.js';
@@ -42,8 +43,6 @@ export interface RunCliAsyncOptions {
   readonly humanOutput?: HumanRenderOptions;
 }
 
-interface ParsedArguments { readonly positionals: string[]; readonly options: Map<string, string | true>; }
-
 const scopes = new Set(['global', 'repo'] as const);
 const initScopes = new Set(['global', 'repo', 'workspace'] as const);
 const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired']);
@@ -56,27 +55,30 @@ export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workin
     const parsed = parseArguments(args);
     const json = parsed.options.has('json');
     const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
-    return success(execute(service, parsed, options), json, parsed.positionals, options.humanOutput);
+    const value = execute(service, parsed, options);
+    return success(value, json, parsed.positionals, options.humanOutput,
+      json ? undefined : commandPresentationContext(parsed, options.workingDirectory));
   } catch (error) {
     const syntax = error instanceof SyntaxError;
     const diagnostic = toDiagnostic(error, syntax ? 'INVALID_SYNTAX' : 'STORAGE_ERROR');
     return args.includes('--json')
       ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' }
-      : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${renderHumanError(diagnostic, nextStep(diagnostic.code), options.humanOutput)}\n` };
+      : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${renderHumanError(diagnostic, nextStep(diagnostic.code, args), options.humanOutput)}\n` };
   }
 }
 
 export async function runCliAsync(args: string[], options: RunCliAsyncOptions = {}): Promise<CliResult> {
-  if (isCaptureHookCommand(args)) return runCaptureHookCli(args, options);
-  if (args[0] === 'hooks' && args[1] === 'verify') return runHookReadinessCli(args, options.humanOutput);
-  if (isInternalAnalysisWorkerCommand(args)) return runInternalAnalysisWorkerCli(args, options);
-  if (args[0] !== 'review') {
+  const positionals = routingPositionals(args);
+  if (isCaptureHookCommand(positionals)) return runCaptureHookCli(args, options);
+  if (positionals[0] === 'hooks' && positionals[1] === 'verify') return runHookReadinessCli(args, options.humanOutput);
+  if (isInternalAnalysisWorkerCommand(positionals)) return runInternalAnalysisWorkerCli(args, options);
+  if (positionals[0] !== 'review') {
     const prepared = await prepareContextArguments(args, {
       workingDirectory: options.workingDirectory ?? process.cwd(),
       ...(options.contextPrompt === undefined ? {} : { prompt: options.contextPrompt })
     });
     if (prepared.status === 'cancelled') return { exitCode: 130, stdout: '', stderr: '' };
-    if (prepared.status === 'invalid') return contextRequiredResult(args.includes('--json'), options.humanOutput);
+    if (prepared.status === 'invalid') return contextRequiredResult(args, options.humanOutput);
     return runCli([...prepared.args], options);
   }
   try {
@@ -111,12 +113,17 @@ export async function runCliAsync(args: string[], options: RunCliAsyncOptions = 
   } catch (error) {
     const syntax = error instanceof SyntaxError;
     const diagnostic = syntax ? toDiagnostic(error, 'INVALID_SYNTAX') : { code: 'REVIEW_ERROR', message: 'Review failed.' };
-    return args.includes('--json') ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' } : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${renderHumanError(diagnostic, nextStep(diagnostic.code), options.humanOutput)}\n` };
+    return args.includes('--json') ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' } : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${renderHumanError(diagnostic, nextStep(diagnostic.code, args), options.humanOutput)}\n` };
   }
 }
 
 function isInternalAnalysisWorkerCommand(args: readonly string[]): boolean {
   return args[0] === 'analysis' && ['worker', 'worker-watchdog', 'worker-child'].includes(args[1] ?? '');
+}
+
+function routingPositionals(args: readonly string[]): readonly string[] {
+  try { return parseArguments(args).positionals; }
+  catch { return args; }
 }
 
 async function runInternalAnalysisWorkerCli(args: string[], options: RunCliAsyncOptions): Promise<CliResult> {
@@ -194,8 +201,11 @@ async function runHookReadinessCli(args: string[], humanOutput?: HumanRenderOpti
     if (parsed.positionals.length !== 2) throw new SyntaxError('Unknown command form for hooks.');
     return success(await verifyHookReadiness({ worktreePath: requiredString(parsed.options, 'worktree') }), parsed.options.has('json'), parsed.positionals, humanOutput);
   } catch (error) {
-    const diagnostic = toDiagnostic(error, error instanceof SyntaxError ? 'INVALID_SYNTAX' : 'STORAGE_ERROR');
-    return args.includes('--json') ? { exitCode: 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' } : { exitCode: 1, stdout: '', stderr: `${renderHumanError(diagnostic, nextStep(diagnostic.code), humanOutput)}\n` };
+    const syntax = error instanceof SyntaxError;
+    const diagnostic = toDiagnostic(error, syntax ? 'INVALID_SYNTAX' : 'STORAGE_ERROR');
+    return args.includes('--json')
+      ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' }
+      : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${renderHumanError(diagnostic, nextStep(diagnostic.code, args), humanOutput)}\n` };
   }
 }
 
@@ -234,14 +244,14 @@ function hookCliResult(result: HookIngressResult): CliResult {
   };
 }
 
-function contextRequiredResult(json: boolean, humanOutput?: HumanRenderOptions): CliResult {
+function contextRequiredResult(args: readonly string[], humanOutput?: HumanRenderOptions): CliResult {
   const diagnostic = {
     code: 'CONTEXT_REQUIRED',
     message: 'A repository or workspace is required. Pass an explicit context option or run the command inside a configured AEL workspace.'
   };
-  return json
+  return args.includes('--json')
     ? { exitCode: 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' }
-    : { exitCode: 1, stdout: '', stderr: `${renderHumanError(diagnostic, nextStep(diagnostic.code), humanOutput)}\n` };
+    : { exitCode: 1, stdout: '', stderr: `${renderHumanError(diagnostic, nextStep(diagnostic.code, args), humanOutput)}\n` };
 }
 
 async function readBoundedStdin(): Promise<{ readonly input: string; readonly oversized: boolean }> {
@@ -382,15 +392,17 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   }
   if (command === 'knowledge' && subcommand === 'refresh-runtime' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository', 'repository-id', 'trusted-ref']);
+    const trustedRef = requiredString(parsed.options, 'trusted-ref');
     return service.knowledgeRefreshRuntime(
       contextualRoot(parsed.options, 'repository', options.workingDirectory),
       contextualRepositoryId(parsed.options, options.workingDirectory),
-      requiredString(parsed.options, 'trusted-ref')
+      trustedRef
     );
   }
   if (command === 'knowledge' && subcommand === 'promote' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'input', 'json', 'repository']);
-    return service.knowledgePromote(contextualRoot(parsed.options, 'repository', options.workingDirectory), requiredString(parsed.options, 'input'));
+    const input = requiredString(parsed.options, 'input');
+    return service.knowledgePromote(contextualRoot(parsed.options, 'repository', options.workingDirectory), input);
   }
   if (command === 'hooks' && subcommand === 'verify' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['worktree', 'json']);
@@ -405,7 +417,8 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
 }
 
 function diagnosticDirectory(options: Map<string, string | true>, workingDirectory?: string): string {
-  return optionalString(options, 'repository') ?? workingDirectory ?? process.cwd();
+  const selected = optionalString(options, 'repository') ?? workingDirectory ?? process.cwd();
+  return resolveCliContext(selected)?.root ?? selected;
 }
 
 function executeSkill(parsed: ParsedArguments, options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory'>): unknown {
@@ -467,21 +480,6 @@ function parseReviewRequest(parsed: ParsedArguments) {
   return { kind: 'review' as const, source, session, root, project, repository, interactive, profile: optionalReviewProfile(parsed.options), allowExpensiveChecks: parsed.options.has('allow-expensive-checks') };
 }
 
-function parseArguments(args: readonly string[]): ParsedArguments {
-  const positionals: string[] = []; const options = new Map<string, string | true>();
-  for (let index = 0; index < args.length; index += 1) {
-    const value = args[index];
-    if (value === '--') continue;
-    if (!value.startsWith('--')) { positionals.push(value); continue; }
-    const name = value.slice(2); if (!name) throw new SyntaxError('Option name is required.');
-    if (options.has(name)) throw new SyntaxError(`Option may be supplied once: --${name}.`);
-    if (name === 'json' || name === 'interactive' || name === 'allow-expensive-checks' || name === 'refresh' || name === 'yes') { options.set(name, true); continue; }
-    const optionValue = args[index + 1]; if (!optionValue || optionValue.startsWith('--')) throw new SyntaxError(`Option requires a value: --${name}.`);
-    options.set(name, optionValue); index += 1;
-  }
-  return { positionals, options };
-}
-
 function assertNoUnknownOptions(options: Map<string, string | true>, allowed: readonly string[]): void {
   for (const name of options.keys()) if (!allowed.includes(name)) throw new SyntaxError(`Unsupported option: --${name}.`);
 }
@@ -539,9 +537,10 @@ function optionalState(options: Map<string, string | true>): KnowledgeState | un
 }
 function filterOptions(options: Map<string, string | true>, workingDirectory?: string) {
   const scope = optionalScope(options);
+  const state = optionalState(options);
   const explicitRepositoryId = optionalString(options, 'repository-id');
   const repositoryId = explicitRepositoryId ?? (scope === 'repository' ? contextualRepositoryId(options, workingDirectory) : undefined);
-  return { scope, repositoryId, state: optionalState(options), tag: optionalString(options, 'tag') };
+  return { scope, repositoryId, state, tag: optionalString(options, 'tag') };
 }
 function optionalRepositoryId(options: Map<string, string | true>): { readonly id: string; readonly root?: string } | undefined {
   const explicit = optionalString(options, 'repository-id'); const path = optionalString(options, 'repository');
@@ -577,12 +576,28 @@ function contextualRoot(options: Map<string, string | true>, option: 'repository
 function requiredContext(kind: string, option: string): never {
   throw new DomainError('CONTEXT_REQUIRED', `A ${kind} is required. Pass ${option} or run the command inside a configured AEL workspace.`);
 }
-function success(value: unknown, json: boolean, positionals: readonly string[], humanOutput?: HumanRenderOptions): CliResult {
+function success(value: unknown, json: boolean, positionals: readonly string[], humanOutput?: HumanRenderOptions, context?: CommandPresentationContext): CliResult {
   const version2 = value as { schemaVersion?: number; installation?: { state?: string } };
   const exitCode = (positionals[0] === 'runtime' && positionals[1] === 'evaluate' && (value as { outcome?: string }).outcome === 'BLOCK')
     || (positionals[0] === 'status' && (version2.schemaVersion === 2 ? version2.installation?.state !== 'ready' : (value as { status?: string }).status !== 'ready'))
     || (positionals[0] === 'hooks' && positionals[1] === 'verify' && (value as { status?: string }).status !== 'ready') ? 1 : 0;
-  return json ? { exitCode, stdout: `${JSON.stringify(value)}\n`, stderr: '' } : { exitCode, stdout: `${renderCommandResult(value, positionals, humanOutput)}\n`, stderr: '' };
+  return json ? { exitCode, stdout: `${JSON.stringify(value)}\n`, stderr: '' } : { exitCode, stdout: `${renderCommandResult(value, positionals, humanOutput, context)}\n`, stderr: '' };
+}
+
+function commandPresentationContext(parsed: ParsedArguments, workingDirectory?: string): CommandPresentationContext | undefined {
+  if (parsed.positionals[0] !== 'init') return undefined;
+  const scope = optionalString(parsed.options, 'scope');
+  if (scope !== 'global' && scope !== 'repo' && scope !== 'workspace') return undefined;
+  if (scope === 'global') return { initialization: { scope } };
+  const resolved = scope === 'repo'
+    ? resolveRepositoryRoot(workingDirectory ?? process.cwd())
+    : resolveCliContext(workingDirectory ?? process.cwd());
+  return {
+    initialization: {
+      scope,
+      ...(resolved === undefined ? {} : { id: resolved.id, root: resolved.root })
+    }
+  };
 }
 function invalidCommand(command: string | undefined): SyntaxError {
   return new SyntaxError(command !== undefined && knownCommands.has(command)
@@ -595,7 +610,9 @@ function usage(): string {
     '',
     'Setup',
     '  init [--workspace-id <slug>]',
-    '  init --scope <global|repo|workspace> [--hooks <codex,cursor>] [--workspace-id <slug>]',
+    '  init --scope global',
+    '  init --scope repo --hooks <codex,cursor>',
+    '  init --scope workspace --hooks <codex,cursor> [--workspace-id <slug>]',
     '  unregister [--repository-id <id>]',
     '  status [--repository <path>|--repository-id <id>] [--schema-version 2]',
     '  status-global [--repository <path>|--repository-id <id>] [--schema-version 2]',
@@ -645,18 +662,34 @@ function usage(): string {
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } {
   return error instanceof DomainError || error instanceof RuntimeServiceError
     ? { code: error.code, message: error.message }
+    : error instanceof DiagnosticWorkspaceConfigurationError
+      ? { code: error.code, message: error.message }
     : error instanceof AelSkillError
       ? { code: error.code, message: error.message.replace(`${error.code}: `, '') }
     : { code: fallbackCode, message: errorMessage(error) };
 }
 
-function nextStep(code: string): string | undefined {
+function nextStep(code: string, args: readonly string[] = []): string | undefined {
+  if (code === 'WORKSPACE_CONFIGURATION_ERROR') {
+    return 'Repair or remove the nearest `.ael/workspace.json`, then retry.';
+  }
   if (code === 'CONTEXT_REQUIRED' || code === 'REPOSITORY_REQUIRED' || code === 'REPOSITORY_ROOT_REQUIRED') {
+    const positionals = safePositionals(args);
+    if (positionals[0] === 'init') return 'Change to a Git top-level directory or use `ael init --scope workspace --hooks <sources>`.';
+    if (positionals[0] === 'runtime' && positionals[1] === 'config') return 'Run `ael init` in the workspace or pass --workspace.';
+    if (positionals[0] === 'knowledge') {
+      if (positionals[1] === 'refresh-runtime') return 'Run `ael init` in the workspace or pass --repository and --repository-id.';
+      return 'Run `ael init` in the workspace or pass --repository.';
+    }
     return 'Run `ael init` in the workspace or pass --repository-id.';
   }
   if (code === 'INVALID_SYNTAX') return 'Run `ael --help` to inspect supported command forms.';
   if (code === 'NOT_FOUND') return 'Check the requested identifier and selected repository or workspace.';
   return undefined;
+}
+
+function safePositionals(args: readonly string[]): readonly string[] {
+  try { return parseArguments(args).positionals; } catch { return []; }
 }
 
 if (process.argv[1] && basename(process.argv[1]) === basename(fileURLToPath(import.meta.url))) {

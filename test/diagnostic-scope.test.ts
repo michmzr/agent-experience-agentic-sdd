@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, normalize } from 'node:path';
 import test from 'node:test';
 
-import { initializeDiagnosticWorkspace, resolveDiagnosticScope } from '../src/capture/diagnostic-scope.js';
+import { findConfiguredWorkspaceRoot, initializeDiagnosticWorkspace, resolveDiagnosticScope } from '../src/capture/diagnostic-scope.js';
 import { resolveRepository } from '../src/repository/local-repository.js';
 import { initializeGitRepository } from './helpers/git-repository.js';
 
@@ -114,6 +114,26 @@ test('initializes an explicit workspace ID without replacing valid configuration
     version: 1,
     workspaceId: 'explicit-workspace'
   });
+});
+
+test('discovers an existing workspace without changing its permissions', () => {
+  const workspace = temporaryDirectory('ael-diagnostic-read-only-workspace-');
+  initializeDiagnosticWorkspace(workspace, 'read-only-workspace', scopeOptions);
+  const configurationDirectory = join(workspace, '.ael');
+  const configurationPath = join(configurationDirectory, 'workspace.json');
+  chmodSync(configurationPath, 0o400);
+  chmodSync(configurationDirectory, 0o500);
+  try {
+    assert.deepEqual(findConfiguredWorkspaceRoot(workspace), {
+      id: 'read-only-workspace',
+      root: realpathSync(workspace)
+    });
+    assert.equal(lstatSync(configurationDirectory).mode & 0o777, 0o500);
+    assert.equal(lstatSync(configurationPath).mode & 0o777, 0o400);
+  } finally {
+    chmodSync(configurationDirectory, 0o755);
+    chmodSync(configurationPath, 0o644);
+  }
 });
 
 test('resolves a symlink and a moved workspace to the same stable scope', () => {

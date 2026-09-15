@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, normalize } from 'node:path';
 import { after, test } from 'node:test';
@@ -72,6 +72,13 @@ test('rejects malformed nearest workspace metadata instead of falling back to Gi
   writeFileSync(join(root, '.ael', 'workspace.json'), '{broken');
 
   assert.throws(() => resolveCliContext(nested), /workspace configuration is invalid/i);
+
+  const result = runCli(['unregister', '--json'], { workingDirectory: nested });
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(JSON.parse(result.stdout), { error: {
+    code: 'WORKSPACE_CONFIGURATION_ERROR',
+    message: 'Diagnostic workspace configuration is invalid.'
+  } });
 });
 
 test('rejects a symlinked workspace metadata directory', () => {
@@ -95,11 +102,68 @@ test('defaults repository-scoped commands to a configured workspace identity', (
   const lessons = runCli(['lessons', 'list', '--scope', 'repo', '--json', '--data-dir', dataDirectory], { workingDirectory: nested });
   const retrieve = runCli(['retrieve', '--scope', 'repo', '--json', '--data-dir', dataDirectory], { workingDirectory: nested });
   const exported = runCli(['export', '--scope', 'repo', '--json', '--data-dir', dataDirectory], { workingDirectory: nested });
+  const diagnostics = runCli(['hooks', 'diagnostics', '--json', '--data-dir', dataDirectory], { workingDirectory: nested });
 
   assert.deepEqual(JSON.parse(unregister.stdout), { repositoryId: 'configured-workspace', removed: false });
   assert.deepEqual(JSON.parse(lessons.stdout), []);
   assert.deepEqual(JSON.parse(retrieve.stdout), []);
   assert.deepEqual(JSON.parse(exported.stdout).knowledge, []);
+  assert.deepEqual(JSON.parse(diagnostics.stdout).scope, { kind: 'workspace', id: 'configured-workspace' });
+  assert.equal(existsSync(join(nested, '.ael')), false);
+});
+
+test('diagnostics prefer a nested workspace over its outer Git repository', () => {
+  const repository = temporaryDirectory('ael-cli-diagnostic-outer-git-');
+  const workspace = join(repository, 'packages', 'workspace');
+  const nested = join(workspace, 'src');
+  const dataDirectory = temporaryDirectory('ael-cli-diagnostic-outer-git-data-');
+  initializeGitRepository(repository);
+  mkdirSync(nested, { recursive: true });
+  configureWorkspace(workspace, 'nested-workspace');
+
+  const diagnostics = runCli(['experience', 'inspect', '--json', '--data-dir', dataDirectory], { workingDirectory: nested });
+
+  assert.equal(diagnostics.exitCode, 0, diagnostics.stderr);
+  assert.deepEqual(JSON.parse(diagnostics.stdout).scope, { kind: 'workspace', id: 'nested-workspace' });
+  assert.equal(existsSync(join(nested, '.ael')), false);
+});
+
+test('explicit diagnostic paths resolve to their nearest configured workspace', () => {
+  const workspace = temporaryDirectory('ael-cli-explicit-diagnostic-workspace-');
+  const nested = join(workspace, 'src');
+  const dataDirectory = temporaryDirectory('ael-cli-explicit-diagnostic-data-');
+  mkdirSync(nested);
+  configureWorkspace(workspace, 'explicit-workspace');
+
+  const diagnostics = runCli([
+    'hooks', 'diagnostics', '--repository', nested, '--json', '--data-dir', dataDirectory
+  ]);
+
+  assert.equal(diagnostics.exitCode, 0, diagnostics.stderr);
+  assert.deepEqual(JSON.parse(diagnostics.stdout).scope, { kind: 'workspace', id: 'explicit-workspace' });
+  assert.equal(existsSync(join(nested, '.ael')), false);
+});
+
+test('reports malformed workspace metadata from an explicit diagnostic path', () => {
+  const workspace = temporaryDirectory('ael-cli-explicit-invalid-workspace-');
+  const nested = join(workspace, 'src');
+  const dataDirectory = temporaryDirectory('ael-cli-explicit-invalid-data-');
+  mkdirSync(nested);
+  mkdirSync(join(workspace, '.ael'));
+  writeFileSync(join(workspace, '.ael', 'workspace.json'), '{broken');
+
+  const diagnostics = runCli([
+    'experience', 'inspect', '--repository', nested, '--json', '--data-dir', dataDirectory
+  ]);
+
+  assert.equal(diagnostics.exitCode, 1);
+  assert.deepEqual(JSON.parse(diagnostics.stdout), {
+    error: {
+      code: 'WORKSPACE_CONFIGURATION_ERROR',
+      message: 'Diagnostic workspace configuration is invalid.'
+    }
+  });
+  assert.equal(existsSync(join(nested, '.ael')), false);
 });
 
 test('defaults path and identity commands to Git context from a nested directory', () => {
