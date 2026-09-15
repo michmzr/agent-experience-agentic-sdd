@@ -35,6 +35,21 @@ function acknowledgeForCli(
   });
 }
 
+test('groups public help and documents context precedence', () => {
+  const result = runCli(['--help']);
+
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /^Usage: ael <command> \[options\]$/m);
+  for (const heading of ['Setup', 'Observation', 'Review', 'Runtime', 'Knowledge', 'Skills']) {
+    assert.match(result.stdout, new RegExp(`^${heading}$`, 'm'));
+  }
+  assert.match(result.stdout, /unregister \[--repository-id <id>\]/);
+  assert.match(result.stdout, /runtime config explain \[--workspace <path>\]/);
+  assert.match(result.stdout, /^Context: explicit option > nearest \.ael\/workspace\.json > Git root > interactive prompt\.$/m);
+  assert.equal(result.stdout.includes('worker-child'), false);
+  assert.equal(result.stdout.includes('capture hook'), false);
+});
+
 test('returns an error for an unknown command', () => {
   const result = runCli(['unknown']);
 
@@ -117,7 +132,7 @@ test('bounds analysis worker configuration and internal argument errors without 
   const marker = 'private-worker-token';
   try {
     writeFileSync(join(dataDir, 'analysis-worker.json'), `{\"version\":1,\"maxProcesses\":99,\"idleTimeoutMs\":300000,\"private\":\"${marker}\"}`);
-    const worker = await runCliAsync(['analysis', 'worker', '--data-dir', dataDir]);
+    const worker = await runCliAsync(['analysis', 'worker', '--data-dir', dataDir], { humanOutput: { color: true } });
     assert.equal(worker.exitCode, 1);
     assert.equal(worker.stdout, '');
     assert.match(worker.stderr, /^ANALYSIS_CONFIGURATION_ERROR: Analysis worker configuration is invalid\.\n$/);
@@ -131,14 +146,14 @@ test('bounds analysis worker configuration and internal argument errors without 
     assert.equal(status.stdout.includes(marker), false);
 
     const invalidChild = await runCliAsync(['analysis', 'worker-child', '--data-dir', dataDir,
-      '--worker-slot-id', marker, '--worker-slot-owner', 'owner', '--worker-slot-attempt', 'not-an-integer']);
+      '--worker-slot-id', marker, '--worker-slot-owner', 'owner', '--worker-slot-attempt', 'not-an-integer'], { humanOutput: { color: true } });
     assert.equal(invalidChild.exitCode, 2);
     assert.equal(invalidChild.stdout, '');
     assert.match(invalidChild.stderr, /^INVALID_SYNTAX: Analysis worker arguments are invalid\.\n$/);
     assert.equal(invalidChild.stderr.includes(marker), false);
 
     const lostWatchdog = await runCliAsync(['analysis', 'worker-watchdog', '--data-dir', dataDir,
-      '--worker-slot-id', '00000000-0000-4000-8000-000000000000', '--worker-slot-owner', 'owner', '--worker-slot-attempt', '1']);
+      '--worker-slot-id', '00000000-0000-4000-8000-000000000000', '--worker-slot-owner', 'owner', '--worker-slot-attempt', '1'], { humanOutput: { color: true } });
     assert.equal(lostWatchdog.exitCode, 1);
     assert.equal(lostWatchdog.stdout, '');
     assert.equal(lostWatchdog.stderr, 'ANALYSIS_WORKER_FAILED: Analysis worker failed.\n');

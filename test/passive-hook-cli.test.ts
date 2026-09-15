@@ -185,7 +185,8 @@ test('retains generic private-error and persistence-error fallback classificatio
       {
         workingDirectory: workspace,
         hookInput: JSON.stringify({ conversation_id: 'private-fallback-session', hook_event_name: 'sessionStart' }),
-        now: () => { throw new Error('credential lookup failed'); }
+        now: () => { throw new Error('credential lookup failed'); },
+        humanOutput: { color: true }
       }
     );
     assert.deepEqual(privateFailure, {
@@ -229,11 +230,11 @@ test('fails open for missing or unsupported sources while preserving ordinary sy
     for (const dataDir of dataDirectories) rmSync(dataDir, { recursive: true, force: true });
   }
 
-  assert.deepEqual(await runCliAsync(['unknown'], { hookInput: '{not-json', now }), {
-    exitCode: 2,
-    stdout: '',
-    stderr: 'INVALID_SYNTAX: Unknown command.\n'
-  });
+  const ordinary = await runCliAsync(['unknown'], { hookInput: '{not-json', now });
+  assert.equal(ordinary.exitCode, 2);
+  assert.equal(ordinary.stdout, '');
+  assert.match(ordinary.stderr, /^Error$/m);
+  assert.match(ordinary.stderr, /^Code\s+INVALID_SYNTAX$/m);
 });
 
 test('maps persistence failures to a generic fail-open diagnostic', async () => {

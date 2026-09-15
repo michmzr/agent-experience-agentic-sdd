@@ -589,7 +589,59 @@ function invalidCommand(command: string | undefined): SyntaxError {
     ? `Unknown command form for ${command}.`
     : 'Unknown command.');
 }
-function usage(): string { return 'Usage: ael <init [--workspace-id slug]|init --scope global|repo|workspace [--hooks codex,cursor]|unregister --repository-id id|list records|stats|status|status-global|experience add|experience inspect|validate|inspect|lessons list|retrieve|export|evidence session <id>|capture hook --source codex|cursor|capture drain|capture status|analysis run --repository-id id|analysis report --repository-id id|analysis status [--repository-id id] [--session id]|analysis worker|hooks verify --worktree path|hooks diagnostics|review session|runtime evaluate|runtime status|runtime config explain|knowledge validate|knowledge refresh-runtime|knowledge promote|skill install|update|status|validate|uninstall> [options]'; }
+function usage(): string {
+  return [
+    'Usage: ael <command> [options]',
+    '',
+    'Setup',
+    '  init [--workspace-id <slug>]',
+    '  init --scope <global|repo|workspace> [--hooks <codex,cursor>] [--workspace-id <slug>]',
+    '  unregister [--repository-id <id>]',
+    '  status [--repository <path>|--repository-id <id>] [--schema-version 2]',
+    '  status-global [--repository <path>|--repository-id <id>] [--schema-version 2]',
+    '  hooks verify --worktree <path>',
+    '  hooks diagnostics [--repository <path>]',
+    '',
+    'Observation',
+    '  experience add --input <path>',
+    '  experience inspect [--repository <path>]',
+    '  validate [--scope <global|repository>]',
+    '  inspect <knowledge-id>',
+    '  list records [--repository <path>|--repository-id <id>]',
+    '  stats [--repository <path>|--repository-id <id>]',
+    '  evidence session <session-id>',
+    '  capture drain',
+    '  capture status',
+    '  analysis run [--repository-id <id>]',
+    '  analysis report [--repository-id <id>] [--session <id>] [--schema-version 2]',
+    '  analysis status [--repository-id <id>] [--session <id>]',
+    '  analysis worker',
+    '',
+    'Review',
+    '  review sessions --source <codex|claude-code|cursor> --root <path> [--project <path>]',
+    '  review session --source <codex|claude-code|cursor> --root <path> [--session <id|latest>] [--repository <id>] [--interactive]',
+    '',
+    'Runtime',
+    '  runtime evaluate --input <path> [--profile <normal|learning|observe-only>] [--refresh]',
+    '  runtime status',
+    '  runtime config explain [--workspace <path>] [--remote <url>]',
+    '',
+    'Knowledge',
+    '  lessons list [--scope <global|repository>] [--repository-id <id>] [--state <state>] [--tag <tag>]',
+    '  retrieve [--scope <global|repository>] [--repository-id <id>] [--path <path>] [--tool <tool>]',
+    '  export [--scope <global|repository>] [--repository-id <id>] [--format json]',
+    '  knowledge validate [--repository <path>] [--trusted-ref <ref>]',
+    '  knowledge refresh-runtime [--repository <path>] [--repository-id <id>] --trusted-ref <ref>',
+    '  knowledge promote [--repository <path>] --input <path>',
+    '',
+    'Skills',
+    '  skill install|update|status|uninstall --scope <workspace|global> [--workspace <path>] [--yes]',
+    '  skill validate <path>',
+    '',
+    'Options: --json emits the stable machine-readable protocol. --data-dir <path> selects AEL storage.',
+    'Context: explicit option > nearest .ael/workspace.json > Git root > interactive prompt.'
+  ].join('\n');
+}
 function toDiagnostic(error: unknown, fallbackCode: string): { code: string; message: string } {
   return error instanceof DomainError || error instanceof RuntimeServiceError
     ? { code: error.code, message: error.message }
