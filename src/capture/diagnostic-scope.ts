@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { basename, join, normalize } from 'node:path';
+import { basename, dirname, join, normalize } from 'node:path';
 
 import type { RepositoryId } from '../domain/types.js';
 import { resolveRepository } from '../repository/local-repository.js';
@@ -90,6 +90,17 @@ export function resolveConfiguredWorkspaceRoot(directory: string): ConfiguredWor
   } catch (error) {
     if (isMissingPath(error)) return undefined;
     throw error;
+  }
+}
+
+export function findConfiguredWorkspaceRoot(directory: string): ConfiguredWorkspace | undefined {
+  let current = normalizeRealDirectory(directory);
+  while (true) {
+    const configuration = readWorkspaceConfiguration(current);
+    if (configuration !== undefined) return Object.freeze({ id: configuration.workspaceId, root: current });
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
   }
 }
 
