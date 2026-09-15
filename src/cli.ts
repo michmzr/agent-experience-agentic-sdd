@@ -14,6 +14,7 @@ import { createProcessDebriefTerminalHost, runSessionDebrief, type DebriefTermin
 import { createProcessTerminalHost, TerminalReviewSelectionPrompt, type TerminalHost } from './review/terminal-prompt.js';
 import { verifyHookReadiness } from './cli/hook-readiness.js';
 import { resolveCliContext } from './cli/context.js';
+import { createProcessContextPrompt, prepareContextArguments, type CliContextPrompt } from './cli/context-prompt.js';
 import { resolveRepository, resolveRepositoryRoot } from './repository/local-repository.js';
 import { resolveConfiguredWorkspaceRoot } from './capture/diagnostic-scope.js';
 import { installHooks, parseHookSelection, type HookSelectionPrompt, verifyInstalledHooks } from './cli/hook-installation.js';
@@ -35,6 +36,7 @@ export interface RunCliAsyncOptions {
   readonly hookInput?: string;
   readonly now?: () => string;
   readonly ingestionDiagnosticWrite?: (line: string) => void | Promise<void>;
+  readonly contextPrompt?: CliContextPrompt;
 }
 
 interface ParsedArguments { readonly positionals: string[]; readonly options: Map<string, string | true>; }
@@ -65,7 +67,15 @@ export async function runCliAsync(args: string[], options: RunCliAsyncOptions = 
   if (isCaptureHookCommand(args)) return runCaptureHookCli(args, options);
   if (args[0] === 'hooks' && args[1] === 'verify') return runHookReadinessCli(args);
   if (isInternalAnalysisWorkerCommand(args)) return runInternalAnalysisWorkerCli(args, options);
-  if (args[0] !== 'review') return runCli(args, options);
+  if (args[0] !== 'review') {
+    const prepared = await prepareContextArguments(args, {
+      workingDirectory: options.workingDirectory ?? process.cwd(),
+      ...(options.contextPrompt === undefined ? {} : { prompt: options.contextPrompt })
+    });
+    if (prepared.status === 'cancelled') return { exitCode: 130, stdout: '', stderr: '' };
+    if (prepared.status === 'invalid') return contextRequiredResult(args.includes('--json'));
+    return runCli([...prepared.args], options);
+  }
   try {
     const parsed = parseArguments(args); const json = parsed.options.has('json');
     const request = parseReviewRequest(parsed);
@@ -219,6 +229,16 @@ function hookCliResult(result: HookIngressResult): CliResult {
     stdout: '',
     stderr: `AEL_CAPTURE_${result.code}: Passive capture skipped.\n`
   };
+}
+
+function contextRequiredResult(json: boolean): CliResult {
+  const diagnostic = {
+    code: 'CONTEXT_REQUIRED',
+    message: 'A repository or workspace is required. Pass an explicit context option or run the command inside a configured AEL workspace.'
+  };
+  return json
+    ? { exitCode: 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' }
+    : { exitCode: 1, stdout: '', stderr: `${diagnostic.code}: ${diagnostic.message}\n` };
 }
 
 async function readBoundedStdin(): Promise<{ readonly input: string; readonly oversized: boolean }> {
@@ -754,7 +774,7 @@ function toDiagnostic(error: unknown, fallbackCode: string): { code: string; mes
 }
 
 if (process.argv[1] && basename(process.argv[1]) === basename(fileURLToPath(import.meta.url))) {
-  const result = await runCliAsync(process.argv.slice(2), { ingestionDiagnosticWrite: writeProcessStderr }); process.stdout.write(result.stdout); process.stderr.write(result.stderr); process.exitCode = result.exitCode;
+  const result = await runCliAsync(process.argv.slice(2), { ingestionDiagnosticWrite: writeProcessStderr, contextPrompt: createProcessContextPrompt() }); process.stdout.write(result.stdout); process.stderr.write(result.stderr); process.exitCode = result.exitCode;
 }
 
 function writeProcessStderr(line: string): Promise<void> {
