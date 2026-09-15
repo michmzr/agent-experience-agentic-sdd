@@ -2,6 +2,8 @@
 
 Initialize shared local data with `ael init --scope global`. Initialize a Git repository and its selected capture hooks with `ael init --scope repo --hooks codex,cursor`. For a directory that must remain outside Git, use `ael init --scope workspace --hooks codex,cursor` and optionally assign `--workspace-id <slug>`.
 
+From a nested directory, AEL searches each ancestor for `.ael/workspace.json`. The nearest valid workspace configuration supplies both the root and identifier and takes precedence over Git context. If no workspace configuration exists, AEL uses the current Git root. Explicit command options remain authoritative.
+
 Inspect the workspace integration with `ael status --json` and hook readiness with `ael hooks verify --worktree <path> --json`. A non-ready status is diagnostic evidence, not permission to overwrite configuration. Preserve unrelated hook configuration.
 
 Use `ael status --schema-version 2 --json` for the multidimensional health contract. It reports installation, delivery, retained-data quality, and analysis independently. Receipt accounting is local-spool-wide in this release, so repository reports mark admitted-operation and receipt fields unavailable instead of attributing them across repositories. `ael status-global --schema-version 2 --json` applies the same dimensions to registered integrations without exposing local paths. `ael analysis report --repository-id <id> --schema-version 2 --json` returns the versioned analysis dimension. Omitting `--schema-version 2` keeps the version 1 output contract unchanged.

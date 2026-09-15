@@ -71,28 +71,32 @@ The delivery-readiness deadline defaults to 2000 milliseconds. A project may con
 ael init --scope global
 ael init --scope repo --hooks codex|cursor|codex,cursor
 ael init --scope workspace --hooks codex|cursor|codex,cursor [--workspace-id <slug>]
-ael unregister --repository-id <id>
+ael unregister [--repository-id <id>]
 ael list records [--repository-id <id>|--repository <git-root>] [--json]
 ael stats [--repository-id <id>|--repository <git-root>] [--json]
 ael status [--repository-id <id>|--repository <git-root>] [--json]
 ael status-global [--repository-id <id>|--repository <git-root>] [--json]
 ael experience add --input record.json
+ael experience inspect [--repository <path>] [--json]
 ael capture drain [--json]
 ael capture status [--json]
 ael validate [--scope global|repo] [--json]
 ael inspect <id>
-ael lessons list [--scope global|repo] [--state <state>] [--tag <tag>]
+ael lessons list [--scope global|repo] [--repository-id <id>] [--state <state>] [--tag <tag>]
 ael retrieve [--scope global|repo] [--repository-id <id>] [--path <path>] [--tool <tool>] [--tag <tag>]
 ael export [--scope global|repo] [--repository-id <id>] [--format json]
+ael analysis run [--repository-id <id>] [--json]
+ael analysis report [--repository-id <id>] [--session <id>] [--schema-version 2] [--json]
+ael analysis status [--repository-id <id>] [--session <id>] [--json]
 ael review sessions --source codex|claude-code|cursor --root <directory> [--project <claude-project>] [--json]
 ael review session --source codex|claude-code|cursor --root <directory> --session <id> [--project <claude-project>] [--profile <id@version>] [--allow-expensive-checks] [--json]
 ael review session --source codex|claude-code|cursor --root <directory> --interactive --repository <repository-directory> [--session latest] [--project <claude-project>] [--profile <id@version>] [--allow-expensive-checks] [--json]
 ael runtime evaluate --input action.json [--profile normal|learning|observe-only] [--refresh] [--json]
 ael runtime status [--json]
-ael runtime config explain --workspace <path> [--remote <url>] [--json]
-ael knowledge validate --repository <path> [--trusted-ref <ref>] [--json]
-ael knowledge refresh-runtime --repository <path> --repository-id <id> --trusted-ref <ref> [--json]
-ael knowledge promote --repository <path> --input document.json [--json]
+ael runtime config explain [--workspace <path>] [--remote <url>] [--json]
+ael knowledge validate [--repository <path>] [--trusted-ref <ref>] [--json]
+ael knowledge refresh-runtime [--repository <path>] [--repository-id <id>] --trusted-ref <ref> [--json]
+ael knowledge promote [--repository <path>] --input document.json [--json]
 ael skill install --scope workspace [--workspace <directory>] [--json]
 ael skill install --scope global --yes [--json]
 ael skill update --scope workspace [--workspace <directory>] [--json]
@@ -102,6 +106,8 @@ ael skill validate <skill-directory> [--json]
 ael skill uninstall --scope workspace [--workspace <directory>] [--json]
 ael skill uninstall --scope global --yes [--json]
 ```
+
+For commands that need a repository or workspace, an explicit option wins. Otherwise AEL uses the nearest ancestor `.ael/workspace.json`, then the current Git root. An interactive terminal asks for a path only when neither source resolves context. JSON and redirected execution never prompt. Use `NO_COLOR=1` to disable ANSI styling while retaining the human-readable layout.
 
 Pass `--data-dir <directory>` to every command to select a private local data directory. The default is `~/Library/Application Support/AgentExperience` on macOS and `$XDG_DATA_HOME/agent-experience` or `~/.local/share/agent-experience` on Linux. Use `--json` for deterministic structured results and diagnostics. Runtime ALLOW and WARN decisions return exit code 0. Runtime BLOCK decisions, domain failures, and storage failures return 1. Invalid command syntax returns 2.
 
