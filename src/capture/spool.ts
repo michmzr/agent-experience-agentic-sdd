@@ -1,3 +1,4 @@
+import { assertWriterCompatible } from '../installation/writer-contract.js';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -64,6 +65,7 @@ export class CaptureSpool {
     this.#maxActiveBytes = boundedPositiveInteger(options.maxActiveBytes, MAX_ACTIVE_BYTES, 'Maximum active byte count');
     this.#failReceiptPersistence = options.failReceiptPersistence === true;
     this.#maxReceipts = boundedPositiveInteger(options.maxReceipts, MAX_RECEIPTS, 'Maximum receipt count');
+    assertWriterCompatible([path]);
     ensurePrivatePath(path);
     this.#database = new DatabaseSync(path, { enableForeignKeyConstraints: true, timeout: ADMISSION_BUSY_TIMEOUT_MS });
     chmodSync(path, 0o600);
@@ -107,6 +109,8 @@ export class CaptureSpool {
         lease_until TEXT NOT NULL
       ) STRICT;
       CREATE TABLE IF NOT EXISTS drain_completion (id INTEGER PRIMARY KEY CHECK (id = 1), generation INTEGER NOT NULL, state TEXT NOT NULL CHECK (state IN ('pending', 'complete')), owner TEXT) STRICT;
+      CREATE TABLE IF NOT EXISTS ael_writer_contract (id INTEGER PRIMARY KEY CHECK (id = 1), minimum_writer INTEGER NOT NULL CHECK (minimum_writer >= 1)) STRICT;
+      INSERT OR IGNORE INTO ael_writer_contract VALUES (1, 1);
       CREATE TABLE IF NOT EXISTS receipt_secret (id INTEGER PRIMARY KEY CHECK (id = 1), secret BLOB NOT NULL) STRICT;
       CREATE TABLE IF NOT EXISTS capture_receipts (
         sequence INTEGER PRIMARY KEY, correlation_key TEXT NOT NULL, disposition TEXT NOT NULL CHECK (disposition IN ('accepted', 'duplicate', 'unsupported-tool', 'privacy-redaction', 'unsafe-normalization', 'malformed-envelope', 'admission-failure', 'delivery-retry', 'quarantine', 'legacy-unknown')),

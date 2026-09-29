@@ -2,6 +2,11 @@
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 
+import { defaultDatabasePath } from './storage/database.js';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { createAlignmentPlan, applyAlignmentPlan } from './installation/alignment.js';
+import { qualifyInstallation } from './installation/qualification.js';
+import { inspectInstallation, registeredInstallationRoots } from './installation/inspection.js';
 import { DomainError, errorMessage, ExperienceService } from './application/experience-service.js';
 import { MAX_HOOK_INPUT_BYTES, type PassiveHookSource } from './capture/hook-adapters/contracts.js';
 import type { HookIngressResult } from './capture/hook-ingress.js';
@@ -47,13 +52,14 @@ const scopes = new Set(['global', 'repo'] as const);
 const initScopes = new Set(['global', 'repo', 'workspace'] as const);
 const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired']);
 const reviewSources = new Set(['codex', 'claude-code', 'cursor'] as const);
-const knownCommands = new Set(['init', 'unregister', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence', 'capture', 'analysis']);
+const knownCommands = new Set(['init', 'unregister', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence', 'capture', 'analysis', 'installation']);
 
 export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory' | 'humanOutput'> = {}): CliResult {
   if (args.length === 1 && args[0] === '--help') return { exitCode: 0, stdout: `${usage()}\n`, stderr: '' };
   try {
     const parsed = parseArguments(args);
     const json = parsed.options.has('json');
+    if (parsed.positionals[0] === 'installation') return { exitCode: 0, stdout: JSON.stringify(executeInstallation(parsed, options)) + '\n', stderr: '' };
     const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
     const value = execute(service, parsed, options);
     return success(value, json, parsed.positionals, options.humanOutput,
@@ -613,6 +619,11 @@ function usage(): string {
     '  init --scope global',
     '  init --scope repo --hooks <codex,cursor>',
     '  init --scope workspace --hooks <codex,cursor> [--workspace-id <slug>]',
+    '  installation qualify --repository <path> [--json]',
+    '  installation plan --repository <path> --manifest <build-manifest.json> --output <plan.json>',
+    '  installation apply --input <plan.json> [--json]',
+    '  installation rollback --input <plan.json> [--json]',
+    '  installation inspect [--repository <path>|--repository-id <id>] [--json]',
     '  unregister [--repository-id <id>]',
     '  status [--repository <path>|--repository-id <id>] [--schema-version 2]',
     '  status-global [--repository <path>|--repository-id <id>] [--schema-version 2]',
@@ -712,4 +723,39 @@ function writeProcessStderr(line: string): Promise<void> {
       reject(error);
     }
   });
+}
+
+function executeInstallation(parsed: ParsedArguments, options: Pick<RunCliAsyncOptions, 'workingDirectory'>): unknown {
+  if (parsed.positionals.length !== 2) throw new SyntaxError('Unknown installation command.');
+  const command = parsed.positionals[1];
+  if (command === 'inspect') {
+    assertNoUnknownOptions(parsed.options, ['repository', 'repository-id', 'json', 'data-dir']);
+    const selection = optionalRepositoryId(parsed.options);
+    if (selection && !selection.root) {
+      const dataDir = optionalString(parsed.options, 'data-dir');
+      const registrations = registeredInstallationRoots(dataDir === undefined ? defaultDatabasePath() : join(dataDir, 'experience.sqlite'), selection.id);
+      if (!registrations.length) throw new SyntaxError('Repository ID is not registered.');
+      return inspectInstallation(registrations[0].root, registrations[0].id);
+    }
+    const repository = selection ?? resolveRepository(options.workingDirectory ?? process.cwd());
+    if (!repository?.root) throw new SyntaxError('Repository root required.');
+    return inspectInstallation(repository.root, repository.id);
+  }
+  if (command === 'qualify') {
+    assertNoUnknownOptions(parsed.options, ['repository', 'json']);
+    const root = resolveRepositoryRoot(requiredString(parsed.options, 'repository'));
+    if (!root) throw new SyntaxError('Repository root required.');
+    return qualifyInstallation(root.root);
+  }
+  if (command === 'plan') {
+    assertNoUnknownOptions(parsed.options, ['repository', 'manifest', 'output', 'json']);
+    const plan = createAlignmentPlan(requiredString(parsed.options, 'repository'), requiredString(parsed.options, 'manifest'));
+    writeFileSync(requiredString(parsed.options, 'output'), JSON.stringify(plan, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    return { status: 'planned', planId: plan.planId, buildId: plan.buildId };
+  }
+  if (command === 'apply' || command === 'rollback') {
+    assertNoUnknownOptions(parsed.options, ['input', 'json']);
+    return applyAlignmentPlan(JSON.parse(readFileSync(requiredString(parsed.options, 'input'), 'utf8')), { rollback: command === 'rollback' });
+  }
+  throw new SyntaxError('Unknown installation command.');
 }

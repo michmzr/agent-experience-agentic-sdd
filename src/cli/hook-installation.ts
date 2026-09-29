@@ -33,11 +33,11 @@ export function installHooks(input: { repositoryRoot: string; sources: readonly 
   for (const update of updates) readConfiguration(update.path);
   const wrapperPath = join(input.repositoryRoot, '.agents', 'hooks', 'ael-passive-capture.sh');
   mkdirSync(dirname(wrapperPath), { recursive: true });
-  writeAtomic(wrapperPath, wrapper(input.cliEntrypoint, input.repositoryId), 0o755);
+  writeAtomic(wrapperPath, renderManagedWrapper(input.cliEntrypoint, input.repositoryId), 0o755);
   for (const update of updates) {
     mkdirSync(dirname(update.path), { recursive: true });
     const current = readConfiguration(update.path);
-    writeAtomic(update.path, JSON.stringify(merge(current, update.source, input.repositoryRoot), null, 2) + '\n', 0o644);
+    writeAtomic(update.path, JSON.stringify(mergeHookConfiguration(current, update.source, input.repositoryRoot), null, 2) + '\n', 0o644);
   }
 }
 
@@ -57,7 +57,7 @@ function checkedSources(value: readonly HookSource[]): readonly HookSource[] {
   if (!value.length) throw new SyntaxError('At least one hook must be selected.');
   return sources.filter((source) => value.includes(source));
 }
-function configurationPath(root: string, source: HookSource): string { return join(root, source === 'codex' ? '.codex/hooks.json' : '.cursor/hooks.json'); }
+export function configurationPath(root: string, source: HookSource): string { return join(root, source === 'codex' ? '.codex/hooks.json' : '.cursor/hooks.json'); }
 function readConfiguration(path: string): Record<string, unknown> {
   if (!existsSync(path)) return {};
   try {
@@ -69,15 +69,22 @@ function readConfiguration(path: string): Record<string, unknown> {
 function readConfigurationForVerification(path: string): Record<string, unknown> | undefined {
   try { return readConfiguration(path); } catch { return undefined; }
 }
-function merge(current: Record<string, unknown>, source: HookSource, root: string): Record<string, unknown> {
+export function mergeHookConfiguration(current: Record<string, unknown>, source: HookSource, root: string): Record<string, unknown> {
+  if (/["$`\\\n\r]/.test(root)) throw new Error('Unsafe shell repository path.');
   const hooks = typeof current.hooks === 'object' && current.hooks !== null && !Array.isArray(current.hooks) ? current.hooks as Record<string, unknown> : {};
   const command = source === 'codex' ? `"${join(root, '.agents/hooks/ael-passive-capture.sh')}" codex` : '.agents/hooks/ael-passive-capture.sh cursor';
   const names = source === 'codex' ? ['SessionStart', 'SessionEnd', 'PreToolUse', 'PostToolUse'] : ['sessionStart', 'sessionEnd', 'preToolUse', 'postToolUse'];
   const updated = Object.fromEntries(names.map((name) => {
     const groups = Array.isArray(hooks[name]) ? hooks[name] as unknown[] : [];
     const replacement = replaceAelCommand(groups, source, command);
-    const installed = source === 'codex' ? { hooks: [{ type: 'command', command }] } : { command };
-    return [name, replacement.replaced ? replacement.value : [...groups, installed]];
+    const installed = source === 'codex' ? { ...(name === 'SessionStart' ? { matcher: 'startup|resume' } : {}), hooks: [{ type: 'command', command }] } : { command };
+    const result = replacement.replaced ? replacement.value as unknown[] : [...groups, installed];
+    if (source === 'codex') {
+      const required = name === 'SessionStart' ? ['startup', 'resume'] : name === 'SessionEnd' ? ['end'] : ['Bash', 'apply_patch', 'mcp__.*'];
+      const missing = required.filter(value => !managedEventSupported(result, command, value));
+      if (missing.length) result.push({ matcher: missing.join('|'), hooks: [{ type: 'command', command }] });
+    }
+    return [name, result];
   }));
   return { ...current, ...(source === 'cursor' ? { version: 1 } : {}), hooks: { ...hooks, ...updated } };
 }
@@ -110,7 +117,7 @@ function replaceAelCommand(value: unknown, source: HookSource, command: string):
   return { value: Object.fromEntries(entries), replaced };
 }
 function isAelCommand(command: string, source: HookSource): boolean {
-  return command.includes('ael-passive-capture.sh') && command.trim().endsWith(` ${source}`);
+  return command === `.agents/hooks/ael-passive-capture.sh ${source}` || command === `"$(git rev-parse --show-toplevel)/.agents/hooks/ael-passive-capture.sh" ${source}` || new RegExp('^"/[^"$`\\n]+/\\.agents/hooks/ael-passive-capture\\.sh" ' + source + '$').test(command);
 }
 function strings(value: unknown): string[] {
   if (typeof value === 'string') return [value];
@@ -122,7 +129,8 @@ function executable(path: string): boolean {
   try { return existsSync(path) && (statSync(path).mode & 0o111) !== 0; } catch { return false; }
 }
 function writeAtomic(path: string, content: string, mode: number): void { const temporary = `${path}.ael-tmp`; writeFileSync(temporary, content, { mode }); chmodSync(temporary, mode); renameSync(temporary, path); }
-function wrapper(cliEntrypoint: string, repositoryId?: string): string {
+export function renderManagedWrapper(cliEntrypoint: string, repositoryId?: string): string {
+  if (/["$`\\\n\r]/.test(cliEntrypoint) || (repositoryId !== undefined && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(repositoryId))) throw new Error('Unsafe shell wrapper argument.');
   const repositoryArgument = repositoryId === undefined ? '' : ` --repository-id "${repositoryId}"`;
   return [
     '#!/bin/sh', '', 'source_name="$1"', `cli="${cliEntrypoint}"`, '',
@@ -134,4 +142,17 @@ function wrapper(cliEntrypoint: string, repositoryId?: string): string {
     'if [ -z "$node_command" ]; then', "  printf '%s\\n' 'AEL_CAPTURE_UNAVAILABLE: Passive capture skipped.' >&2", '  exit 0', 'fi', '',
     `"$node_command" "$cli" capture hook --source "$source_name"${repositoryArgument} || {`, "  printf '%s\\n' 'AEL_CAPTURE_UNAVAILABLE: Passive capture skipped.' >&2", '  exit 0', '}', '', 'exit 0', ''
   ].join('\n');
+}
+
+export function managedEventSupported(groups: unknown, command: string, value: string): boolean {
+  if (!Array.isArray(groups)) return false;
+  return groups.some(group => {
+    if (!group || typeof group !== 'object') return false;
+    const record = group as Record<string, unknown>;
+    if (!Array.isArray(record.hooks) || !record.hooks.some(h => h && typeof h === 'object' && h.command === command && h.type === 'command')) return false;
+    if (record.matcher === undefined || record.matcher === '') return true;
+    if (typeof record.matcher !== 'string' || record.matcher.length > 256) return false;
+    // Only documented exact alternatives and unrestricted matchers are admitted.
+    return record.matcher === '*' || record.matcher.split('|').includes(value);
+  });
 }

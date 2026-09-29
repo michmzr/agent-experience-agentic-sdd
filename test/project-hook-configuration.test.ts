@@ -23,7 +23,7 @@ test('registers only passive technical and session hooks', () => {
   assert.deepEqual(Object.keys(codex.hooks).sort(), [
     'PostToolUse', 'PreToolUse', 'SessionEnd', 'SessionStart'
   ]);
-  assert.equal(codex.hooks.SessionStart?.[0]?.matcher, 'startup');
+  assert.equal(codex.hooks.SessionStart?.[0]?.matcher, 'startup|resume');
   assert.equal(codex.hooks.PreToolUse?.[0]?.matcher, 'Bash|apply_patch|mcp__.*');
   assert.equal(codex.hooks.PostToolUse?.[0]?.matcher, 'Bash|apply_patch|mcp__.*');
   assert.equal(JSON.stringify({ cursor, codex }).includes('Prompt'), false);
