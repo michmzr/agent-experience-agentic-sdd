@@ -54,4 +54,6 @@ After the final correction:
 
 The actual executable CLI completed `installation inspect`, `plan`, `apply`, a second `inspect`, `qualify` and `rollback` in a fresh temporary Git repository. The first artifact state was missing, the second was current, and the qualification result was qualified with controlled-fixture evidence. Every command exited 0. This path changed only fixture hooks and isolated stores.
 
-ABI core is ready for review. ABI-A5 receipt storage remains pending ARC. Live-host qualification and rollout are not recorded as completed.
+The user accepted the verified ABI core on 2026-09-29 with “tak” in response to the explicit acceptance question before real-host testing. The accepted implementation is commit `c60278d`, with the limitations recorded above. ABI-A5 receipt storage remains pending ARC. Live-host qualification, merge and rollout are not recorded as completed.
+
+This acceptance update changes documentation only. `rtk git diff --check` passes; the preceding 914/914 implementation test result remains the verification evidence.

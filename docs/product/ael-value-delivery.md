@@ -2,7 +2,7 @@
 
 ## Status
 
-ABI implementation was authorized by the user on 2026-09-29. Its core is implemented and remains subject to the recorded acceptance checks; full ABI-A5 receipt persistence is pending ARC. The other seven specifications and their plans remain proposed. No milestone completion or live rollout is recorded here.
+ABI implementation was authorized by the user on 2026-09-29. The user accepted its verified core on 2026-09-29 before real-host qualification; full ABI-A5 receipt persistence is pending ARC. The other seven specifications and their plans remain proposed. No milestone completion or live rollout is recorded here.
 
 The intended outcome is an attributable, complete and reviewable path from retained operation evidence to scoped knowledge, followed by a controlled demonstration of its use in another session. Increasing the number of lessons is not an acceptance criterion.[^basis]
 
@@ -10,7 +10,7 @@ The intended outcome is an attributable, complete and reviewable path from retai
 
 | ID | Priority | Scope | Specification | Proposed plan | Approval / execution |
 |---|---|---|---|---|---|
-| ABI | P0 | Build identity and installation alignment | [Spec](../superpowers/specs/2026-09-29-ael-build-identity-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-build-identity.md) | Approved by user request on 2026-09-29 / ABI core implemented; ARC receipt persistence pending |
+| ABI | P0 | Build identity and installation alignment | [Spec](../superpowers/specs/2026-09-29-ael-build-identity-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-build-identity.md) | ABI core accepted by user on 2026-09-29; ARC receipt persistence and live-host qualification pending |
 | AEC | P0 | Result facts and resumed evidence continuity | [Spec](../superpowers/specs/2026-09-29-ael-evidence-continuity-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-evidence-continuity.md) | Not recorded / not started |
 | ARC | P0 | Bounded recovery and scoped coverage | [Spec](../superpowers/specs/2026-09-29-ael-recovery-coverage-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-recovery-coverage.md) | Not recorded / not started |
 | ASC | P1 | Explicit conventions and subproject scope | [Spec](../superpowers/specs/2026-09-29-ael-scoped-conventions-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-scoped-conventions.md) | Not recorded / not started |

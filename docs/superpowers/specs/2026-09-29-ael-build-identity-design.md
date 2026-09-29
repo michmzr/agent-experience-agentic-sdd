@@ -4,7 +4,7 @@
 
 Approved for implementation by the user request “Implement ABI specs”, 2026-09-29. Change ID: `ABI`. Priority: P0. Dependencies: None for the baseline stage.
 
-Implementation authorization is recorded in the delivery index. Full ABI acceptance remains pending until the ARC receipt provenance integration is verified.
+Implementation authorization and user acceptance of the verified ABI core on 2026-09-29 are recorded in the delivery index. This acceptance covers controlled-fixture qualification and does not record live-host qualification or rollout. Full ABI acceptance remains pending until the ARC receipt provenance integration is verified.
 
 ## Problem
 
