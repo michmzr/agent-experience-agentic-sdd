@@ -24,12 +24,14 @@ Registry publication, an automatic updater, replacing unmanaged hooks, executing
 
 ## User-visible behavior
 
-Proposed commands, unavailable until implementation:
+Implemented commands:
 
 ```text
 ael installation inspect [--repository <path>|--repository-id <id>] [--json]
 ael installation plan --repository <path> --manifest <build-manifest.json> --output <plan.json>
 ael installation apply --input <plan.json> [--json]
+ael installation rollback --input <plan.json> [--json]
+ael installation qualify --repository <path> [--json]
 ```
 
 Inspection reports `current`, `outdated`, `missing`, `modified`, `unmanaged` or `unknown` separately for artifact identity and hook contract. Its public JSON uses repository IDs and build digests; an explicitly requested local plan contains the paths needed for the operator to review the mutation. A build with no manifest is `unknown`, never current because its package version matches.
@@ -52,7 +54,7 @@ The package advertises its writable schema capabilities. After later schema upgr
 
 ## Failure behavior
 
-Missing artifacts, invalid hashes, changed targets, symlinks crossing the managed installation boundary and incompatible writers reject apply before mutation. An interrupted apply restores the previous generation. Capture remains fail-open; installation failure does not block an agent action.
+Missing artifacts, invalid hashes, changed targets, symlinks crossing the managed installation boundary and incompatible writers reject apply before mutation. Alignment holds one repository-local SQLite write transaction before reading or publishing a generation journal. A persisted application ID identifies the owned lock file; an unrelated SQLite file at that path is left unchanged. An empty lock file left before initialization is recovered. A second process is rejected while the lock is held. Process exit, including SIGKILL immediately after acquisition and before journal publication, releases the lock automatically. Retrying the same hash-bound plan then recovers a recorded interrupted generation or starts publication when no generation was recorded. Foreign file edits still reject recovery. Existing legacy locks with a verified live owner remain protected; a verified dead owner can be removed under the new mutex. Ownerless, malformed or foreign legacy lock content is preserved because no safe ownership claim is available. Capture remains fail-open; installation failure does not block an agent action.
 
 ## Privacy and security
 
@@ -68,7 +70,7 @@ Pilot the current AEL repository first, then one external project, then the rema
 |---|---|---|---|
 | ABI-R1 | Manifest identity is deterministic for identical shipped content, changes when shipped code changes, and does not equate two 0.0.0 artifacts. | ABI-A1 | Build twice, compare identities, then change one shipped byte and require a different identity. |
 | ABI-R2 | Inventory resolves the actual managed wrapper target without executing it and distinguishes unknown, modified and missing targets. | ABI-A2 | Inventory synthetic copies of the observed installation shapes; a trap wrapper is never executed. |
-| ABI-R3 | Alignment uses hash-bound plans, preserves foreign hooks and supports idempotent apply and rollback. | ABI-A3 | Race a file edit after plan creation; reject it. Inject failure after the first publication and verify restoration. |
+| ABI-R3 | Alignment uses hash-bound plans, preserves foreign hooks and supports idempotent apply and rollback. | ABI-A3 | Race a file edit after plan creation; reject it. Inject failure after the first publication and verify restoration. Kill immediately after lock acquisition and retry through the CLI without manual repair; preserve foreign hooks. Verify a live lock rejects a contender and SIGKILL releases it. A foreign SQLite lock file and ownerless legacy lock remain unchanged. |
 | ABI-R4 | A qualified Codex integration delivers supported startup and resume signals and a correlated technical result through the installed artifact. | ABI-A4 | Run the lifecycle fixture through the installed package, then repeat with a matcher excluding resume and require qualification failure. |
 | ABI-R5 | The actual build is attributable to new receipts and incompatible writer rollback is refused. | ABI-A5 | Read provenance after controlled capture; an old manifest cannot claim current writer capability or overwrite a newer store. |
 
@@ -76,9 +78,13 @@ Pilot the current AEL repository first, then one external project, then the rema
 
 AVB records the pre-change case and the post-change behavior. The matching plan names focused tests and its full acceptance path. Capture remains passive and fail-open; SQLite migrations, replay, scope isolation and privacy assertions are mandatory when affected. Successful component tests do not replace the listed public-path acceptance criteria.
 
+## Implementation amendment
+
+The user authorized automatic lock recovery and this spec update on 2026-09-29. SQLite locking replaces the directory/owner-file acquisition protocol; lock lifetime follows the process rather than persisted owner metadata. The accepted ABI core scope remains unchanged, and receipt persistence still depends on ARC.
+
 ## Open decisions
 
-No unresolved product choice is hidden in this draft. Limits, supported initial paths and exclusions above are proposed decisions for review. Source capability qualification is an implementation discovery task with explicit unsupported outcomes, not permission to guess a host contract. The delivery index records implementation approval.
+No unresolved product choice is hidden in this specification. Source capability qualification is an implementation discovery task with explicit unsupported outcomes, not permission to guess a host contract. The delivery index records implementation approval.
 
 ## Related artifacts
 

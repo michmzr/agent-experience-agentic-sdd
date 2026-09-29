@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
-import { chmodSync, cpSync, existsSync, realpathSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, statSync, realpathSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createAlignmentPlan, applyAlignmentPlan } from "../src/installation/alignment.js";
 import { ingestPassiveHook } from "../src/capture/hook-ingress.js";
 import { tmpdir } from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createBuildManifest, validateManifest, verifyBuild } from "../src/installation/build-manifest.js";
 import { runCli } from "../src/cli.js";
 import { installHooks, managedEventSupported } from "../src/cli/hook-installation.js";
 import { initializeGitRepository } from "./helpers/git-repository.js";
+import { once } from "node:events";
 import test from "node:test";
 
 test("ABI-A1 build emits content identity rather than package version", () => {
@@ -262,4 +263,89 @@ test("ABI-A4 nonexecutable installed wrapper cannot qualify",()=>{
     const result=runCli(["installation","qualify","--repository",root,"--json"]);
     assert.equal(JSON.parse(result.stdout).status,"unqualified");
   } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test("ABI-A3 interruption immediately after lock acquisition permits automatic retry", () => {
+  const root = fixture();
+  try {
+    const configuration = join(root, ".codex/hooks.json");
+    mkdirSync(join(root, ".codex"));
+    const foreign = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ command: "foreign-lock-fixture" }] }] } });
+    writeFileSync(configuration, foreign);
+    const plan = createAlignmentPlan(root, join(process.cwd(), "build-manifest.json"));
+    const path = join(root, "plan.json"); writeFileSync(path, JSON.stringify(plan));
+    const interrupted = spawnSync(process.execPath, ["--input-type=module", "-e", `import {readFileSync} from 'node:fs'; import {applyAlignmentPlan} from '${join(process.cwd(), "dist/src/installation/alignment.js")}'; applyAlignmentPlan(JSON.parse(readFileSync(process.argv[1],'utf8')), {afterLockAcquired: () => process.exit(18)});`, path], { encoding: "utf8" });
+    assert.equal(interrupted.status, 18, interrupted.stderr);
+    assert.equal(readFileSync(configuration, "utf8"), foreign);
+    assert.equal(existsSync(join(root, ".agents/hooks/ael-passive-capture.sh")), false);
+    assert.equal(existsSync(join(root, ".agents/ael-installation", plan.planId + ".json")), false);
+    assert.equal(runCli(["installation", "apply", "--input", path, "--json"]).exitCode, 0);
+    const updated = JSON.parse(readFileSync(configuration, "utf8"));
+    assert.deepEqual(updated.hooks.SessionStart[0], JSON.parse(foreign).hooks.SessionStart[0]);
+    assert.equal(runCli(["installation", "rollback", "--input", path, "--json"]).exitCode, 0);
+    assert.equal(readFileSync(configuration, "utf8"), foreign);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("ABI-A3 a live alignment lock rejects a contender and process death releases it", async () => {
+  const root = fixture();
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    const plan = createAlignmentPlan(root, join(process.cwd(), "build-manifest.json"));
+    const path = join(root, "plan.json"); writeFileSync(path, JSON.stringify(plan));
+    child = spawn(process.execPath, ["--input-type=module", "-e", `import {readFileSync} from 'node:fs'; import {applyAlignmentPlan} from '${join(process.cwd(), "dist/src/installation/alignment.js")}'; applyAlignmentPlan(JSON.parse(readFileSync(process.argv[1],'utf8')), {afterLockAcquired: () => {process.stdout.write('locked\\n'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10000);}});`, path], { stdio: ["ignore", "pipe", "pipe"] });
+    const ready = await Promise.race([once(child.stdout!, "data"), once(child, "exit").then(() => {throw new Error("Publisher exited before acquiring its lock");})]);
+    assert.equal(String(ready[0]).trim(), "locked");
+    assert.throws(() => applyAlignmentPlan(plan), /already running/);
+    assert.equal(existsSync(join(root, ".agents/hooks/ael-passive-capture.sh")), false);
+    const exited = once(child, "exit"); child.kill("SIGKILL"); await exited; child = undefined;
+    assert.equal(applyAlignmentPlan(plan).status, "applied");
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGKILL"); await exited; }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ABI-A3 ownerless legacy lock content is preserved and refuses automatic takeover", () => {
+  const root = fixture();
+  try {
+    const plan = createAlignmentPlan(root, join(process.cwd(), "build-manifest.json"));
+    const legacy = join(root, ".agents/ael-installation/lock");
+    mkdirSync(legacy, { recursive: true });
+    assert.throws(() => applyAlignmentPlan(plan), /legacy alignment lock/);
+    assert.equal(existsSync(legacy), true);
+    assert.equal(existsSync(join(root, ".agents/hooks/ael-passive-capture.sh")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("ABI-A3 dead verified legacy owner is recovered under the new mutex", () => {
+  const root = fixture();
+  try {
+    const plan = createAlignmentPlan(root, join(process.cwd(), "build-manifest.json"));
+    const legacy = join(root, ".agents/ael-installation/lock");
+    mkdirSync(legacy, { recursive: true });
+    const completed = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
+    assert.equal(completed.status, 0);
+    assert.ok(completed.pid);
+    writeFileSync(join(legacy, "owner.json"), JSON.stringify({ pid: completed.pid, planId: plan.planId }));
+    assert.equal(applyAlignmentPlan(plan).status, "applied");
+    assert.equal(existsSync(legacy), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("ABI-A3 foreign SQLite lock file is preserved before publication", () => {
+  const root = fixture();
+  try {
+    const plan = createAlignmentPlan(root, join(process.cwd(), "build-manifest.json"));
+    const directory = join(root, ".agents/ael-installation"); mkdirSync(directory, { recursive: true });
+    const path = join(directory, "lock.sqlite");
+    const foreign = new DatabaseSync(path);
+    foreign.exec("CREATE TABLE foreign_records (value TEXT); INSERT INTO foreign_records VALUES ('keep');"); foreign.close();
+    chmodSync(path, 0o640);
+    const bytes = readFileSync(path);
+    assert.throws(() => applyAlignmentPlan(plan), /Unrecognized alignment lock/);
+    assert.deepEqual(readFileSync(path), bytes);
+    assert.equal(statSync(path).mode & 0o777, 0o640);
+    assert.equal(existsSync(join(root, ".agents/hooks/ael-passive-capture.sh")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

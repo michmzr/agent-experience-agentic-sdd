@@ -36,7 +36,7 @@ The first full regression run reproduced the existing admission contract that a 
 
 The independent reviewer found four required corrections. Regressions first reproduced missing startup/action matcher repair, overwrite of a concurrent foreign edit, unsafe restoration of an unknown previous writer, and qualification of a nonexecutable wrapper. The implementation repairs missing owned matcher coverage, rechecks each file before publication, restores only its published files, validates the previous artifact before any publication or recovery, and invokes the actual installed executable wrapper.
 
-A known limitation remains: termination between lock-directory creation and owner-file publication leaves a lock requiring manual inspection. The operation does not publish owned hook files in that interval. This was classified as a minor recovery issue and deferred.
+The previously deferred owner-file gap was reproduced by killing a publisher after directory creation; a retry failed on the ownerless lock. The user then authorized a lock-recovery amendment. Alignment now acquires a repository-local SQLite write transaction and marks its lock file with an application ID. A stopped publisher releases the mutex through process exit, including SIGKILL before the first journal write. ABI-A3 tests cover automatic retry, live contention, SIGKILL release, a verified dead legacy owner, ownerless legacy content, and preservation of an unrelated SQLite database at the lock path. Unknown legacy content remains protected because its ownership cannot be proven.
 
 Alignment refuses to publish over a legacy target with no valid previous manifest because its rollback writer cannot be verified. Such packages remain inspectable as unknown. They require an explicit migration to establish a verifiable previous generation; package-version equality is insufficient authorization to enable that writer.
 
@@ -57,3 +57,13 @@ The actual executable CLI completed `installation inspect`, `plan`, `apply`, a s
 The user accepted the verified ABI core on 2026-09-29 with “tak” in response to the explicit acceptance question before real-host testing. The accepted implementation is commit `c60278d`, with the limitations recorded above. ABI-A5 receipt storage remains pending ARC. Live-host qualification, merge and rollout are not recorded as completed.
 
 This acceptance update changes documentation only. `rtk git diff --check` passes; the preceding 914/914 implementation test result remains the verification evidence.
+
+## Lock recovery amendment verification
+
+The user requested the lock fix and spec update on 2026-09-29. The updated requirement is in ABI-R3/ABI-A3 and the execution plan. After the last source change:
+
+- `rtk pnpm build`: exit 0.
+- `rtk proxy node --test dist/test/ael-build-identity.test.js dist/test/hook-installation.test.js dist/test/hook-readiness.test.js dist/test/project-hook-configuration.test.js`: 32 passed, 0 failed, 0 skipped.
+- `pnpm check` through `rtk proxy sh`: 919 passed, 0 failed, 0 skipped; exit 0.
+
+The executable CLI also completed inspect (missing), plan (planned), apply (applied), qualify (qualified) and rollback (rolled-back) in a fresh temporary repository after the lock amendment; every command exited 0. No registered project installation or production database was modified. The original ABI-A5 receipt integration, live-host qualification, merge and rollout remain pending.

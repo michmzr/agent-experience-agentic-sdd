@@ -18,7 +18,7 @@ ael installation apply --input /private/plan.json --json
 ael installation rollback --input /private/plan.json --json
 ```
 
-Apply verifies artifact bytes, ownership, repository identity, file hashes and modes. It preserves foreign hook groups. A stopped publisher can be retried using the same plan if its process is absent and the recorded generations have not been edited. Generation journals in `.agents/ael-installation` retain rollback contents. A changed target or incompatible previous writer rejects the operation.
+Apply verifies artifact bytes, ownership, repository identity, file hashes and modes. It preserves foreign hook groups. A process-held SQLite transaction serializes alignment. The owned lock file carries a SQLite application ID; a foreign database at that path is rejected without changing its bytes or mode. Process exit automatically releases the mutex, including interruption before the first journal write. A stopped publisher can be retried using the same plan if the recorded generations have not been edited. Unrecognized legacy lock content is preserved; a verified live legacy owner remains protected. Generation journals in `.agents/ael-installation` retain rollback contents. A changed target or incompatible previous writer rejects the operation.
 
 The qualification command invokes the installed executable wrapper with isolated storage and controlled startup/action/result/end/resume fixtures. The result includes `evidence: controlled-fixture`; this does not establish host trust or actual host event delivery. Inspection always remains unqualified.
 

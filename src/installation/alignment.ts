@@ -1,3 +1,4 @@
+import { acquireAlignmentLock } from './alignment-lock.js';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -127,27 +128,19 @@ function stateMatches(plan: AlignmentPlan, direction: 'before' | 'after'): boole
     return actual.hash === (direction === 'before' ? file.beforeHash : file.afterHash) && actual.mode === (direction === 'before' ? file.beforeMode : file.mode);
   });
 }
-export function applyAlignmentPlan(input: AlignmentPlan, options: { afterPublication?: (count: number) => void; rollback?: boolean } = {}) {
+export function applyAlignmentPlan(input: AlignmentPlan, options: { afterPublication?: (count: number) => void; afterLockAcquired?: () => void; rollback?: boolean } = {}) {
   const plan = validateAlignmentPlan(input);
   // Validate rollback safety before publication, including recovery of stopped publishers.
   assertPreviousWriter(plan);
   const directory = join(plan.repositoryRoot, '.agents/ael-installation');
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const lock = join(directory, 'lock');
+  noSymlinks(plan.repositoryRoot, '.agents/ael-installation/lock.sqlite');
   noSymlinks(plan.repositoryRoot, '.agents/ael-installation/lock/owner.json');
-  if (existsSync(lock)) {
-    const owner = JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8'));
-    if (!Number.isSafeInteger(owner.pid) || owner.pid < 1 || owner.planId !== plan.planId) throw new Error('Alignment lock belongs to another generation.');
-    let alive = true;
-    try { process.kill(owner.pid, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') alive = false; }
-    if (alive) throw new Error('Alignment is already running.');
-    rmSync(lock, { recursive: true });
-  }
-  mkdirSync(lock);
-  writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, planId: plan.planId }), { mode: 0o600 });
   const journalPath = join(directory, `${plan.planId}.json`);
   noSymlinks(plan.repositoryRoot, `.agents/ael-installation/${plan.planId}.json`);
+  const releaseLock = acquireAlignmentLock(directory);
   try {
+    options.afterLockAcquired?.();
     if (existsSync(journalPath)) {
       const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
       if (JSON.stringify(journal.plan) !== JSON.stringify(plan) || journal.planId !== plan.planId || !['publishing', 'applied', 'rolled-back'].includes(journal.state)) throw new Error('Invalid alignment journal.');
@@ -183,5 +176,5 @@ export function applyAlignmentPlan(input: AlignmentPlan, options: { afterPublica
       throw error;
     }
     return { status: 'applied', planId: plan.planId, buildId: plan.buildId };
-  } finally { rmSync(lock, { recursive: true, force: true }); }
+  } finally { releaseLock(); }
 }

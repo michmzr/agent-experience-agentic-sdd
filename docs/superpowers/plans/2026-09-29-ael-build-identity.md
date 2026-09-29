@@ -129,6 +129,10 @@ Files:
 - [ ] Inspect persisted state after restart and check that the case did not create raw payload, cross-scope references or stronger lifecycle authority than its evidence permits.
 - [ ] Review `rtk git diff --check` and the scoped diff; commit only this task with message `feat: ael-build-identity r5` after GREEN.
 
+## Lock recovery amendment
+
+Authorized by the user on 2026-09-29. Replace the directory/owner-file lock with a process-held SQLite write transaction in `src/installation/alignment-lock.ts`, acquired before journal publication and released by process exit. Add ABI-A3 regressions for immediate interruption, live contention and SIGKILL release. Preserve unrecognized legacy metadata and keep ownership/symlink checks before acquisition. Mark the new lock file with an application ID before use; reject a foreign SQLite database at that path without changing its bytes or mode. Rerun focused ABI/hook tests and `pnpm check` after the final source change.
+
 ## Acceptance and rollback
 
 - [ ] Run the focused acceptance and regression suites after the final implementation change:
