@@ -72,7 +72,7 @@ Pilot the current AEL repository first, then one external project, then the rema
 | ABI-R2 | Inventory resolves the actual managed wrapper target without executing it and distinguishes unknown, modified and missing targets. | ABI-A2 | Inventory synthetic copies of the observed installation shapes; a trap wrapper is never executed. |
 | ABI-R3 | Alignment uses hash-bound plans, preserves foreign hooks and supports idempotent apply and rollback. | ABI-A3 | Race a file edit after plan creation; reject it. Inject failure after the first publication and verify restoration. Kill immediately after lock acquisition and retry through the CLI without manual repair; preserve foreign hooks. Verify a live lock rejects a contender and SIGKILL releases it. A foreign SQLite lock file and ownerless legacy lock remain unchanged. |
 | ABI-R4 | A qualified Codex integration delivers supported startup and resume signals and a correlated technical result through the installed artifact. | ABI-A4 | Run the lifecycle fixture through the installed package, then repeat with a matcher excluding resume and require qualification failure. |
-| ABI-R5 | The actual build is attributable to new receipts and incompatible writer rollback is refused. | ABI-A5 | Read provenance after controlled capture; an old manifest cannot claim current writer capability or overwrite a newer store. |
+| ABI-R5 | The actual build is attributable to new receipts and incompatible writer rollback is refused. | ABI-A5 | Capture through two verified installed artifacts with different shipped bytes but the same package version. Reopen the receipt store and verify each new receipt's build ID and writer capability equal the manifest of the artifact actually invoked; the build IDs must differ. Caller-provided or unverified identity cannot establish attribution, and historical receipts remain unknown. Reject an older writer against a newer store before mutation and compare the store bytes. |
 
 ## Benchmark and regression impact
 
@@ -83,6 +83,8 @@ AVB records the pre-change case and the post-change behavior. The matching plan 
 The user authorized automatic lock recovery and this spec update on 2026-09-29. SQLite locking replaces the directory/owner-file acquisition protocol; lock lifetime follows the process rather than persisted owner metadata. The accepted ABI core scope remains unchanged, and receipt persistence still depends on ARC.
 
 On 2026-09-29, the user accepted the controlled process-interruption test as sufficient evidence for the ABI-A3 lock-recovery behavior. This acceptance does not approve rollout or complete ABI-A5 and live-host qualification.
+
+ABI-A5 now specifies persisted receipt attribution separately from the existing admission-envelope check. Its receipt assertions remain pending ARC task 4; the existing ABI-A5 core test does not satisfy them.
 
 ## Open decisions
 

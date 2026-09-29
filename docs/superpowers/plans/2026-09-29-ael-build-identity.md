@@ -122,9 +122,9 @@ Files:
 - Modify `src/capture/hook-ingress.ts`.
 - Test `test/ael-build-identity.test.ts`, case `ABI-A5`; fixture `test/fixtures/ael-build-identity/cases.json`.
 
-- [ ] Add failing case `ABI-A5`: Read provenance after controlled capture; an old manifest cannot claim current writer capability or overwrite a newer store.
+- [ ] Add failing case `ABI-A5`: Capture through two verified installed artifacts with different shipped bytes and equal package versions. Reopen the receipt store; each new receipt must retain the invoked artifact's verified build ID and writer capability, with different build IDs across artifacts. Caller-provided or unverified identities cannot establish attribution, and historical receipts remain unknown. Reject an old writer against a newer store without changing its bytes.
 - [ ] Run `rtk pnpm build`, then `rtk proxy node --test --test-name-pattern=ABI-A5 dist/test/ael-build-identity.test.js`. Expected RED: the specified semantic assertion fails. Record actual output, not a predicted pass count.
-- [ ] Implement this boundary: Pass the actual artifact digest in the bounded admission envelope and reject incompatible writer rollback. Implement the receipt-storage assertion with ARC task 4; ABI core inventory does not wait for that storage integration.
+- [ ] Implement this boundary: Pass the actual artifact digest in the bounded admission envelope and reject incompatible writer rollback. With ARC task 4, persist the verified invoked-artifact identity and writer capability in each new receipt. Do not infer identity for historical receipts or trust a caller-supplied value. ABI core inventory does not wait for that storage integration.
 - [ ] Repeat the same two commands. Expected GREEN: this acceptance case passes and its negative controls remain rejected.
 - [ ] Inspect persisted state after restart and check that the case did not create raw payload, cross-scope references or stronger lifecycle authority than its evidence permits.
 - [ ] Review `rtk git diff --check` and the scoped diff; commit only this task with message `feat: ael-build-identity r5` after GREEN.
