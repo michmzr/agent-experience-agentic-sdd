@@ -67,3 +67,5 @@ The user requested the lock fix and spec update on 2026-09-29. The updated requi
 - `pnpm check` through `rtk proxy sh`: 919 passed, 0 failed, 0 skipped; exit 0.
 
 The executable CLI also completed inspect (missing), plan (planned), apply (applied), qualify (qualified) and rollback (rolled-back) in a fresh temporary repository after the lock amendment; every command exited 0. No registered project installation or production database was modified. The original ABI-A5 receipt integration, live-host qualification, merge and rollout remain pending.
+
+On 2026-09-29, the user answered “tak” to whether the controlled process-interruption test is sufficient lock-recovery evidence before rollout. This accepts the ABI-A3 interruption evidence. It does not authorize rollout or complete ABI-A5 or live-host qualification. Legacy ownerless locks remain protected because ownership cannot be established.

@@ -82,6 +82,8 @@ AVB records the pre-change case and the post-change behavior. The matching plan 
 
 The user authorized automatic lock recovery and this spec update on 2026-09-29. SQLite locking replaces the directory/owner-file acquisition protocol; lock lifetime follows the process rather than persisted owner metadata. The accepted ABI core scope remains unchanged, and receipt persistence still depends on ARC.
 
+The user accepted the controlled process-interruption test as sufficient ABI-A3 lock-recovery evidence before rollout on 2026-09-29. This does not record rollout approval or resolve ABI-A5 and live-host qualification.
+
 ## Open decisions
 
 No unresolved product choice is hidden in this specification. Source capability qualification is an implementation discovery task with explicit unsupported outcomes, not permission to guess a host contract. The delivery index records implementation approval.
