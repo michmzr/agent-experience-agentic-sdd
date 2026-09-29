@@ -4,7 +4,7 @@
 
 ABI implementation was authorized by the user on 2026-09-29. The user accepted its verified core on 2026-09-29 before real-host qualification; full ABI-A5 receipt persistence is pending ARC. The other seven specifications and their plans remain proposed. No milestone completion or live rollout is recorded here.
 
-The user accepted the controlled process-interruption test as sufficient pre-rollout evidence for ABI-A3 lock recovery on 2026-09-29. Rollout remains unapproved.
+On 2026-09-29, the user accepted the controlled process-interruption test as sufficient evidence for ABI-A3 lock recovery. This decision does not approve rollout or complete the remaining ABI acceptance work.
 
 The intended outcome is an attributable, complete and reviewable path from retained operation evidence to scoped knowledge, followed by a controlled demonstration of its use in another session. Increasing the number of lessons is not an acceptance criterion.[^basis]
 
