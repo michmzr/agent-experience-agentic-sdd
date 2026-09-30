@@ -14,7 +14,7 @@ import {
 } from './contracts.js';
 
 const identifierPattern = /^[A-Za-z0-9._:/-]{1,512}$/;
-const observationKeys = new Set(['id', 'sourceEventId', 'kind', 'occurredAt', 'relatedEventId', 'tool', 'outcome', 'exitStatus', 'resultProvenance', 'resultUnknownReason', 'interpretation', 'endedAt']);
+const observationKeys = new Set(['id', 'sourceEventId', 'executionKey', 'kind', 'occurredAt', 'relatedEventId', 'tool', 'outcome', 'exitStatus', 'resultProvenance', 'resultUnknownReason', 'interpretation', 'endedAt']);
 const usageKeys = new Set(['id', 'occurredAt', 'mode', 'scope', 'lineageId', 'parentLineageId', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'analysisTokens']);
 const transportKeys = new Set(['id', 'capturedAt', 'admittedAt', 'committedAt', 'hookDurationMs']);
 const inputKeys = new Set(['schemaVersion', 'source', 'sessionId', 'startedAt', 'sourceEndedAt', 'observedThrough', 'reconciliation', 'observations', 'usageSnapshots', 'transportMeasurements', 'coverage']);
@@ -82,14 +82,16 @@ function operationFrom(
   usedEvidence: Set<string>,
   input: SessionEvidenceInput
 ): SessionOperation {
-  const result = results.find((candidate) => !usedEvidence.has(candidate.id));
+  const qualifiedResults = results.filter((candidate) => request.executionKey === undefined && candidate.executionKey === undefined
+    || request.executionKey !== undefined && candidate.executionKey === request.executionKey);
+  const result = qualifiedResults.length === 1 ? qualifiedResults[0] : undefined;
   if (result !== undefined) usedEvidence.add(result.id);
   const relatedVerifications = verifications;
   for (const verification of relatedVerifications) usedEvidence.add(verification.id);
   if (result?.interpretation?.kind === 'expected-red' && !relatedVerifications.some(({ outcome }) => outcome === 'succeeded')) {
     throw new TypeError('Expected RED interpretation requires explicit successful test-cycle verification evidence.');
   }
-  const resultFact: NonNullable<SessionOperation['result']> = result === undefined ? Object.freeze({ unknownReason: 'result-not-delivered' as const }) : Object.freeze({
+  const resultFact: NonNullable<SessionOperation['result']> = result === undefined ? Object.freeze({ unknownReason: results.length > 0 ? 'correlation-missing' as const : 'result-not-delivered' as const }) : Object.freeze({
     ...(result.exitStatus === undefined ? {} : { exitStatus: result.exitStatus }),
     provenance: result.resultProvenance ?? 'hook-envelope' as const,
     ...(result.resultUnknownReason === undefined ? (result.exitStatus === undefined ? { unknownReason: 'source-field-absent' as const } : {}) : { unknownReason: result.resultUnknownReason }),
@@ -239,6 +241,7 @@ function validateObservation(value: EvidenceObservation): void {
   if (unexpected !== undefined) throw new TypeError(`Unsupported evidence observation field: ${unexpected}.`);
   assertIdentifier(value.id, 'Evidence identity');
   assertIdentifier(value.sourceEventId, 'Source event identity');
+  if (value.executionKey !== undefined) assertIdentifier(value.executionKey, 'Execution identity');
   if (!['request', 'result', 'task-verification', 'human-wait'].includes(value.kind)) throw new TypeError('Evidence observation kind is invalid.');
   const occurredAt = canonicalTimestamp(value.occurredAt, 'Evidence timestamp');
   if (value.relatedEventId !== undefined) assertIdentifier(value.relatedEventId, 'Related request identity');

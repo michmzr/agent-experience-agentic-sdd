@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import type { CapturedEventRecord } from '../capture/contracts.js';
+import { interpretCapturedProcess } from '../evidence/capture-projection.js';
 import { validateNormalizedCaptureEvent } from '../capture/normalization.js';
 import {
   createEpisodeEvidence,
@@ -249,7 +250,8 @@ function repairEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' |
   const episodes: OperationalEpisode[] = [];
   const findings: OperationalFinding[] = [];
   const candidates: LearningCandidate[] = [];
-  for (const failed of operations.filter(({ result }) => result?.outcome === 'failed')) {
+  for (const failed of operations.filter(({ request, result }) => result !== undefined && result.outcome === 'failed'
+    && interpretCapturedProcess(request, result).kind === 'unclassified-nonzero')) {
     const replacement = replacementFor(failed, operations);
     if (replacement === undefined) continue;
     const evidenceEventIds = [failed.request.id, failed.result!.id, replacement.request.id, ...(replacement.result ? [replacement.result.id] : [])];
@@ -264,7 +266,8 @@ function repairEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' |
   }
   const pendingEvents = operations.flatMap((operation) => {
     if (operation.result === undefined) return [operation.request];
-    if (operation.result.outcome === 'failed' && replacementFor(operation, operations) === undefined) return [operation.request, operation.result];
+    if (operation.result.outcome === 'failed' && interpretCapturedProcess(operation.request, operation.result).kind === 'unclassified-nonzero'
+      && replacementFor(operation, operations) === undefined) return [operation.request, operation.result];
     return [];
   }).sort(byEvent);
   return { episodes, findings, candidates, pendingEvents };

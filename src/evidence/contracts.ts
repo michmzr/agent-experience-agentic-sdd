@@ -25,6 +25,7 @@ export interface ResultFact {
 export interface EvidenceObservation {
   readonly id: string;
   readonly sourceEventId: string;
+  readonly executionKey?: string;
   readonly kind: EvidenceObservationKind;
   readonly occurredAt: string;
   readonly relatedEventId?: string;

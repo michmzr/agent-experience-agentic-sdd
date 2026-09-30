@@ -436,11 +436,22 @@ const logicalEvidenceMigration = `
     session_id TEXT NOT NULL,
     path TEXT NOT NULL CHECK(path IN ('legacy', 'run')),
     event_id TEXT NOT NULL,
-    UNIQUE(source, source_event_id),
+    UNIQUE(source, session_id, source_event_id),
     UNIQUE(session_id, ordinal)
   ) STRICT;
   CREATE INDEX IF NOT EXISTS logical_evidence_session_sequence
     ON logical_evidence(session_id, ordinal);
+  CREATE TABLE IF NOT EXISTS logical_evidence_conflicts (
+    source TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    source_event_id TEXT NOT NULL,
+    retained_path TEXT NOT NULL,
+    retained_event_id TEXT NOT NULL,
+    conflicting_path TEXT NOT NULL,
+    conflicting_event_id TEXT NOT NULL,
+    disposition TEXT NOT NULL CHECK(disposition IN ('equivalent', 'conflict')),
+    PRIMARY KEY(source, session_id, source_event_id, conflicting_path, conflicting_event_id)
+  ) STRICT;
 `;
 
 export class ExperienceStore {
@@ -607,9 +618,27 @@ export class ExperienceStore {
     });
   }
 
-  logicalEvidenceHighWater(id: SessionId): number {
+  private indexedLogicalEvidenceHighWater(id: SessionId): number {
     const row = this.database.prepare('SELECT MAX(ordinal) AS high_water FROM logical_evidence WHERE session_id = ?').get(id) as { high_water: number | null };
     return row.high_water ?? 0;
+  }
+
+  logicalEvidenceCoverage(id: SessionId): { readonly indexed: number; readonly unindexed: number; readonly conflicts: number } {
+    const indexed = Number((this.database.prepare('SELECT COUNT(*) AS count FROM logical_evidence WHERE session_id = ?').get(id) as { count: number }).count);
+    const unindexed = Number((this.database.prepare(`SELECT
+      (SELECT COUNT(*) FROM capture_events ce JOIN events e ON e.id = ce.event_id WHERE e.session_id = ?
+        AND NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = ce.source AND l.session_id = e.session_id AND l.source_event_id = ce.source_event_id AND l.path = 'legacy' AND l.event_id = ce.event_id)
+        AND NOT EXISTS (SELECT 1 FROM logical_evidence_conflicts c WHERE c.source = ce.source AND c.session_id = e.session_id AND c.source_event_id = ce.source_event_id AND c.conflicting_path = 'legacy' AND c.conflicting_event_id = ce.event_id)) +
+      (SELECT COUNT(*) FROM capture_run_events re WHERE re.conversation_id = ?
+        AND NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = re.source AND l.session_id = re.conversation_id AND l.source_event_id = re.source_event_id AND l.path = 'run' AND l.event_id = re.event_id)
+        AND NOT EXISTS (SELECT 1 FROM logical_evidence_conflicts c WHERE c.source = re.source AND c.session_id = re.conversation_id AND c.source_event_id = re.source_event_id AND c.conflicting_path = 'run' AND c.conflicting_event_id = re.event_id)) AS count`).get(id, id) as { count: number }).count);
+    const conflicts = Number((this.database.prepare("SELECT COUNT(*) AS count FROM logical_evidence_conflicts WHERE session_id = ? AND disposition = 'conflict'").get(id) as { count: number }).count);
+    return Object.freeze({ indexed, unindexed, conflicts });
+  }
+
+  logicalEvidenceHighWater(id: SessionId): number {
+    if (this.logicalEvidenceCoverage(id).unindexed > 0) throw new Error('Logical evidence backfill is incomplete.');
+    return this.indexedLogicalEvidenceHighWater(id);
   }
 
   backfillLogicalEvidence(limit = 1024): { readonly indexed: number; readonly remaining: number } {
@@ -618,19 +647,23 @@ export class ExperienceStore {
     try {
       const rows = this.database.prepare(`
         SELECT source, source_event_id, session_id, path, event_id FROM (
-          SELECT ce.source, ce.source_event_id, e.session_id, 'legacy' AS path, ce.event_id
+          SELECT ce.source, ce.source_event_id, e.session_id, 'legacy' AS path, ce.event_id,
+            e.occurred_at AS occurred_at, ce.rowid AS source_order
             FROM capture_events ce JOIN events e ON e.id = ce.event_id
-            WHERE NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = ce.source AND l.source_event_id = ce.source_event_id)
+            WHERE NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = ce.source AND l.session_id = e.session_id AND l.source_event_id = ce.source_event_id AND l.path = 'legacy' AND l.event_id = ce.event_id)
+              AND NOT EXISTS (SELECT 1 FROM logical_evidence_conflicts c WHERE c.source = ce.source AND c.session_id = e.session_id AND c.source_event_id = ce.source_event_id AND c.conflicting_path = 'legacy' AND c.conflicting_event_id = ce.event_id)
           UNION ALL
-          SELECT re.source, re.source_event_id, re.conversation_id AS session_id, 'run' AS path, re.event_id
+          SELECT re.source, re.source_event_id, re.conversation_id AS session_id, 'run' AS path, re.event_id,
+            re.occurred_at AS occurred_at, re.rowid AS source_order
             FROM capture_run_events re
-            WHERE NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = re.source AND l.source_event_id = re.source_event_id)
-        ) ORDER BY source, source_event_id, path LIMIT ?
+            WHERE NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = re.source AND l.session_id = re.conversation_id AND l.source_event_id = re.source_event_id AND l.path = 'run' AND l.event_id = re.event_id)
+              AND NOT EXISTS (SELECT 1 FROM logical_evidence_conflicts c WHERE c.source = re.source AND c.session_id = re.conversation_id AND c.source_event_id = re.source_event_id AND c.conflicting_path = 'run' AND c.conflicting_event_id = re.event_id)
+        ) ORDER BY occurred_at, source_order, path LIMIT ?
       `).all(limit) as Array<{ source: string; source_event_id: string; session_id: string; path: 'legacy' | 'run'; event_id: string }>;
       for (const row of rows) this.indexLogicalEvent(row.source, row.source_event_id, row.session_id, row.path, row.event_id);
       const remaining = this.database.prepare(`SELECT
-        (SELECT COUNT(*) FROM capture_events ce WHERE NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = ce.source AND l.source_event_id = ce.source_event_id)) +
-        (SELECT COUNT(*) FROM capture_run_events re WHERE NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = re.source AND l.source_event_id = re.source_event_id)) AS count`).get() as { count: number };
+        (SELECT COUNT(*) FROM capture_events) + (SELECT COUNT(*) FROM capture_run_events)
+        - (SELECT COUNT(*) FROM logical_evidence) - (SELECT COUNT(*) FROM logical_evidence_conflicts) AS count`).get() as { count: number };
       this.database.exec('COMMIT');
       return Object.freeze({ indexed: rows.length, remaining: remaining.count });
     } catch (error) {
@@ -647,6 +680,7 @@ export class ExperienceStore {
       || input.through < input.after || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 1024) {
       throw new RangeError('Logical evidence page requires a valid cursor, watermark and limit at most 1024.');
     }
+    if (this.logicalEvidenceCoverage(id).unindexed > 0) throw new Error('Logical evidence backfill is incomplete.');
     const rows = this.database.prepare(`
       SELECT l.ordinal AS sequence, l.path, l.event_id, l.source, l.source_event_id,
         COALESCE(ce.phase, re.phase) AS phase,
@@ -1236,17 +1270,33 @@ export class ExperienceStore {
   }
 
   private indexLogicalEvent(source: string, sourceEventId: string, sessionId: string, path: 'legacy' | 'run', eventId: string): void {
-    const existing = this.database.prepare('SELECT session_id, path, event_id FROM logical_evidence WHERE source = ? AND source_event_id = ?')
-      .get(source, sourceEventId) as { session_id: string; path: string; event_id: string } | undefined;
+    const existing = this.database.prepare('SELECT path, event_id FROM logical_evidence WHERE source = ? AND session_id = ? AND source_event_id = ?')
+      .get(source, sessionId, sourceEventId) as { path: string; event_id: string } | undefined;
     if (existing) {
-      if (existing.session_id !== sessionId || existing.path !== path || existing.event_id !== eventId) {
-        throw new TypeError('Conflicting logical evidence identity.');
+      if (existing.path !== path || existing.event_id !== eventId) {
+        const disposition = this.logicalSourceFacts(existing.path as 'legacy' | 'run', existing.event_id)
+          === this.logicalSourceFacts(path, eventId) ? 'equivalent' : 'conflict';
+        this.database.prepare(`INSERT OR IGNORE INTO logical_evidence_conflicts
+          (source, session_id, source_event_id, retained_path, retained_event_id, conflicting_path, conflicting_event_id, disposition)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(source, sessionId, sourceEventId, existing.path, existing.event_id, path, eventId, disposition);
       }
       return;
     }
-    const ordinal = this.logicalEvidenceHighWater(sessionId as SessionId) + 1;
+    const ordinal = this.indexedLogicalEvidenceHighWater(sessionId as SessionId) + 1;
     this.database.prepare('INSERT INTO logical_evidence (ordinal, source, source_event_id, session_id, path, event_id) VALUES (?, ?, ?, ?, ?, ?)')
       .run(ordinal, source, sourceEventId, sessionId, path, eventId);
+  }
+
+  private logicalSourceFacts(path: 'legacy' | 'run', eventId: string): string {
+    const row = path === 'legacy'
+      ? this.database.prepare(`SELECT ce.phase, e.occurred_at, ce.signature_json, ce.summary,
+          ce.capture_outcome, e.exit_status, ce.related_event_id
+          FROM capture_events ce JOIN events e ON e.id = ce.event_id WHERE ce.event_id = ?`).get(eventId)
+      : this.database.prepare(`SELECT phase, occurred_at, signature_json, summary,
+          capture_outcome, exit_status, related_event_id FROM capture_run_events WHERE event_id = ?`).get(eventId);
+    if (row === undefined) throw new Error('Logical evidence source is missing.');
+    return JSON.stringify(row);
   }
 
   private toKnowledgeEntry(row: KnowledgeRow): KnowledgeEntry {
