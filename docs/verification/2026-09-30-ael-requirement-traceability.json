@@ -1,0 +1,808 @@
+{
+  "schemaVersion": 2,
+  "sourceIndex": "docs/product/ael-value-delivery-traceability.json",
+  "snapshotRevision": "1c4b706ef5e419b6ce9631ff5dc128bdaa94a84f",
+  "statusSemantics": {
+    "test-present": "Tagged test exists; acceptance and execution are not implied.",
+    "historical-scoped": "A prior verification note records a limited run on an earlier revision.",
+    "not-run": "No matching run artifact has been recorded for the current revision.",
+    "unsupported": "Acceptance lacks required test or real-host evidence."
+  },
+  "hostQualification": {
+    "status": "unsupported",
+    "artifactPath": null,
+    "reason": "No sanitized installed-host success, failure, and asynchronous-result qualification artifact."
+  },
+  "measuredImprovement": {
+    "status": "unsupported",
+    "artifactPath": null,
+    "reason": "No completed five-pair real-session B report and safety/context gate."
+  },
+  "requirements": [
+    {
+      "spec": "ABI",
+      "requirement": "ABI-R1",
+      "acceptance": "ABI-A1",
+      "task": "Task 1",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-build-identity-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-build-identity.md",
+      "testPath": "test/ael-build-identity.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "historical-scoped",
+        "artifactPath": "docs/verification/2026-09-29-abi-implementation.md",
+        "currentRevisionVerified": false,
+        "command": "rtk proxy node --test dist/test/ael-build-identity.test.js dist/test/hook-installation.test.js dist/test/hook-readiness.test.js dist/test/project-hook-configuration.test.js"
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-build-identity.test.js"
+    },
+    {
+      "spec": "ABI",
+      "requirement": "ABI-R2",
+      "acceptance": "ABI-A2",
+      "task": "Task 2",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-build-identity-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-build-identity.md",
+      "testPath": "test/ael-build-identity.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "historical-scoped",
+        "artifactPath": "docs/verification/2026-09-29-abi-implementation.md",
+        "currentRevisionVerified": false,
+        "command": "rtk proxy node --test dist/test/ael-build-identity.test.js dist/test/hook-installation.test.js dist/test/hook-readiness.test.js dist/test/project-hook-configuration.test.js"
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-build-identity.test.js"
+    },
+    {
+      "spec": "ABI",
+      "requirement": "ABI-R3",
+      "acceptance": "ABI-A3",
+      "task": "Task 3",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-build-identity-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-build-identity.md",
+      "testPath": "test/ael-build-identity.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "historical-scoped",
+        "artifactPath": "docs/verification/2026-09-29-abi-implementation.md",
+        "currentRevisionVerified": false,
+        "command": "rtk proxy node --test dist/test/ael-build-identity.test.js dist/test/hook-installation.test.js dist/test/hook-readiness.test.js dist/test/project-hook-configuration.test.js"
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-build-identity.test.js"
+    },
+    {
+      "spec": "ABI",
+      "requirement": "ABI-R4",
+      "acceptance": "ABI-A4",
+      "task": "Task 4",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-build-identity-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-build-identity.md",
+      "testPath": "test/ael-build-identity.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "historical-scoped",
+        "artifactPath": "docs/verification/2026-09-29-abi-implementation.md",
+        "currentRevisionVerified": false,
+        "command": "rtk proxy node --test dist/test/ael-build-identity.test.js dist/test/hook-installation.test.js dist/test/hook-readiness.test.js dist/test/project-hook-configuration.test.js"
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-build-identity.test.js"
+    },
+    {
+      "spec": "ABI",
+      "requirement": "ABI-R5",
+      "acceptance": "ABI-A5",
+      "task": "Task 5",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-build-identity-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-build-identity.md",
+      "testPath": "test/ael-build-identity.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-build-identity.test.js"
+    },
+    {
+      "spec": "AEC",
+      "requirement": "AEC-R1",
+      "acceptance": "AEC-A1",
+      "task": "Task 1",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-evidence-continuity-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-evidence-continuity.md",
+      "testPath": "test/ael-evidence-continuity.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-evidence-continuity.test.js"
+    },
+    {
+      "spec": "AEC",
+      "requirement": "AEC-R2",
+      "acceptance": "AEC-A2",
+      "task": "Task 2",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-evidence-continuity-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-evidence-continuity.md",
+      "testPath": "test/ael-evidence-continuity.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "historical-scoped",
+        "artifactPath": "docs/verification/2026-09-30-aec-logical-index.md",
+        "currentRevisionVerified": false,
+        "command": "rtk proxy node --test dist/test/ael-evidence-continuity.test.js dist/test/experience-store.test.js dist/test/learning-service.test.js dist/test/analysis-load.test.js dist/test/incremental-evidence.test.js"
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-evidence-continuity.test.js"
+    },
+    {
+      "spec": "AEC",
+      "requirement": "AEC-R3",
+      "acceptance": "AEC-A3",
+      "task": "Task 3",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-evidence-continuity-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-evidence-continuity.md",
+      "testPath": "test/ael-evidence-continuity.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "historical-scoped",
+        "artifactPath": "docs/verification/2026-09-30-aec-logical-index.md",
+        "currentRevisionVerified": false,
+        "command": "rtk proxy node --test dist/test/ael-evidence-continuity.test.js dist/test/experience-store.test.js dist/test/learning-service.test.js dist/test/analysis-load.test.js dist/test/incremental-evidence.test.js"
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-evidence-continuity.test.js"
+    },
+    {
+      "spec": "AEC",
+      "requirement": "AEC-R4",
+      "acceptance": "AEC-A4",
+      "task": "Task 4",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-evidence-continuity-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-evidence-continuity.md",
+      "testPath": "test/ael-evidence-continuity.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-evidence-continuity.test.js"
+    },
+    {
+      "spec": "AEC",
+      "requirement": "AEC-R5",
+      "acceptance": "AEC-A5",
+      "task": "Task 5",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-evidence-continuity-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-evidence-continuity.md",
+      "testPath": "test/ael-evidence-continuity.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-evidence-continuity.test.js"
+    },
+    {
+      "spec": "AEC",
+      "requirement": "AEC-R6",
+      "acceptance": "AEC-A6",
+      "task": "Task 6",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-evidence-continuity-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-evidence-continuity.md",
+      "testPath": "test/ael-evidence-continuity.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-evidence-continuity.test.js"
+    },
+    {
+      "spec": "ARC",
+      "requirement": "ARC-R1",
+      "acceptance": "ARC-A1",
+      "task": "Task 1",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-recovery-coverage-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-recovery-coverage.md",
+      "testPath": "test/ael-recovery-coverage.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-recovery-coverage.test.js"
+    },
+    {
+      "spec": "ARC",
+      "requirement": "ARC-R2",
+      "acceptance": "ARC-A2",
+      "task": "Task 2",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-recovery-coverage-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-recovery-coverage.md",
+      "testPath": "test/ael-recovery-plans-public.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-recovery-plans-public.test.js"
+    },
+    {
+      "spec": "ARC",
+      "requirement": "ARC-R3",
+      "acceptance": "ARC-A3",
+      "task": "Task 3",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-recovery-coverage-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-recovery-coverage.md",
+      "testPath": "test/ael-recovery-reconcile.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "historical-scoped",
+        "artifactPath": "docs/verification/2026-09-30-arc-analysis-reconciliation.md",
+        "currentRevisionVerified": false,
+        "command": "rtk proxy node --test dist/test/ael-recovery-reconcile.test.js"
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-recovery-reconcile.test.js"
+    },
+    {
+      "spec": "ARC",
+      "requirement": "ARC-R4",
+      "acceptance": "ARC-A4",
+      "task": "Task 4",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-recovery-coverage-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-recovery-coverage.md",
+      "testPath": "test/ael-health-v3-public.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-health-v3-public.test.js"
+    },
+    {
+      "spec": "ARC",
+      "requirement": "ARC-R5",
+      "acceptance": "ARC-A5",
+      "task": "Task 5",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-recovery-coverage-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-recovery-coverage.md",
+      "testPath": "test/ael-health-detectors.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-health-detectors.test.js"
+    },
+    {
+      "spec": "ARC",
+      "requirement": "ARC-R6",
+      "acceptance": "ARC-A6",
+      "task": "Task 6",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-recovery-coverage-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-recovery-coverage.md",
+      "testPath": "test/ael-health-detectors.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-health-detectors.test.js"
+    },
+    {
+      "spec": "ASC",
+      "requirement": "ASC-R1",
+      "acceptance": "ASC-A1",
+      "task": "Task 1",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-scoped-conventions-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-scoped-conventions.md",
+      "testPath": "test/ael-scoped-conventions.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-scoped-conventions.test.js"
+    },
+    {
+      "spec": "ASC",
+      "requirement": "ASC-R2",
+      "acceptance": "ASC-A2",
+      "task": "Task 2",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-scoped-conventions-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-scoped-conventions.md",
+      "testPath": "test/ael-scoped-conventions.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-scoped-conventions.test.js"
+    },
+    {
+      "spec": "ASC",
+      "requirement": "ASC-R3",
+      "acceptance": "ASC-A3",
+      "task": "Task 3",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-scoped-conventions-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-scoped-conventions.md",
+      "testPath": "test/ael-scoped-conventions.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-scoped-conventions.test.js"
+    },
+    {
+      "spec": "ASC",
+      "requirement": "ASC-R4",
+      "acceptance": "ASC-A4",
+      "task": "Task 4",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-scoped-conventions-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-scoped-conventions.md",
+      "testPath": "test/ael-scoped-conventions.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-scoped-conventions.test.js"
+    },
+    {
+      "spec": "ASC",
+      "requirement": "ASC-R5",
+      "acceptance": "ASC-A5",
+      "task": "Task 5",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-scoped-conventions-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-scoped-conventions.md",
+      "testPath": "test/ael-scoped-conventions.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-scoped-conventions.test.js"
+    },
+    {
+      "spec": "ATI",
+      "requirement": "ATI-R1",
+      "acceptance": "ATI-A1",
+      "task": "Task 1",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-typed-evidence-ingestion-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-typed-evidence-ingestion.md",
+      "testPath": "test/ael-typed-evidence-ingestion.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "historical-scoped",
+        "artifactPath": "docs/verification/2026-09-30-ati-annotation-import-a1-a2.md",
+        "currentRevisionVerified": false,
+        "command": "rtk proxy node --test dist/test/ael-typed-evidence-ingestion.test.js"
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-typed-evidence-ingestion.test.js"
+    },
+    {
+      "spec": "ATI",
+      "requirement": "ATI-R2",
+      "acceptance": "ATI-A2",
+      "task": "Task 2",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-typed-evidence-ingestion-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-typed-evidence-ingestion.md",
+      "testPath": "test/ael-typed-evidence-ingestion.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "historical-scoped",
+        "artifactPath": "docs/verification/2026-09-30-ati-annotation-import-a1-a2.md",
+        "currentRevisionVerified": false,
+        "command": "rtk proxy node --test dist/test/ael-typed-evidence-ingestion.test.js"
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-typed-evidence-ingestion.test.js"
+    },
+    {
+      "spec": "ATI",
+      "requirement": "ATI-R3",
+      "acceptance": "ATI-A3",
+      "task": "Task 3",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-typed-evidence-ingestion-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-typed-evidence-ingestion.md",
+      "testPath": "test/ael-typed-evidence-ingestion.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-typed-evidence-ingestion.test.js"
+    },
+    {
+      "spec": "ATI",
+      "requirement": "ATI-R4",
+      "acceptance": "ATI-A4",
+      "task": "Task 4",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-typed-evidence-ingestion-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-typed-evidence-ingestion.md",
+      "testPath": "test/ael-typed-evidence-ingestion.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-typed-evidence-ingestion.test.js"
+    },
+    {
+      "spec": "ATI",
+      "requirement": "ATI-R5",
+      "acceptance": "ATI-A5",
+      "task": "Task 5",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-typed-evidence-ingestion-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-typed-evidence-ingestion.md",
+      "testPath": "test/ael-typed-evidence-ingestion.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-typed-evidence-ingestion.test.js"
+    },
+    {
+      "spec": "ATI",
+      "requirement": "ATI-R6",
+      "acceptance": "ATI-A6",
+      "task": "Task 6",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-typed-evidence-ingestion-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-typed-evidence-ingestion.md",
+      "testPath": "test/ael-typed-evidence-ingestion.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-typed-evidence-ingestion.test.js"
+    },
+    {
+      "spec": "ACL",
+      "requirement": "ACL-R1",
+      "acceptance": "ACL-A1",
+      "task": "Task 1",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-candidate-lifecycle-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-candidate-lifecycle.md",
+      "testPath": "test/ael-candidate-cli.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-candidate-cli.test.js"
+    },
+    {
+      "spec": "ACL",
+      "requirement": "ACL-R2",
+      "acceptance": "ACL-A2",
+      "task": "Task 2",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-candidate-lifecycle-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-candidate-lifecycle.md",
+      "testPath": "test/ael-candidate-identity.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-candidate-identity.test.js"
+    },
+    {
+      "spec": "ACL",
+      "requirement": "ACL-R3",
+      "acceptance": "ACL-A3",
+      "task": "Task 3",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-candidate-lifecycle-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-candidate-lifecycle.md",
+      "testPath": "test/ael-candidate-review.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-candidate-review.test.js"
+    },
+    {
+      "spec": "ACL",
+      "requirement": "ACL-R4",
+      "acceptance": "ACL-A4",
+      "task": "Task 4",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-candidate-lifecycle-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-candidate-lifecycle.md",
+      "testPath": "test/ael-candidate-cli.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-candidate-cli.test.js"
+    },
+    {
+      "spec": "ACL",
+      "requirement": "ACL-R5",
+      "acceptance": "ACL-A5",
+      "task": "Task 5",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-candidate-lifecycle-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-candidate-lifecycle.md",
+      "testPath": "test/ael-candidate-review.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-candidate-review.test.js"
+    },
+    {
+      "spec": "ACL",
+      "requirement": "ACL-R6",
+      "acceptance": "ACL-A6",
+      "task": "Task 6",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-candidate-lifecycle-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-candidate-lifecycle.md",
+      "testPath": "test/ael-candidate-lifecycle.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-candidate-lifecycle.test.js"
+    },
+    {
+      "spec": "ACL",
+      "requirement": "ACL-R7",
+      "acceptance": "ACL-A7",
+      "task": "Task 7",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-candidate-lifecycle-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-candidate-lifecycle.md",
+      "testPath": "test/ael-candidate-migration.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-candidate-migration.test.js"
+    },
+    {
+      "spec": "AAP",
+      "requirement": "AAP-R1",
+      "acceptance": "AAP-A1",
+      "task": "Task 1",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-advisory-pilot-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-advisory-pilot.md",
+      "testPath": "test/ael-advisory-pilot.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-advisory-pilot.test.js"
+    },
+    {
+      "spec": "AAP",
+      "requirement": "AAP-R2",
+      "acceptance": "AAP-A2",
+      "task": "Task 2",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-advisory-pilot-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-advisory-pilot.md",
+      "testPath": "test/ael-advisory-pilot.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-advisory-pilot.test.js"
+    },
+    {
+      "spec": "AAP",
+      "requirement": "AAP-R3",
+      "acceptance": "AAP-A3",
+      "task": "Task 3",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-advisory-pilot-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-advisory-pilot.md",
+      "testPath": "test/ael-advisory-pilot.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-advisory-pilot.test.js"
+    },
+    {
+      "spec": "AAP",
+      "requirement": "AAP-R4",
+      "acceptance": "AAP-A4",
+      "task": "Task 4",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-advisory-pilot-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-advisory-pilot.md",
+      "testPath": "test/ael-value-traceability.test.ts",
+      "status": "unsupported",
+      "reason": "No tagged acceptance test or recorded paired host session for advisory visibility.",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-value-traceability.test.js"
+    },
+    {
+      "spec": "AAP",
+      "requirement": "AAP-R5",
+      "acceptance": "AAP-A5",
+      "task": "Task 5",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-advisory-pilot-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-advisory-pilot.md",
+      "testPath": "test/ael-value-traceability.test.ts",
+      "status": "unsupported",
+      "reason": "No tagged acceptance test or recorded real-host advisory handoff.",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-value-traceability.test.js"
+    },
+    {
+      "spec": "AVB",
+      "requirement": "AVB-R1",
+      "acceptance": "AVB-A1",
+      "task": "Task 1",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-value-benchmark-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-value-benchmark.md",
+      "testPath": "test/ael-value-benchmark.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-value-benchmark.test.js"
+    },
+    {
+      "spec": "AVB",
+      "requirement": "AVB-R2",
+      "acceptance": "AVB-A2",
+      "task": "Task 2",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-value-benchmark-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-value-benchmark.md",
+      "testPath": "test/ael-value-benchmark-runner.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-value-benchmark-runner.test.js"
+    },
+    {
+      "spec": "AVB",
+      "requirement": "AVB-R3",
+      "acceptance": "AVB-A3",
+      "task": "Task 3",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-value-benchmark-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-value-benchmark.md",
+      "testPath": "test/ael-value-benchmark.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-value-benchmark.test.js"
+    },
+    {
+      "spec": "AVB",
+      "requirement": "AVB-R4",
+      "acceptance": "AVB-A4",
+      "task": "Task 4",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-value-benchmark-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-value-benchmark.md",
+      "testPath": "test/ael-value-benchmark.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-value-benchmark.test.js"
+    },
+    {
+      "spec": "AVB",
+      "requirement": "AVB-R5",
+      "acceptance": "AVB-A5",
+      "task": "Task 5",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-value-benchmark-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-value-benchmark.md",
+      "testPath": "test/ael-value-traceability.test.ts",
+      "status": "unsupported",
+      "reason": "No measured paired-session improvement run; synthetic benchmark fixtures cannot establish benefit.",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-value-traceability.test.js"
+    },
+    {
+      "spec": "AVB",
+      "requirement": "AVB-R6",
+      "acceptance": "AVB-A6",
+      "task": "Task 6",
+      "specPath": "docs/superpowers/specs/2026-09-29-ael-value-benchmark-design.md",
+      "planPath": "docs/superpowers/plans/2026-09-29-ael-value-benchmark.md",
+      "testPath": "test/ael-value-traceability.test.ts",
+      "status": "test-present",
+      "run": {
+        "status": "not-run",
+        "artifactPath": null,
+        "currentRevisionVerified": false,
+        "command": null
+      },
+      "testCommand": "rtk proxy node --test dist/test/ael-value-traceability.test.js"
+    }
+  ]
+}
