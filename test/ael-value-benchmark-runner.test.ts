@@ -12,7 +12,7 @@ test('AVB-A2/B1 public runner observes the retained pipeline after SQLite restar
     const manifest = { schemaVersion: 2, role: 'candidate', label: 'controlled-local-b1', buildId: identity.buildId,
       corpusVersion: 'b1-1', environment: { nodeMajor: Number(process.versions.node.split('.')[0]), platform: process.platform, arch: process.arch },
       budgets: { runMilliseconds: 60000 }, telemetry: { tokens: 'unavailable', wallTime: 'available' },
-      sourceVersions: { codexHook: 1, typedAnnotation: 1, aclReview: 'unsupported' }, seed: 1,
+      sourceVersions: { codexHook: 1, typedAnnotation: 1, aclReview: 'public-review-v1' }, seed: 1,
       scenarios: [
         { id: 'resume', revision: 1, kind: 'pipeline' },
         { id: 'unknown-result', revision: 1, kind: 'pipeline' },
@@ -31,15 +31,18 @@ test('AVB-A2/B1 public runner observes the retained pipeline after SQLite restar
     assert.equal(report.observations[1]?.evidence.retainedUnknownResults, 1);
     assert.equal(report.observations[2]?.evidence.healthyRowsSelected, 0);
     assert.equal(report.observations[3]?.evidence.retainedScopedContext, true);
+    assert.equal(report.observations[3]?.evidence.reviewedCandidate, true);
+    assert.equal(report.observations[3]?.evidence.retrievedAdvice, true);
     assert.equal(report.observations[4]?.evidence.resolvedUserAnnotations, 1);
     assert.equal(report.observations[4]?.evidence.crossScopeRejected, true);
-    assert.equal(report.aclReview.status, 'unsupported');
+    assert.equal(report.aclReview.status, 'observed');
     assert.equal(report.actualHost.status, 'unsupported');
     assert.equal(JSON.stringify(report).includes(directory), false);
     assert.equal(runCli(['benchmark', 'run', '--manifest', manifestPath, '--output', reportPath, '--json']).exitCode, 1);
     for (const [index, changed] of [
       { ...manifest, seed: 2 },
       { ...manifest, sourceVersions: { ...manifest.sourceVersions, typedAnnotation: 2 } },
+      { ...manifest, sourceVersions: { ...manifest.sourceVersions, aclReview: 'unsupported' } },
       { ...manifest, scenarios: [...manifest.scenarios].reverse() },
       { ...manifest, privatePath: '/private/fixture' }
     ].entries()) {

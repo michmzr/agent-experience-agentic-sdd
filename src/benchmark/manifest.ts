@@ -14,7 +14,7 @@ interface ManifestBase {
 
 export type RunManifest = ManifestBase & (
   { schemaVersion: 1; scenarios: { id: 'codex-resume-matcher'; revision: 1; kind: 'synthetic' }[] }
-  | { schemaVersion: 2; sourceVersions: { codexHook: 1; typedAnnotation: 1; aclReview: 'unsupported' }; seed: 1;
+  | { schemaVersion: 2; sourceVersions: { codexHook: 1; typedAnnotation: 1; aclReview: 'public-review-v1' }; seed: 1;
       scenarios: { id: 'resume' | 'unknown-result' | 'recovery' | 'scoped-convention' | 'typed-verification'; revision: 1; kind: 'pipeline' }[] }
 );
 
@@ -59,7 +59,7 @@ export function validateRunManifest(input: unknown, actualBuildId: string): RunM
     || (m.schemaVersion === 1
       ? m.scenarios.length !== 1 || m.scenarios[0]?.id !== 'codex-resume-matcher' || m.scenarios[0].revision !== 1 || m.scenarios[0].kind !== 'synthetic' || m.corpusVersion !== 'b0-1'
       : m.corpusVersion !== 'b1-1' || m.seed !== 1 || !exactKeys(m.sourceVersions, ['codexHook', 'typedAnnotation', 'aclReview'])
-        || m.sourceVersions.codexHook !== 1 || m.sourceVersions.typedAnnotation !== 1 || m.sourceVersions.aclReview !== 'unsupported'
+        || m.sourceVersions.codexHook !== 1 || m.sourceVersions.typedAnnotation !== 1 || m.sourceVersions.aclReview !== 'public-review-v1'
         || JSON.stringify(m.scenarios.map(s => s.id)) !== JSON.stringify(b1ScenarioIds)
         || m.scenarios.some(s => s.revision !== 1 || s.kind !== 'pipeline'))) {
     throw new Error('Invalid or substituted benchmark manifest.');

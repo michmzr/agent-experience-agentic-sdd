@@ -5,6 +5,7 @@ import { canTransition } from '../domain/transitions.js';
 import { assertDurableTextSafe } from '../review/sanitizer.js';
 import { openExperienceDatabase } from '../storage/database.js';
 import { canonicalCandidateIdentity, type CandidateIdentityInput } from './candidate-identity.js';
+import { SqliteCandidateEvidenceResolver, type InstructionContextEvidence } from './evidence-resolver.js';
 
 const kinds = new Set<LessonKind>(['failure', 'successful-workflow', 'project-fact', 'convention', 'tool-capability', 'environment-quirk', 'heuristic', 'preference']);
 const MAX_TEXT = 2_048;
@@ -105,7 +106,7 @@ interface OperationalRow { id: string; session_id: string; kind: LessonKind; sta
 
 export class CandidateRepository {
   private readonly database: DatabaseSync;
-  constructor(databasePath: string) {
+  constructor(private readonly databasePath: string) {
     this.database = openExperienceDatabase(databasePath);
     try { this.initialize(); } catch (error) { this.database.close(); throw error; }
   }
@@ -265,15 +266,28 @@ export class CandidateRepository {
     return this.transaction(() => {
       const rows = this.database.prepare(`SELECT c.id, e.session_id, c.kind, c.statement ${pendingOperationalWhere}
         ORDER BY c.id LIMIT ?`).all(repositoryId, BACKFILL_BATCH) as unknown as OperationalRow[];
+      const instructionEvidence = new Map<string, readonly InstructionContextEvidence[]>();
       for (const row of rows) {
         if (!kinds.has(row.kind)) continue;
-        const evidenceEventIds = this.tableExists('operational_candidate_evidence')
-          ? (this.database.prepare('SELECT event_id FROM operational_candidate_evidence WHERE candidate_id = ? ORDER BY event_id')
-              .all(row.id) as Array<{ event_id: string }>).map(({ event_id }) => event_id)
+        const evidenceRows = this.tableExists('operational_candidate_evidence')
+          ? this.database.prepare('SELECT event_id, polarity FROM operational_candidate_evidence WHERE candidate_id = ? ORDER BY event_id')
+              .all(row.id) as Array<{ event_id: string; polarity: string }>
           : [];
-        this.insertCandidate({ repositoryId, kind: row.kind, applicability: { scope: 'repository' },
+        const evidenceEventIds = evidenceRows.map(({ event_id }) => event_id);
+        if (row.kind === 'convention' && !instructionEvidence.has(row.session_id)) {
+          const resolver = new SqliteCandidateEvidenceResolver(this.databasePath, row.session_id);
+          try { instructionEvidence.set(row.session_id, resolver.listInstructionContextEvidence(repositoryId)); }
+          finally { resolver.close(); }
+        }
+        const matched = row.kind === 'convention'
+          ? matchingBackfillConvention(row.statement,
+              evidenceRows.filter(({ polarity }) => polarity === 'confirms').map(({ event_id }) => event_id),
+              instructionEvidence.get(row.session_id) ?? [])
+          : undefined;
+        this.insertCandidate({ repositoryId, kind: row.kind, applicability: matched?.applicability ?? { scope: 'repository' },
           originId: row.id, sessionId: row.session_id, source: 'operational',
-          statement: safeBackfillStatement(row.statement), evidenceEventIds });
+          statement: safeBackfillStatement(row.statement), evidenceEventIds,
+          ...(matched === undefined ? {} : { propositionKey: matched.propositionKey }) });
       }
       return rows.length;
     });
@@ -436,6 +450,15 @@ export class CandidateRepository {
     try { const result = work(); this.database.exec('COMMIT'); return result; }
     catch (error) { this.database.exec('ROLLBACK'); throw error; }
   }
+}
+
+function matchingBackfillConvention(statement: string, evidenceIds: readonly string[],
+  evidence: readonly InstructionContextEvidence[]): Pick<InstructionContextEvidence, 'propositionKey' | 'applicability'> | undefined {
+  const matches = evidence.filter(entry => entry.applicability.scope === 'repository'
+    && statement === `Use ${entry.tool} instead of ${entry.replaces} in this repository.`
+    && evidenceIds.includes(`instruction:${entry.source}`));
+  const identities = new Set(matches.map(entry => JSON.stringify([entry.propositionKey, entry.applicability])));
+  return identities.size === 1 ? matches[0] : undefined;
 }
 
 function assertIdentifier(value: string): void {

@@ -35,7 +35,7 @@ test('AVB-B2 reads a public runner report but leaves actual session B incomplete
     const manifest = { schemaVersion: 2, role: 'candidate', label: 'avb-b2-probe', buildId: identity.buildId,
       corpusVersion: 'b1-1', environment, budgets: { runMilliseconds: 60000 },
       telemetry: { tokens: 'unavailable', wallTime: 'available' },
-      sourceVersions: { codexHook: 1, typedAnnotation: 1, aclReview: 'unsupported' }, seed: 1,
+      sourceVersions: { codexHook: 1, typedAnnotation: 1, aclReview: 'public-review-v1' }, seed: 1,
       scenarios: b1Scenarios.map(id => ({ id, revision: 1, kind: 'pipeline' })) };
     const manifestPath = join(directory, 'manifest.json'); const reportPath = join(directory, 'report.json');
     writeFileSync(manifestPath, JSON.stringify(manifest));
