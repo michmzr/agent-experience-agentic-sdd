@@ -214,7 +214,9 @@ export class CaptureSpool {
 
   #admit(record: PassiveCaptureRecord, admittedAt: string, transaction = true): SpoolAdmission {
     const payload = JSON.stringify(record);
-    const deliveryId = createHash('sha256').update(`ael:capture-spool:v${SPOOL_VERSION}\0`).update(payload).digest('hex');
+    const { buildProvenance: _buildProvenance, ...operation } = record as PassiveCaptureRecord & { readonly buildProvenance?: unknown };
+    const operationPayload = JSON.stringify(operation);
+    const deliveryId = createHash('sha256').update(`ael:capture-spool:v${SPOOL_VERSION}\0`).update(operationPayload).digest('hex');
     const payloadBytes = Buffer.byteLength(payload, 'utf8');
     if (transaction) this.#database.exec('BEGIN IMMEDIATE');
     try {
@@ -222,6 +224,13 @@ export class CaptureSpool {
       if (existing !== undefined) {
         if (transaction) this.#database.exec('COMMIT');
         return Object.freeze({ status: 'duplicate', deliveryId });
+      }
+      const legacy = this.#database.prepare(`SELECT delivery_id FROM records
+        WHERE version = ? AND CASE WHEN json_valid(payload) THEN json_remove(payload, '$.buildProvenance') END = ? LIMIT 1`)
+        .get(SPOOL_VERSION, operationPayload) as { delivery_id: string } | undefined;
+      if (legacy !== undefined) {
+        if (transaction) this.#database.exec('COMMIT');
+        return Object.freeze({ status: 'duplicate', deliveryId: legacy.delivery_id });
       }
       const usage = this.#database.prepare('SELECT COUNT(*) AS count, COALESCE(SUM(payload_bytes), 0) AS bytes FROM records').get() as { count: number; bytes: number };
       if (usage.count >= this.#maxActiveRecords || usage.bytes + payloadBytes > this.#maxActiveBytes) throw new CaptureSpoolCapacityError();

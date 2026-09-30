@@ -12,6 +12,7 @@ import { runCli } from "../src/cli.js";
 import { installHooks, managedEventSupported } from "../src/cli/hook-installation.js";
 import { initializeGitRepository } from "./helpers/git-repository.js";
 import { once } from "node:events";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 test("ABI-A1 build emits content identity rather than package version", () => {
@@ -165,7 +166,7 @@ test("ABI-A5 admission carries actual build provenance and refuses newer writer 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("ABI-A5 two installed builds retain per-operation capture and retry attribution", () => {
+test("ABI-A5 two installed builds deduplicate one operation and retain capture and retry attribution", () => {
   const root = fixture(); const installedA = fixture(); const installedB = fixture();
   const databasePath = join(root, "experience.sqlite");
   const captureScript = `import {pathToFileURL} from 'node:url'; const {ingestPassiveHook} = await import(pathToFileURL(process.argv[1]).href); const result = ingestPassiveHook({source:'codex',input:process.argv[4],databasePath:process.argv[2],workingDirectory:process.argv[3],now:()=> '2026-09-29T10:00:00.000Z',scheduleDrain:()=>{}}); console.log(JSON.stringify(result));`;
@@ -187,12 +188,15 @@ test("ABI-A5 two installed builds retain per-operation capture and retry attribu
       const result = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", captureScript, join(installed, "dist/src/capture/hook-ingress.js"), databasePath, root, input], { encoding: "utf8" }));
       assert.equal(result.status, "captured");
     }
+    const redelivery = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", captureScript, join(installedB, "dist/src/capture/hook-ingress.js"), databasePath, root, inputs[0]!], { encoding: "utf8" }));
+    assert.equal(redelivery.status, "duplicate");
     const initial = new CaptureSpool(join(root, "capture-spool.sqlite"));
     const initialReceipts = initial.receiptReport().receipts;
-    const [first, second] = initialReceipts;
+    const [first, second, duplicate] = initialReceipts;
     assert.equal(initial.status().admitted, 2);
-    assert.equal(initialReceipts.length, 2);
-    assert.deepEqual(initialReceipts.map(receipt => receipt.buildId), [manifestA.buildId, manifestB.buildId]);
+    assert.equal(initialReceipts.length, 3);
+    assert.deepEqual(initialReceipts.map(receipt => receipt.buildId), [manifestA.buildId, manifestB.buildId, undefined]);
+    assert.equal(duplicate!.operationKey, first!.operationKey);
     assert.notEqual(first!.operationKey, second!.operationKey);
     const database = new DatabaseSync(join(root, "capture-spool.sqlite"));
     const firstDelivery = (database.prepare("SELECT delivery_id, payload FROM records").all() as Array<{ delivery_id: string; payload: string }>).find(row => JSON.parse(row.payload).session?.id === "first")?.delivery_id;
@@ -229,6 +233,27 @@ test("ABI-A5 rejects a modified installed artifact before receipt admission muta
     const result = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script, join(installed, "dist/src/capture/spool.js"), join(root, "capture-spool.sqlite")], { encoding: "utf8" }));
     assert.deepEqual(result, { rejected: true, unchanged: true, admitted: 0, receipts: 0 });
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(installed, { recursive: true, force: true }); }
+});
+
+test("ABI-A5 resolves a pending legacy delivery ID when build provenance changes", () => {
+  const root = fixture();
+  const path = join(root, "capture-spool.sqlite");
+  const spool = new CaptureSpool(path);
+  try {
+    const operation = { kind: "session-start" as const, session: { id: "legacy-build-switch" as never, source: "codex" as const, startedAt: "2026-09-29T10:00:00.000Z" } };
+    const legacyPayload = JSON.stringify({ ...operation, buildProvenance: { buildId: "old-build", writer: 1 } });
+    const legacyId = createHash("sha256").update("ael:capture-spool:v1\0").update(legacyPayload).digest("hex");
+    const database = new DatabaseSync(path);
+    try {
+      database.prepare("INSERT INTO records (delivery_id, version, payload, payload_bytes, state, admitted_at, next_retry_at) VALUES (?, 1, ?, ?, 'pending', ?, ?)")
+        .run(legacyId, legacyPayload, Buffer.byteLength(legacyPayload), operation.session.startedAt, operation.session.startedAt);
+      database.prepare("UPDATE counters SET admitted = 1 WHERE id = 1").run();
+    } finally { database.close(); }
+    const redelivery = { ...operation, buildProvenance: { buildId: "new-build", writer: 2 } };
+    const result = spool.admit(redelivery);
+    assert.deepEqual(result, { status: "duplicate", deliveryId: legacyId });
+    assert.equal(spool.status().admitted, 1);
+  } finally { spool.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("ABI-A3 interrupted publication recovers the previous generation before replay", () => {
