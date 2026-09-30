@@ -2,6 +2,7 @@
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { compareBaseline, currentBuildIdentity, runBaseline } from './benchmark/runner.js';
+import { AdvisoryConfigurationStore } from './advice/configuration.js';
 
 import { defaultDatabasePath } from './storage/database.js';
 import { importTypedEvidence } from './evidence/import.js';
@@ -55,7 +56,7 @@ const scopes = new Set(['global', 'repo'] as const);
 const initScopes = new Set(['global', 'repo', 'workspace'] as const);
 const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired']);
 const reviewSources = new Set(['codex', 'claude-code', 'cursor'] as const);
-const knownCommands = new Set(['init', 'unregister', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence', 'capture', 'analysis', 'installation', 'benchmark']);
+const knownCommands = new Set(['init', 'unregister', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence', 'capture', 'analysis', 'installation', 'benchmark', 'advice']);
 
 export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory' | 'humanOutput'> = {}): CliResult {
   if (args.length === 1 && args[0] === '--help') return { exitCode: 0, stdout: `${usage()}\n`, stderr: '' };
@@ -64,6 +65,7 @@ export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workin
     const json = parsed.options.has('json');
     if (parsed.positionals[0] === 'installation') return { exitCode: 0, stdout: JSON.stringify(executeInstallation(parsed, options)) + '\n', stderr: '' };
     if (parsed.positionals[0] === 'benchmark') return success(executeBenchmark(parsed), json, parsed.positionals, options.humanOutput);
+    if (parsed.positionals[0] === 'advice') return success(executeAdvice(parsed), json, parsed.positionals, options.humanOutput);
     const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
     const value = execute(service, parsed, options);
     return success(value, json, parsed.positionals, options.humanOutput,
@@ -75,6 +77,24 @@ export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workin
       ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' }
       : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${renderHumanError(diagnostic, nextStep(diagnostic.code, args), options.humanOutput)}\n` };
   }
+}
+
+function executeAdvice(parsed: ParsedArguments): unknown {
+  const [command, subcommand, ...rest] = parsed.positionals;
+  if (command !== 'advice' || rest.length !== 0) throw invalidCommand(command);
+  const dataDir = optionalString(parsed.options, 'data-dir') ?? dirname(defaultDatabasePath());
+  const store = new AdvisoryConfigurationStore(join(dataDir, 'advice.sqlite'));
+  if (subcommand === 'status') {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id']);
+    return store.status(requiredString(parsed.options, 'repository-id'));
+  }
+  if (subcommand === 'configure') {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'enabled']);
+    const enabled = requiredString(parsed.options, 'enabled');
+    if (enabled !== 'true' && enabled !== 'false') throw new SyntaxError('--enabled must be true or false.');
+    return store.setEnabled(requiredString(parsed.options, 'repository-id'), enabled === 'true');
+  }
+  throw invalidCommand(command);
 }
 
 export async function runCliAsync(args: string[], options: RunCliAsyncOptions = {}): Promise<CliResult> {
@@ -684,6 +704,8 @@ function usage(): string {
     '  benchmark identity [--json]',
     '  benchmark run --manifest <run.json> --output <report.json>',
     '  benchmark compare --baseline <report.json> --candidate <report.json> --output <comparison.json>',
+    '  advice configure --repository-id <id> --enabled true|false --json',
+    '  advice status --repository-id <id> --json',
     '  unregister [--repository-id <id>]',
     '  status [--repository <path>|--repository-id <id>] [--schema-version <2|3>]',
     '  status-global [--repository <path>|--repository-id <id>] [--schema-version <2|3>]',
