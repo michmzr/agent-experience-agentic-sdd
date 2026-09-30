@@ -6,6 +6,8 @@ import test from 'node:test';
 import { createHash } from 'node:crypto';
 import { runCli } from '../src/cli.js';
 import { assertComparable } from '../src/benchmark/manifest.js';
+import { assessBenchmarkSafety, type SafetyRunObservation } from '../src/benchmark/compare.js';
+import { DatabaseSync } from 'node:sqlite';
 
 test('AVB-A1 public run pins current build and preserves the frozen synthetic baseline', () => {
   const directory = mkdtempSync(join(tmpdir(), 'ael-avb-'));
@@ -39,6 +41,41 @@ test('AVB-A1 public run pins current build and preserves the frozen synthetic ba
     assert.equal(readFileSync(reportPath, 'utf8').includes('AVB_SECRET_SENTINEL'), false);
     writeFileSync(manifestPath, JSON.stringify({ ...manifest, buildId: '0'.repeat(64) }));
     assert.equal(runCli(['benchmark', 'run', '--manifest', manifestPath, '--output', join(directory, 'substitute.json'), '--json']).exitCode, 1);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('AVB-A3 safety gates reject wrong scope, persisted secrets, passive intervention and unapproved promotion', () => {
+  const cases = JSON.parse(readFileSync(join(process.cwd(), 'test/fixtures/ael-value-benchmark/safety-cases.json'), 'utf8')) as Array<{
+    id: string; repositoryId: string; mode: SafetyRunObservation['mode']; advice: SafetyRunObservation['advice'];
+    interventions: SafetyRunObservation['interventions']; promotions: SafetyRunObservation['promotions'];
+    secretLocation: 'none' | 'database' | 'export'; violation: string | null;
+  }>;
+  const directory = mkdtempSync(join(tmpdir(), 'ael-avb-safety-'));
+  try {
+    for (const scenario of cases) {
+      const databasePath = join(directory, `${scenario.id}.sqlite`);
+      const db = new DatabaseSync(databasePath);
+      db.exec('CREATE TABLE retained_facts (value TEXT NOT NULL)');
+      db.prepare('INSERT INTO retained_facts(value) VALUES (?)').run(
+        scenario.secretLocation === 'database' ? `sk-${'a'.repeat(24)}` : 'bounded structural fact');
+      db.close();
+      const exportPath = join(directory, `${scenario.id}.json`);
+      writeFileSync(exportPath, JSON.stringify({ value: scenario.secretLocation === 'export' ? `sk-${'a'.repeat(24)}` : 'bounded structural fact' }));
+      const assessed = assessBenchmarkSafety({ taskOutcome: 'succeeded', mode: scenario.mode,
+        repositoryId: scenario.repositoryId, advice: scenario.advice, interventions: scenario.interventions,
+        promotions: scenario.promotions, persistence: { databasePath, exportPaths: [exportPath] },
+        telemetry: { tokens: null, wallMilliseconds: null } });
+      assert.equal(assessed.status, scenario.violation === null ? 'correctness-pass' : 'safety-fail', scenario.id);
+      assert.equal(assessed.conclusion, 'performance-not-established', scenario.id);
+      if (scenario.violation !== null) assert.equal(assessed.violations.includes(scenario.violation), true, scenario.id);
+      assert.equal(JSON.stringify(assessed).includes('sk-'), false);
+      assert.equal(JSON.stringify(assessed).includes(directory), false);
+    }
+    const omittedPersistence = assessBenchmarkSafety({ taskOutcome: 'succeeded', mode: 'passive', repositoryId: 'repo-a',
+      advice: [], interventions: [], promotions: [], persistence: { exportPaths: [] },
+      telemetry: { tokens: null, wallMilliseconds: null } });
+    assert.equal(omittedPersistence.status, 'safety-fail');
+    assert.equal(omittedPersistence.violations.includes('persistence-unavailable'), true);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
