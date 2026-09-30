@@ -2,7 +2,10 @@ import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { openExperienceDatabase } from '../storage/database.js';
+import { ExperienceStore } from '../storage/experience-store.js';
+import { OperationalLearningRepository } from '../learning/repository.js';
 import type { SessionEvidenceInput, SessionEvidenceReport, TypedAnnotationArtifact } from './contracts.js';
+import { importedTypedEvidenceMigration } from './schema.js';
 import { reconstructSessionEvidence } from './reconstructor.js';
 
 const identifierPattern = /^[A-Za-z0-9._:/-]{1,512}$/;
@@ -105,40 +108,21 @@ export class SessionEvidenceRepository {
   }
 }
 
-const typedImportMigration = `
-  CREATE TABLE IF NOT EXISTS imported_typed_evidence (
-    producer_namespace TEXT NOT NULL,
-    repository_id TEXT NOT NULL,
-    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
-    evidence_id TEXT NOT NULL,
-    producer_version TEXT NOT NULL,
-    context_revision TEXT NOT NULL,
-    origin TEXT NOT NULL CHECK(origin IN ('user-declared', 'agent-claimed')),
-    kind TEXT NOT NULL,
-    resolution TEXT NOT NULL CHECK(resolution IN ('resolved', 'pending')),
-    operation_source TEXT NOT NULL,
-    operation_source_event_id TEXT NOT NULL,
-    content_digest TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    retained_at TEXT NOT NULL,
-    PRIMARY KEY (producer_namespace, repository_id, session_id, evidence_id)
-  ) STRICT;
-  CREATE INDEX IF NOT EXISTS imported_typed_evidence_pending
-    ON imported_typed_evidence(repository_id, session_id, resolution);
-`;
-
 export class ImportedTypedEvidenceRepository {
   private readonly database: DatabaseSync;
 
-  constructor(databasePath: string, private readonly now: () => string = () => new Date().toISOString()) {
+  constructor(private readonly databasePath: string, private readonly now: () => string = () => new Date().toISOString()) {
+    const store = new ExperienceStore(databasePath);
+    store.close();
     this.database = openExperienceDatabase(databasePath);
-    this.database.exec(typedImportMigration);
+    this.database.exec(importedTypedEvidenceMigration);
   }
 
   close(): void { this.database.close(); }
 
   save(artifact: TypedAnnotationArtifact) {
     this.database.exec('BEGIN IMMEDIATE');
+    let committed = false;
     try {
       const registered = this.database.prepare('SELECT 1 FROM repositories WHERE repository_id = ?').get(artifact.repositoryId);
       const session = this.database.prepare('SELECT repository_id FROM sessions WHERE id = ?').get(artifact.sessionId) as {
@@ -183,6 +167,7 @@ export class ImportedTypedEvidenceRepository {
       });
       let retained = 0;
       let pending = 0;
+      let indexed = 0;
       const retainedAt = this.now();
       assertCanonicalTimestamp(retainedAt);
       for (const row of rows) {
@@ -191,21 +176,46 @@ export class ImportedTypedEvidenceRepository {
           this.database.prepare(`UPDATE imported_typed_evidence SET resolution = ? WHERE producer_namespace = ?
             AND repository_id = ? AND session_id = ? AND evidence_id = ?`).run(row.resolution, artifact.producer.namespace,
               artifact.repositoryId, artifact.sessionId, row.record.id);
-          continue;
-        }
-        this.database.prepare(`INSERT INTO imported_typed_evidence
+        } else {
+          this.database.prepare(`INSERT INTO imported_typed_evidence
           (producer_namespace, repository_id, session_id, evidence_id, producer_version, context_revision, origin, kind,
            resolution, operation_source, operation_source_event_id, content_digest, payload_json, retained_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(artifact.producer.namespace, artifact.repositoryId,
             artifact.sessionId, row.record.id, artifact.producer.version, artifact.contextRevision, row.record.origin,
             row.record.kind, row.resolution, row.record.operation.source, row.record.operation.sourceEventId,
             row.digest, row.payloadJson, retainedAt);
-        retained++;
+          retained++;
+        }
+        if (row.resolution === 'resolved') {
+          const exists = this.database.prepare(`SELECT 1 FROM logical_annotation_evidence
+            WHERE session_id = ? AND producer_namespace = ? AND evidence_id = ?`)
+            .get(artifact.sessionId, artifact.producer.namespace, row.record.id);
+          if (!exists) {
+            const next = this.database.prepare(`SELECT COALESCE(MAX(ordinal), 0) + 1 AS ordinal FROM (
+              SELECT ordinal FROM logical_evidence WHERE session_id = ?
+              UNION ALL SELECT ordinal FROM logical_annotation_evidence WHERE session_id = ?
+            )`).get(artifact.sessionId, artifact.sessionId) as { ordinal: number };
+            this.database.prepare(`INSERT INTO logical_annotation_evidence
+              (session_id, ordinal, producer_namespace, repository_id, evidence_id) VALUES (?, ?, ?, ?, ?)`)
+              .run(artifact.sessionId, next.ordinal, artifact.producer.namespace, artifact.repositoryId, row.record.id);
+            indexed++;
+          }
+        }
       }
       this.database.exec('COMMIT');
+      committed = true;
+      if (indexed > 0) {
+        const row = this.database.prepare(`SELECT MAX(ordinal) AS high_water FROM (
+          SELECT ordinal FROM logical_evidence WHERE session_id = ?
+          UNION ALL SELECT ordinal FROM logical_annotation_evidence WHERE session_id = ?
+        )`).get(artifact.sessionId, artifact.sessionId) as { high_water: number };
+        const analysis = new OperationalLearningRepository(this.databasePath);
+        try { analysis.enqueueWithOutcome({ repositoryId: artifact.repositoryId, sessionId: artifact.sessionId, inputHighWater: row.high_water }); }
+        finally { analysis.close(); }
+      }
       return Object.freeze({ version: 1 as const, repositoryId: artifact.repositoryId, sessionId: artifact.sessionId,
-        received: artifact.records.length, retained, pending });
-    } catch (error) { this.database.exec('ROLLBACK'); throw error; }
+        received: artifact.records.length, retained, pending, indexed });
+    } catch (error) { if (!committed) this.database.exec('ROLLBACK'); throw error; }
   }
 }
 

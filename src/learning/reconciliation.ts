@@ -30,6 +30,7 @@ export function reconcileAnalysis(databasePath: string, repositoryId: string, op
   let rows: Array<{ id: string }>;
   let hasMore: boolean;
   let hasStreams: boolean;
+  let hasAnnotations: boolean;
   let optedOut = false;
   const selections: Selection[] = [];
   try {
@@ -41,6 +42,7 @@ export function reconcileAnalysis(databasePath: string, repositoryId: string, op
     hasMore = rows.length > MAX_SESSIONS;
     rows = rows.slice(0, MAX_SESSIONS);
     hasStreams = (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'operational_analysis_streams'").get() as unknown) !== undefined;
+    hasAnnotations = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'logical_annotation_evidence'").get() !== undefined;
     optedOut = loadProjectSettings(root).automaticOperationalLearning === false;
     for (const { id } of rows) {
       const physical = db.prepare(`SELECT
@@ -50,7 +52,9 @@ export function reconcileAnalysis(databasePath: string, repositoryId: string, op
         .get(id) as { count: number; high_water: number | null };
       const aliases = db.prepare('SELECT COUNT(*) AS count FROM logical_evidence_conflicts WHERE session_id = ?').get(id) as { count: number };
       const unindexed = physical.count - indexed.count - aliases.count;
-      const highWater = indexed.high_water ?? 0;
+      const annotation = hasAnnotations ? db.prepare('SELECT COUNT(*) AS count, MAX(ordinal) AS high_water FROM logical_annotation_evidence WHERE session_id = ?')
+        .get(id) as { count: number; high_water: number | null } : { count: 0, high_water: null };
+      const highWater = Math.max(indexed.high_water ?? 0, annotation.high_water ?? 0);
       if (unindexed !== 0) {
         selections.push({ sessionId: id, highWater, physicalCount: physical.count, status: 'unavailable' });
         continue;
@@ -59,13 +63,17 @@ export function reconcileAnalysis(databasePath: string, repositoryId: string, op
       let cursor = 0;
       let traversed = 0;
       while (cursor < highWater) {
-        const page = db.prepare('SELECT ordinal FROM logical_evidence WHERE session_id = ? AND ordinal > ? AND ordinal <= ? ORDER BY ordinal LIMIT ?')
-          .all(id, cursor, highWater, PAGE_SIZE) as Array<{ ordinal: number }>;
+        const page = hasAnnotations ? db.prepare(`SELECT ordinal FROM (
+          SELECT ordinal FROM logical_evidence WHERE session_id = ? AND ordinal > ? AND ordinal <= ?
+          UNION ALL SELECT ordinal FROM logical_annotation_evidence WHERE session_id = ? AND ordinal > ? AND ordinal <= ?
+        ) ORDER BY ordinal LIMIT ?`).all(id, cursor, highWater, id, cursor, highWater, PAGE_SIZE) as Array<{ ordinal: number }>
+          : db.prepare('SELECT ordinal FROM logical_evidence WHERE session_id = ? AND ordinal > ? AND ordinal <= ? ORDER BY ordinal LIMIT ?')
+            .all(id, cursor, highWater, PAGE_SIZE) as Array<{ ordinal: number }>;
         if (page.length === 0) break;
         traversed += page.length;
         cursor = page.at(-1)!.ordinal;
       }
-      if (cursor !== highWater || traversed !== indexed.count) {
+      if (cursor !== highWater || traversed !== indexed.count + annotation.count) {
         selections.push({ sessionId: id, highWater, physicalCount: physical.count, status: 'unavailable' });
         continue;
       }
@@ -102,7 +110,9 @@ export function reconcileAnalysis(databasePath: string, repositoryId: string, op
             (SELECT COUNT(*) FROM capture_run_events WHERE conversation_id = ?) AS physical,
             (SELECT MAX(ordinal) FROM logical_evidence WHERE session_id = ?) AS high_water`)
             .get(selected.sessionId, selected.sessionId, selected.sessionId) as { physical: number; high_water: number | null };
-          unchanged = row.physical === selected.physicalCount && (row.high_water ?? 0) === selected.highWater;
+          const annotationHighWater = hasAnnotations ? (current.prepare('SELECT MAX(ordinal) AS high_water FROM logical_annotation_evidence WHERE session_id = ?')
+            .get(selected.sessionId) as { high_water: number | null }).high_water ?? 0 : 0;
+          unchanged = row.physical === selected.physicalCount && Math.max(row.high_water ?? 0, annotationHighWater) === selected.highWater;
         } finally { current.close(); }
         if (!unchanged) { stale++; continue; }
         if (optedOut) {

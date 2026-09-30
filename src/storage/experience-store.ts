@@ -40,6 +40,7 @@ import { assertDurableTextSafe } from '../review/sanitizer.js';
 import { openExperienceDatabase, type ExperienceDatabaseOptions } from './database.js';
 import { ensureOverrideAuditUseMigration, ensureOverrideEvidenceMigration, overrideAuditMigration } from './override-store.js';
 import { validateProjectInstructionContext, type ProjectInstructionContext } from '../learning/project-conventions.js';
+import { importedTypedEvidenceMigration, logicalAnnotationEvidenceMigration } from '../evidence/schema.js';
 
 export type ExperienceStoreInitializationStage = 'open' | 'migration';
 
@@ -194,14 +195,23 @@ export interface RepositoryRegistration {
 export interface RepositoryRecord { readonly session: Session; readonly events: readonly CapturedEventRecord[]; }
 export interface CapturedSessionRange {
   readonly events: readonly CapturedEventRecord[];
+  readonly annotations: readonly IndexedAnnotationEvidence[];
   readonly requestedHighWater: number;
   readonly actualHighWater: number;
   readonly availableHighWater: number;
 }
 export interface LogicalEvidencePage {
   readonly events: readonly CapturedEventRecord[];
+  readonly annotations: readonly IndexedAnnotationEvidence[];
   readonly highWater: number;
   readonly nextCursor: number;
+}
+export interface IndexedAnnotationEvidence {
+  readonly producerNamespace: string;
+  readonly evidenceId: string;
+  readonly repositoryId: string;
+  readonly sessionId: string;
+  readonly payloadJson: string;
 }
 export interface LifecycleApplication {
   readonly lifecycle: LifecycleSignal;
@@ -622,6 +632,7 @@ export class ExperienceStore {
     const availableHighWater = this.logicalEvidenceHighWater(id);
     return Object.freeze({
       events: page.events,
+      annotations: page.annotations,
       requestedHighWater: input.through,
       actualHighWater: page.events.length === 0 ? input.through : page.nextCursor,
       availableHighWater
@@ -629,12 +640,17 @@ export class ExperienceStore {
   }
 
   private indexedLogicalEvidenceHighWater(id: SessionId): number {
-    const row = this.database.prepare('SELECT MAX(ordinal) AS high_water FROM logical_evidence WHERE session_id = ?').get(id) as { high_water: number | null };
+    const row = this.database.prepare(`SELECT MAX(high_water) AS high_water FROM (
+      SELECT MAX(ordinal) AS high_water FROM logical_evidence WHERE session_id = ?
+      UNION ALL SELECT MAX(ordinal) AS high_water FROM logical_annotation_evidence WHERE session_id = ?
+    )`).get(id, id) as { high_water: number | null };
     return row.high_water ?? 0;
   }
 
   logicalEvidenceCoverage(id: SessionId): { readonly indexed: number; readonly unindexed: number; readonly conflicts: number } {
-    const indexed = Number((this.database.prepare('SELECT COUNT(*) AS count FROM logical_evidence WHERE session_id = ?').get(id) as { count: number }).count);
+    const indexed = Number((this.database.prepare(`SELECT
+      (SELECT COUNT(*) FROM logical_evidence WHERE session_id = ?) +
+      (SELECT COUNT(*) FROM logical_annotation_evidence WHERE session_id = ?) AS count`).get(id, id) as { count: number }).count);
     const unindexed = Number((this.database.prepare(`SELECT
       (SELECT COUNT(*) FROM capture_events ce JOIN events e ON e.id = ce.event_id WHERE e.session_id = ?
         AND NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = ce.source AND l.session_id = e.session_id AND l.source_event_id = ce.source_event_id AND l.path = 'legacy' AND l.event_id = ce.event_id)
@@ -713,7 +729,7 @@ export class ExperienceStore {
       throw new RangeError('Logical evidence page requires a valid cursor, watermark and limit at most 1024.');
     }
     if (this.logicalEvidenceCoverage(id).unindexed > 0) throw new Error('Logical evidence backfill is incomplete.');
-    const rows = this.database.prepare(`
+    const capturedRows = this.database.prepare(`
       SELECT l.ordinal AS sequence, l.path, l.event_id, l.source, l.source_event_id,
         COALESCE(ce.phase, re.phase) AS phase,
         COALESCE(ce.signature_json, re.signature_json) AS signature_json,
@@ -730,9 +746,26 @@ export class ExperienceStore {
       WHERE l.session_id = ? AND l.ordinal > ? AND l.ordinal <= ?
       ORDER BY l.ordinal LIMIT ?
     `).all(id, input.after, input.through, input.limit) as unknown as Array<CaptureRow & { path: string }>;
-    if (rows.some((row) => row.phase === null)) throw new Error('Logical evidence reference is missing its immutable source.');
-    return Object.freeze({ events: Object.freeze(rows.map(captureFromRow)),
-      highWater: input.through, nextCursor: rows.at(-1)?.sequence ?? input.after });
+    const annotationRows = this.database.prepare(`SELECT a.ordinal AS sequence, a.producer_namespace, a.evidence_id,
+      a.repository_id, a.session_id, i.payload_json, i.content_digest FROM logical_annotation_evidence a
+      LEFT JOIN imported_typed_evidence i ON i.producer_namespace = a.producer_namespace
+        AND i.repository_id = a.repository_id AND i.session_id = a.session_id AND i.evidence_id = a.evidence_id
+      WHERE a.session_id = ? AND a.ordinal > ? AND a.ordinal <= ? ORDER BY a.ordinal LIMIT ?`)
+      .all(id, input.after, input.through, input.limit) as Array<{ sequence: number; producer_namespace: string;
+        evidence_id: string; repository_id: string; session_id: string; payload_json: string | null; content_digest: string | null }>;
+    const selected = [...capturedRows.map((row) => ({ path: 'capture' as const, row })),
+      ...annotationRows.map((row) => ({ path: 'annotation' as const, row }))]
+      .sort((left, right) => left.row.sequence - right.row.sequence).slice(0, input.limit);
+    const captures = selected.filter((item): item is { path: 'capture'; row: CaptureRow & { path: string } } => item.path === 'capture');
+    const annotations = selected.filter((item): item is { path: 'annotation'; row: typeof annotationRows[number] } => item.path === 'annotation');
+    if (captures.some(({ row }) => row.phase === null) || annotations.some(({ row }) => row.payload_json === null
+      || createHash('sha256').update(row.payload_json).digest('hex') !== row.content_digest)) {
+      throw new Error('Logical evidence reference is missing its immutable source.');
+    }
+    return Object.freeze({ events: Object.freeze(captures.map(({ row }) => captureFromRow(row))),
+      annotations: Object.freeze(annotations.map(({ row }) => Object.freeze({ producerNamespace: row.producer_namespace,
+        evidenceId: row.evidence_id, repositoryId: row.repository_id, sessionId: row.session_id, payloadJson: row.payload_json! }))),
+      highWater: input.through, nextCursor: selected.at(-1)?.row.sequence ?? input.after });
   }
 
   endSession(source: Session['source'], id: SessionId, endedAt: string): IncrementalAppendResult {
@@ -1297,6 +1330,11 @@ export class ExperienceStore {
       if (!applied.has(19)) {
         this.database.exec(operationInstructionContextMigration);
         this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(19, new Date().toISOString());
+      }
+      if (!applied.has(20)) {
+        this.database.exec(importedTypedEvidenceMigration);
+        this.database.exec(logicalAnnotationEvidenceMigration);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(20, new Date().toISOString());
       }
       this.database.exec('COMMIT');
     } catch (error) {

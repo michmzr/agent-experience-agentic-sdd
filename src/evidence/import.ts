@@ -73,6 +73,19 @@ export function parseTypedAnnotationArtifact(input: string): TypedAnnotationArti
     repositoryId, sessionId, contextRevision, records: Object.freeze(records) });
 }
 
+export function readIndexedAnnotation(input: {
+  readonly payloadJson: string; readonly producerNamespace: string; readonly repositoryId: string;
+  readonly sessionId: string; readonly evidenceId: string;
+}): { readonly record: TypedAnnotationRecord; readonly contextRevision: string } {
+  const payload = JSON.parse(input.payloadJson) as Record<string, unknown>;
+  const { producerKind, producerVersion, contextRevision, ...record } = payload;
+  const artifact = parseTypedAnnotationArtifact(JSON.stringify({ version: 1,
+    producer: { kind: producerKind, version: producerVersion, namespace: input.producerNamespace },
+    repositoryId: input.repositoryId, sessionId: input.sessionId, contextRevision, records: [record] }));
+  if (artifact.records[0]!.id !== input.evidenceId) throw new TypeError('Indexed annotation identity conflicts with its payload.');
+  return Object.freeze({ record: artifact.records[0]!, contextRevision: artifact.contextRevision });
+}
+
 function object(value: unknown, keys: readonly string[]): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Annotation object is invalid.');
   const record = value as Record<string, unknown>;

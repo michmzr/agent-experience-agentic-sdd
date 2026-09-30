@@ -5,7 +5,8 @@ import { validateNormalizedCaptureEvent } from '../capture/normalization.js';
 import { loadProjectSettings } from '../config/project-settings.js';
 import type { SessionId } from '../domain/types.js';
 import { resolveRepository } from '../repository/local-repository.js';
-import { ExperienceStore } from '../storage/experience-store.js';
+import { readIndexedAnnotation } from '../evidence/import.js';
+import { ExperienceStore, type IndexedAnnotationEvidence } from '../storage/experience-store.js';
 import {
   createEpisodeEvidence,
   validateDetectorCheckpoint,
@@ -149,7 +150,7 @@ export class OperationalLearningService {
             { eventsLoaded: 0, findings: 0, elapsedMs });
         }
         const metrics = (findings: number, elapsedMs: number): AnalysisMetrics =>
-          ({ eventsLoaded: range.events.length, findings, elapsedMs });
+          ({ eventsLoaded: range.events.length + range.annotations.length, findings, elapsedMs });
         if (range.availableHighWater < job.inputHighWater) {
           const elapsedMs = this.monotonicNow() - startedAt;
           return this.fail(repository, job, ownerId, 'invalid-input', Math.min(range.actualHighWater, range.availableHighWater), metrics(0, elapsedMs));
@@ -170,7 +171,8 @@ export class OperationalLearningService {
         let episodeEvidence: readonly EpisodeEvidence[];
         try {
           episodeEvidence = mergeEpisodeEvidence(
-            episodeEvidenceFromCapture([...checkpoint.pendingEvents, ...range.events]), suppliedEvidence);
+            [...episodeEvidenceFromCapture([...checkpoint.pendingEvents, ...range.events]),
+              ...range.annotations.map(annotationEvidenceFromIndexed)], suppliedEvidence);
           result = this.detect({
             repositoryId: job.repositoryId,
             sessionId: job.sessionId,
@@ -188,11 +190,12 @@ export class OperationalLearningService {
         if (elapsedMs > deadlineMs) {
           return this.fail(repository, job, ownerId, 'timeout', range.actualHighWater, metrics(result.findings.length, elapsedMs));
         }
-        const coverage = Object.freeze([coverageFor(job, range.actualHighWater, range.events.length, result.findings.length)]);
+        const coverage = Object.freeze([coverageFor(job, range.actualHighWater,
+          range.events.length + range.annotations.length, result.findings.length)]);
         try {
           repository.acknowledge(job.id, {
             ownerId, attempt: job.attempts, processedHighWater: range.actualHighWater, checkpoint: result.checkpoint,
-            metrics: { eventsLoaded: range.events.length, findings: result.findings.length, elapsedMs },
+            metrics: { eventsLoaded: range.events.length + range.annotations.length, findings: result.findings.length, elapsedMs },
             result: { ...result, episodeEvidence, coverage }
           });
           return Object.freeze({ status: 'completed', jobId: job.id });
@@ -246,17 +249,31 @@ function episodeEvidenceFromCapture(events: readonly CapturedEventRecord[]): rea
   return Object.freeze(events.flatMap((event) => {
     if (event.phase === 'pre-action') {
       const id = captureEvidenceId(event.source, event.sourceEventId);
-      return [createEpisodeEvidence({ id, kind: 'tool-request', state: 'observed',
+      return [createEpisodeEvidence({ id, kind: 'tool-request', state: 'observed', origin: 'source-observed',
         decisionKey: captureDecisionKey(event), scopeKey: 'repository', evidenceIds: [id] })];
     }
     if (event.phase !== 'post-result') return [];
     const request = event.relatedEventId === undefined ? undefined : requests.get(event.relatedEventId);
     const id = captureEvidenceId(event.source, event.sourceEventId);
     const relatedId = event.relatedEventId === undefined ? id : captureEvidenceId(event.source, event.relatedEventId);
-    return [createEpisodeEvidence({ id, kind: 'tool-result', state: captureEvidenceState(event.outcome),
+    return [createEpisodeEvidence({ id, kind: 'tool-result', state: captureEvidenceState(event.outcome), origin: 'source-observed',
       ...(request === undefined ? {} : { decisionKey: captureDecisionKey(request), scopeKey: 'repository' }),
       evidenceIds: [relatedId] })];
   }));
+}
+
+function annotationEvidenceFromIndexed(indexed: IndexedAnnotationEvidence): EpisodeEvidence {
+  const { record, contextRevision } = readIndexedAnnotation(indexed);
+  const id = `annotation-${createHash('sha256').update(JSON.stringify([
+    indexed.producerNamespace, indexed.repositoryId, indexed.sessionId, indexed.evidenceId
+  ])).digest('hex')}`;
+  const decisionKey = `decision-${createHash('sha256').update(record.decisionKey).digest('hex')}`;
+  const scopeKey = `scope-${createHash('sha256').update(JSON.stringify([
+    indexed.repositoryId, contextRevision, record.scopeKey
+  ])).digest('hex')}`;
+  return createEpisodeEvidence({ id, kind: record.kind, state: record.state, origin: record.origin,
+    decisionKey, scopeKey, reasonClass: record.reasonClass,
+    evidenceIds: [captureEvidenceId(record.operation.source, record.operation.sourceEventId)] });
 }
 
 function validateSuppliedEpisodeEvidence(supplied: readonly EpisodeEvidence[] | undefined): readonly EpisodeEvidence[] {

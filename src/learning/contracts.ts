@@ -18,6 +18,7 @@ export interface EpisodeEvidence {
   readonly id: string;
   readonly kind: EpisodeEvidenceKind;
   readonly state: EpisodeEvidenceState;
+  readonly origin?: 'source-observed' | 'user-declared' | 'agent-claimed' | 'analyzer-inferred';
   readonly decisionKey?: string;
   readonly scopeKey?: string;
   readonly reasonClass?: EpisodeEvidenceReasonClass;
@@ -104,6 +105,9 @@ export function createEpisodeEvidence(value: EpisodeEvidence): EpisodeEvidence {
   assertEvidenceIdentifier(value.id, 'Evidence identity');
   if (!episodeEvidenceKinds.has(value.kind)) throw new TypeError('Evidence kind is invalid.');
   if (!episodeEvidenceStates.has(value.state)) throw new TypeError('Evidence state is invalid.');
+  if (value.origin !== undefined && !['source-observed', 'user-declared', 'agent-claimed', 'analyzer-inferred'].includes(value.origin)) {
+    throw new TypeError('Evidence origin is invalid.');
+  }
   optionalEvidenceIdentifier(value.decisionKey, 'Evidence decision key');
   optionalEvidenceIdentifier(value.scopeKey, 'Evidence scope key');
   if (value.reasonClass !== undefined && !episodeEvidenceReasonClasses.has(value.reasonClass)) throw new TypeError('Evidence reason class is invalid.');
@@ -114,6 +118,7 @@ export function createEpisodeEvidence(value: EpisodeEvidence): EpisodeEvidence {
     id: value.id,
     kind: value.kind,
     state: value.state,
+    ...(value.origin === undefined ? {} : { origin: value.origin }),
     ...(value.decisionKey === undefined ? {} : { decisionKey: value.decisionKey }),
     ...(value.scopeKey === undefined ? {} : { scopeKey: value.scopeKey }),
     ...(value.reasonClass === undefined ? {} : { reasonClass: value.reasonClass }),
@@ -215,7 +220,7 @@ const episodeEvidenceStates = new Set<EpisodeEvidenceState>(['observed', 'succee
 
 const episodeEvidenceReasonClasses = new Set<EpisodeEvidenceReasonClass>(['failure', 'instruction', 'superseded', 'verification']);
 
-const episodeEvidenceFields = new Set<keyof EpisodeEvidence>(['id', 'kind', 'state', 'decisionKey', 'scopeKey', 'reasonClass', 'detectorVersion', 'evidenceIds']);
+const episodeEvidenceFields = new Set<keyof EpisodeEvidence>(['id', 'kind', 'state', 'origin', 'decisionKey', 'scopeKey', 'reasonClass', 'detectorVersion', 'evidenceIds']);
 
 function assertEpisodeEvidenceFields(value: EpisodeEvidence): void {
   for (const field of Reflect.ownKeys(value)) {
