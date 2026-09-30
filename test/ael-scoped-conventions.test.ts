@@ -202,7 +202,7 @@ test('ASC-A3 retains distinct instruction revisions for two pre-actions admitted
       [{ tool: 'pnpm', scopePath: 'apps/mobile' }], [{ tool: 'uv', scopePath: 'apps/mobile' }]
     ]);
     assert.ok(report.operationInstructionRevisions.every(({ operationKey }) => !operationKey.includes('operation-')));
-    assert.equal(admit('operation-a', '2026-09-29T10:00:01.000Z').status, 'captured');
+    assert.equal(admit('operation-a', '2026-09-29T10:00:01.000Z').status, 'duplicate');
     drainCaptureSpool({ databasePath, now: () => '2026-09-29T10:00:04.000Z' });
     assert.deepEqual(new OperationalLearningService(databasePath).report('repo-1').operationInstructionRevisions, report.operationInstructionRevisions);
   } finally { rmSync(root, { recursive: true, force: true }); }

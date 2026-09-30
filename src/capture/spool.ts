@@ -225,6 +225,12 @@ export class CaptureSpool {
         if (transaction) this.#database.exec('COMMIT');
         return Object.freeze({ status: 'duplicate', deliveryId });
       }
+      const completed = this.#database.prepare("SELECT 1 FROM capture_recovery_state WHERE delivery_id = ? AND state IN ('committed', 'quarantined')")
+        .get(deliveryId);
+      if (completed !== undefined) {
+        if (transaction) this.#database.exec('COMMIT');
+        return Object.freeze({ status: 'duplicate', deliveryId });
+      }
       const legacy = this.#database.prepare(`SELECT delivery_id FROM records
         WHERE version = ? AND CASE WHEN json_valid(payload) THEN json_remove(payload, '$.buildProvenance') END = ? LIMIT 1`)
         .get(SPOOL_VERSION, operationPayload) as { delivery_id: string } | undefined;
