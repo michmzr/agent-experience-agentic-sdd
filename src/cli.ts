@@ -324,6 +324,13 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id']);
     return service.runOperationalAnalysis(contextualRepositoryId(parsed.options, options.workingDirectory));
   }
+  if (command === 'analysis' && subcommand === 'reconcile' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'apply', 'after-session']);
+    return service.reconcileOperationalAnalysis(requiredString(parsed.options, 'repository-id'), {
+      ...(parsed.options.has('apply') ? { apply: true } : {}),
+      ...(optionalString(parsed.options, 'after-session') === undefined ? {} : { afterSession: optionalString(parsed.options, 'after-session') })
+    });
+  }
   if (command === 'analysis' && subcommand === 'report' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'session', 'schema-version']);
     const schemaVersion = optionalSchemaVersion(parsed.options);
@@ -646,6 +653,7 @@ function usage(): string {
     '  capture drain',
     '  capture status',
     '  analysis run [--repository-id <id>]',
+    '  analysis reconcile --repository-id <id> [--apply] [--after-session <id>] --json',
     '  analysis report [--repository-id <id>] [--session <id>] [--schema-version 2]',
     '  analysis status [--repository-id <id>] [--session <id>]',
     '  analysis worker',

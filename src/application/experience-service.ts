@@ -18,6 +18,7 @@ import { projectCapturedSessionEvidence } from '../evidence/capture-projection.j
 import { sourceEvidenceCapabilities } from '../evidence/capabilities.js';
 import { SessionEvidenceRepository } from '../evidence/repository.js';
 import { OperationalLearningService } from '../learning/service.js';
+import { reconcileAnalysis, type ReconciliationOptions } from '../learning/reconciliation.js';
 import {
   OperationalLearningRepository,
   type AnalysisFilters,
@@ -249,6 +250,10 @@ export class ExperienceService {
   runOperationalAnalysis(repositoryId: string) {
     const service = new OperationalLearningService(this.databasePath);
     return service.runNext({ repositoryId });
+  }
+
+  reconcileOperationalAnalysis(repositoryId: string, options: ReconciliationOptions = {}) {
+    return reconcileAnalysis(this.databasePath, repositoryId, options);
   }
 
   runNextOperationalAnalysis(workerSlot: AnalysisWorkerSlotFence) {

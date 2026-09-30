@@ -3,7 +3,7 @@ export interface ParsedArguments {
   readonly options: Map<string, string | true>;
 }
 
-const booleanOptions = new Set(['json', 'interactive', 'allow-expensive-checks', 'refresh', 'yes']);
+const booleanOptions = new Set(['json', 'interactive', 'allow-expensive-checks', 'refresh', 'yes', 'apply']);
 
 export function parseArguments(args: readonly string[]): ParsedArguments {
   const positionals: string[] = [];
