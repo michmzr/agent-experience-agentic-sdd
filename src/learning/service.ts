@@ -86,7 +86,8 @@ export class OperationalLearningService {
             instructions: context.instructions, conventions: context.conventions,
             ...lifecycleContext(store, sessionId, repository.contextSecret()) });
         }
-        return repository.enqueueWithOutcome({ repositoryId, sessionId, inputHighWater: record.events.length }).workAdded;
+        return repository.enqueueWithOutcome({ repositoryId, sessionId,
+          inputHighWater: store.logicalEvidenceHighWater(sessionId as SessionId) }).workAdded;
       } finally { repository.close(); }
     } finally { store.close(); }
   }
@@ -149,7 +150,7 @@ export class OperationalLearningService {
           ({ eventsLoaded: range.events.length, findings, elapsedMs });
         if (range.availableHighWater < job.inputHighWater) {
           const elapsedMs = this.monotonicNow() - startedAt;
-          return this.fail(repository, job, ownerId, 'invalid-input', range.actualHighWater, metrics(0, elapsedMs));
+          return this.fail(repository, job, ownerId, 'invalid-input', Math.min(range.actualHighWater, range.availableHighWater), metrics(0, elapsedMs));
         }
         try {
           const identities = new Set(checkpoint.pendingEvents.map(({ id }) => id));

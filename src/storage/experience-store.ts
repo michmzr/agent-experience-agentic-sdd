@@ -197,6 +197,11 @@ export interface CapturedSessionRange {
   readonly actualHighWater: number;
   readonly availableHighWater: number;
 }
+export interface LogicalEvidencePage {
+  readonly events: readonly CapturedEventRecord[];
+  readonly highWater: number;
+  readonly nextCursor: number;
+}
 export interface LifecycleApplication {
   readonly lifecycle: LifecycleSignal;
   readonly session?: Session;
@@ -422,6 +427,22 @@ const resumedTechnicalEventMigration = `
   ) STRICT;
 `;
 
+const logicalEvidenceMigration = `
+  CREATE TABLE IF NOT EXISTS logical_evidence (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    ordinal INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    source_event_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    path TEXT NOT NULL CHECK(path IN ('legacy', 'run')),
+    event_id TEXT NOT NULL,
+    UNIQUE(source, source_event_id),
+    UNIQUE(session_id, ordinal)
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS logical_evidence_session_sequence
+    ON logical_evidence(session_id, ordinal);
+`;
+
 export class ExperienceStore {
   private readonly database: DatabaseSync;
 
@@ -435,6 +456,7 @@ export class ExperienceStore {
     this.database = database;
     try {
       this.migrate();
+      this.backfillLogicalEvidence();
     } catch (error) {
       try {
         database.close();
@@ -486,8 +508,16 @@ export class ExperienceStore {
   listRepositoryRecords(repositoryId: string): readonly RepositoryRecord[] {
     const sessions = this.database.prepare(`SELECT id, source, started_at, ended_at, repository_id, workspace_id, user_id FROM sessions WHERE repository_id = ? ORDER BY started_at, id`).all(repositoryId) as unknown as SessionRow[];
     return sessions.map((row) => {
-      const events = this.database.prepare(`SELECT ce.rowid AS sequence, ce.event_id, ce.source, ce.source_event_id, ce.phase, ce.signature_json, ce.summary, ce.capture_outcome, ce.related_event_id, e.session_id, e.occurred_at, e.exit_status FROM capture_events ce JOIN events e ON e.id = ce.event_id WHERE e.session_id = ? ORDER BY e.occurred_at, ce.rowid`).all(row.id) as unknown as CaptureRow[];
-      return Object.freeze({ session: sessionFromRow(row), events: events.map(captureFromRow) });
+      const events: CapturedEventRecord[] = [];
+      const highWater = this.logicalEvidenceHighWater(row.id as SessionId);
+      let cursor = 0;
+      while (cursor < highWater) {
+        const page = this.loadLogicalEvidencePage(row.id as SessionId, { after: cursor, through: highWater, limit: 1024 });
+        events.push(...page.events);
+        if (page.nextCursor === cursor) break;
+        cursor = page.nextCursor;
+      }
+      return Object.freeze({ session: sessionFromRow(row), events: Object.freeze(events) });
     });
   }
 
@@ -505,24 +535,30 @@ export class ExperienceStore {
   }
 
   repositoryQuality(repositoryId: string): RepositoryQuality {
-    const row = this.database.prepare(`WITH requests AS (
-      SELECT ce.source, ce.source_event_id, e.occurred_at
-      FROM capture_events ce JOIN events e ON e.id = ce.event_id JOIN sessions s ON s.id = e.session_id
-      WHERE s.repository_id = ? AND ce.phase = 'pre-action'
-    ), matched AS (
-      SELECT r.source_event_id, p.exit_status, p.occurred_at
-      FROM requests r LEFT JOIN capture_events pc ON pc.source = r.source AND pc.related_event_id = r.source_event_id AND pc.phase = 'post-result'
-      LEFT JOIN events p ON p.id = pc.event_id
-    ) SELECT COUNT(*) AS operations,
-      SUM(CASE WHEN last_at IS NOT NULL THEN 1 ELSE 0 END) AS linked,
-      SUM(CASE WHEN last_at IS NULL THEN 1 ELSE 0 END) AS missing_results,
-      SUM(CASE WHEN last_at IS NOT NULL AND exit_status IS NULL THEN 1 ELSE 0 END) AS source_field_absent,
-      MIN(first_at) AS first_at, MAX(last_at) AS last_at
-      FROM (SELECT r.source_event_id, r.occurred_at AS first_at, m.occurred_at AS last_at, m.exit_status FROM requests r LEFT JOIN matched m ON m.source_event_id = r.source_event_id)`).get(repositoryId) as { operations: number; linked: number | null; missing_results: number | null; source_field_absent: number | null; first_at: string | null; last_at: string | null };
+    const records = this.listRepositoryRecords(repositoryId);
+    let operations = 0;
+    let linked = 0;
+    let missingResults = 0;
+    let sourceFieldAbsent = 0;
+    let firstAt: string | undefined;
+    let lastAt: string | undefined;
+    for (const { events } of records) {
+      const results = new Map(events.filter((event) => event.phase === 'post-result' && event.relatedEventId !== undefined)
+        .map((event) => [`${event.source}:${event.relatedEventId}`, event]));
+      for (const request of events.filter((event) => event.phase === 'pre-action')) {
+        operations++;
+        if (firstAt === undefined || request.occurredAt < firstAt) firstAt = request.occurredAt;
+        const result = results.get(`${request.source}:${request.sourceEventId}`);
+        if (!result) { missingResults++; continue; }
+        linked++;
+        if (result.exitStatus === undefined) sourceFieldAbsent++;
+        if (lastAt === undefined || result.occurredAt > lastAt) lastAt = result.occurredAt;
+      }
+    }
     const unknown: Record<string, number> = {};
-    if ((row.missing_results ?? 0) > 0) unknown['result-not-delivered'] = row.missing_results!;
-    if ((row.source_field_absent ?? 0) > 0) unknown['source-field-absent'] = row.source_field_absent!;
-    return Object.freeze({ operations: row.operations, linked: row.linked ?? 0, unknownTotal: Object.values(unknown).reduce((total, count) => total + count, 0), unknown: Object.freeze(unknown), ...(row.first_at === null ? {} : { firstObservedAt: row.first_at, lastObservedAt: row.last_at ?? row.first_at }) });
+    if (missingResults > 0) unknown['result-not-delivered'] = missingResults;
+    if (sourceFieldAbsent > 0) unknown['source-field-absent'] = sourceFieldAbsent;
+    return Object.freeze({ operations, linked, unknownTotal: Object.values(unknown).reduce((total, count) => total + count, 0), unknown: Object.freeze(unknown), ...(firstAt === undefined ? {} : { firstObservedAt: firstAt, lastObservedAt: lastAt ?? firstAt }) });
   }
 
   loadSession(id: SessionId): Session | undefined {
@@ -561,26 +597,76 @@ export class ExperienceStore {
     if (input.after > input.through) {
       throw new RangeError('Captured session range after cannot exceed through.');
     }
-
-    const availableHighWater = Number((this.database.prepare(`
-      SELECT COUNT(*) AS count
-      FROM capture_events ce JOIN events e ON e.id = ce.event_id
-      WHERE e.session_id = ?
-    `).get(id) as { count: number }).count);
-    const rows = this.database.prepare(`
-      SELECT ce.rowid AS sequence, ce.event_id, ce.source, ce.source_event_id, ce.phase, ce.signature_json, ce.summary,
-        ce.capture_outcome, ce.related_event_id, e.session_id, e.occurred_at, e.exit_status
-      FROM capture_events ce JOIN events e ON e.id = ce.event_id
-      WHERE e.session_id = ?
-      ORDER BY ce.rowid LIMIT ? OFFSET ?
-    `).all(id, Math.min(input.limit, input.through - input.after), input.after) as unknown as CaptureRow[];
-    const events = Object.freeze(rows.map(captureFromRow));
+    const page = this.loadLogicalEvidencePage(id, input);
+    const availableHighWater = this.logicalEvidenceHighWater(id);
     return Object.freeze({
-      events,
+      events: page.events,
       requestedHighWater: input.through,
-      actualHighWater: input.after + events.length,
+      actualHighWater: page.events.length === 0 ? input.through : page.nextCursor,
       availableHighWater
     });
+  }
+
+  logicalEvidenceHighWater(id: SessionId): number {
+    const row = this.database.prepare('SELECT MAX(ordinal) AS high_water FROM logical_evidence WHERE session_id = ?').get(id) as { high_water: number | null };
+    return row.high_water ?? 0;
+  }
+
+  backfillLogicalEvidence(limit = 1024): { readonly indexed: number; readonly remaining: number } {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1024) throw new RangeError('Logical evidence backfill limit must be 1–1024.');
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const rows = this.database.prepare(`
+        SELECT source, source_event_id, session_id, path, event_id FROM (
+          SELECT ce.source, ce.source_event_id, e.session_id, 'legacy' AS path, ce.event_id
+            FROM capture_events ce JOIN events e ON e.id = ce.event_id
+            WHERE NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = ce.source AND l.source_event_id = ce.source_event_id)
+          UNION ALL
+          SELECT re.source, re.source_event_id, re.conversation_id AS session_id, 'run' AS path, re.event_id
+            FROM capture_run_events re
+            WHERE NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = re.source AND l.source_event_id = re.source_event_id)
+        ) ORDER BY source, source_event_id, path LIMIT ?
+      `).all(limit) as Array<{ source: string; source_event_id: string; session_id: string; path: 'legacy' | 'run'; event_id: string }>;
+      for (const row of rows) this.indexLogicalEvent(row.source, row.source_event_id, row.session_id, row.path, row.event_id);
+      const remaining = this.database.prepare(`SELECT
+        (SELECT COUNT(*) FROM capture_events ce WHERE NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = ce.source AND l.source_event_id = ce.source_event_id)) +
+        (SELECT COUNT(*) FROM capture_run_events re WHERE NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = re.source AND l.source_event_id = re.source_event_id)) AS count`).get() as { count: number };
+      this.database.exec('COMMIT');
+      return Object.freeze({ indexed: rows.length, remaining: remaining.count });
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  loadLogicalEvidencePage(
+    id: SessionId,
+    input: { readonly after: number; readonly through: number; readonly limit: number }
+  ): LogicalEvidencePage {
+    if (!Number.isSafeInteger(input.after) || input.after < 0 || !Number.isSafeInteger(input.through)
+      || input.through < input.after || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 1024) {
+      throw new RangeError('Logical evidence page requires a valid cursor, watermark and limit at most 1024.');
+    }
+    const rows = this.database.prepare(`
+      SELECT l.ordinal AS sequence, l.path, l.event_id, l.source, l.source_event_id,
+        COALESCE(ce.phase, re.phase) AS phase,
+        COALESCE(ce.signature_json, re.signature_json) AS signature_json,
+        COALESCE(ce.summary, re.summary) AS summary,
+        COALESCE(ce.capture_outcome, re.capture_outcome) AS capture_outcome,
+        COALESCE(ce.related_event_id, re.related_event_id) AS related_event_id,
+        COALESCE(e.session_id, re.conversation_id) AS session_id,
+        COALESCE(e.occurred_at, re.occurred_at) AS occurred_at,
+        COALESCE(e.exit_status, re.exit_status) AS exit_status
+      FROM logical_evidence l
+      LEFT JOIN capture_events ce ON l.path = 'legacy' AND ce.event_id = l.event_id
+      LEFT JOIN events e ON e.id = ce.event_id
+      LEFT JOIN capture_run_events re ON l.path = 'run' AND re.event_id = l.event_id
+      WHERE l.session_id = ? AND l.ordinal > ? AND l.ordinal <= ?
+      ORDER BY l.ordinal LIMIT ?
+    `).all(id, input.after, input.through, input.limit) as unknown as Array<CaptureRow & { path: string }>;
+    if (rows.some((row) => row.phase === null)) throw new Error('Logical evidence reference is missing its immutable source.');
+    return Object.freeze({ events: Object.freeze(rows.map(captureFromRow)),
+      highWater: input.through, nextCursor: rows.at(-1)?.sequence ?? input.after });
   }
 
   endSession(source: Session['source'], id: SessionId, endedAt: string): IncrementalAppendResult {
@@ -746,6 +832,7 @@ export class ExperienceStore {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(normalized.id, normalized.source, normalized.sourceEventId, conversation.id, run.id, normalized.phase, normalized.occurredAt,
           JSON.stringify(normalized.signature), normalized.summary, normalized.outcome ?? null, normalized.exitStatus ?? null, normalized.relatedEventId ?? null);
+      this.indexLogicalEvent(normalized.source, normalized.sourceEventId, normalized.sessionId, 'run', normalized.id);
       this.database.exec('COMMIT');
       return Object.freeze({ inserted: true });
     } catch (error) {
@@ -848,6 +935,7 @@ export class ExperienceStore {
           this.assertPostResultLink(event);
           this.insertCaptureEvent(event);
           this.linkCaptureEventToLifecycle(event);
+          this.indexLogicalEvent(event.source, event.sourceEventId, event.sessionId, 'legacy', event.id);
           inserted = true;
         }
         if (duplicate !== undefined) this.assertPostResultLink(event);
@@ -1136,11 +1224,29 @@ export class ExperienceStore {
       } else {
         ensureLifecycleStartOriginMigration(this.database);
       }
+      if (!applied.has(18)) {
+        this.database.exec(logicalEvidenceMigration);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(18, new Date().toISOString());
+      }
       this.database.exec('COMMIT');
     } catch (error) {
       this.database.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  private indexLogicalEvent(source: string, sourceEventId: string, sessionId: string, path: 'legacy' | 'run', eventId: string): void {
+    const existing = this.database.prepare('SELECT session_id, path, event_id FROM logical_evidence WHERE source = ? AND source_event_id = ?')
+      .get(source, sourceEventId) as { session_id: string; path: string; event_id: string } | undefined;
+    if (existing) {
+      if (existing.session_id !== sessionId || existing.path !== path || existing.event_id !== eventId) {
+        throw new TypeError('Conflicting logical evidence identity.');
+      }
+      return;
+    }
+    const ordinal = this.logicalEvidenceHighWater(sessionId as SessionId) + 1;
+    this.database.prepare('INSERT INTO logical_evidence (ordinal, source, source_event_id, session_id, path, event_id) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(ordinal, source, sourceEventId, sessionId, path, eventId);
   }
 
   private toKnowledgeEntry(row: KnowledgeRow): KnowledgeEntry {
