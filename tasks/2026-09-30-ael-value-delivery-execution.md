@@ -13,8 +13,8 @@ Każde kryterium ABI, AEC, ARC, ASC, ATI, ACL, AAP i AVB ma wykonany test wymaga
 | AVB-B0 | stan `main` przed integracją ABI | `avb-baseline`, agent AVB | `src/benchmark/**`, testy i fixture AVB, `src/cli.ts` w tej gałęzi | Niezmienny baseline opisany jako stan `main` przed integracją, bez twierdzenia o historycznym pomiarze sprzed ABI |
 | ABI-A5 / ARC-4 magazyn paragonów | rdzeń ABI | `arc-receipt-integration`, agent paragonów | `src/capture/spool.ts`, `src/capture/hook-ingress.ts`, `src/capture/receipts.ts`, testy ABI-A5 i paragonów | Atrybucja buildu przechwycenia i writera retry w osobnych rolach; stare paragony `unknown`; retencja i migracja |
 | AEC | rdzeń ABI | `aec-continuity`, agent AEC | adapter Codex, `src/evidence/**`, `src/storage/experience-store.ts`, `src/learning/service.ts`, `src/learning/repository.ts`, `src/application/experience-service.ts`, testy AEC | AEC-A1–A6; źródłowe koperty tylko po kwalifikacji, bez wymyślania danych hosta |
-| ARC pozostałe | AEC i magazyn paragonów | nowy worktree po integracji | `src/cli.ts`, `src/application/experience-service.ts`, odzyskiwanie, rekoncyliacja i health v3 | ARC-A1–A6 oraz pełne ABI-A5 |
-| ASC | AEC | osobny worktree po AEC | zakresy i konwencje; współdzielone pliki learning tylko po zwolnieniu ich przez ARC | ASC-A1–A5 |
+| ARC pozostałe | AEC i magazyn paragonów | `arc-receipt-integration` dla ARC-A1; kolejny worktree po integracji dla współdzielonych plików | agent ARC: spool i drain; integrator: `src/cli.ts`, `src/application/experience-service.ts`, rekoncyliacja i health v3 | ARC-A1–A6 oraz pełne ABI-A5 |
+| ASC | AEC | `asc-scoped-conventions` dla ASC-A1/A2 | agent ASC: parser, ustawienia i kontrakty; współdzielone pliki learning dopiero po zwolnieniu ich przez AEC/ARC | ASC-A1–A5 |
 | ATI | AEC i ARC | osobny worktree po ARC | producent typowanych danych; `src/cli.ts` tylko po ARC | ATI-A1–A6 |
 | ACL | ASC i ATI | osobny worktree po ATI | kandydaci, przegląd, retrieval; `src/cli.ts` tylko po ATI | ACL-A1–A7 |
 | AVB-B1 | ABI, AEC, ARC, ASC, ATI i ACL | gałąź benchmarku po integracji | `src/benchmark/**` i fixture AVB | Publiczny pipeline i bramki bezpieczeństwa AVB-A2–A3 |
@@ -24,9 +24,9 @@ Główny checkout zawiera niezatwierdzone pliki dokumentacji użytkownika. Nikt 
 
 ## Kolejność integracji
 
-1. Zweryfikować i przejrzeć trzy równoległe grupy AVB-B0, ABI-A5/ARC-4 i AEC. Każda pracuje w osobnym worktree bez wspólnych edycji.
-2. Scalić AEC z rdzeniem ABI, następnie magazyn paragonów. W razie konfliktu zachować jednego właściciela pliku i ponowić pełną ścieżkę akceptacji.
-3. Dokończyć ARC i ASC w osobnych worktrees. Zmiany `src/learning/**` i `src/cli.ts` integrować kolejno.
+1. AVB-B0 z `main`, magazyn paragonów ABI-A5 i pierwszą część AEC zintegrowano kolejno w gałęzi ABI. Po migracji 18 pełna kontrola zakończyła się wynikiem 929/929. Otwarta pozostała kwalifikacja rzeczywistego hosta AVB i AEC.
+2. Domknąć błędy znalezione w przeglądzie AEC: niepełny backfill bez restartu, konflikt identyfikatorów między starymi tabelami i kolejność zdarzeń na granicy strony. Dokończyć AEC-A4–A6 i stabilną tożsamość operacji ABI-A5 po zmianie buildu; każdą zmianę ponownie zweryfikować.
+3. Zintegrować ARC-A1 oraz ASC-A1/A2 z osobnych worktrees, potem dokończyć ARC i ASC. Zmiany `src/learning/**` i `src/cli.ts` integrować kolejno.
 4. Po zamknięciu ARC i ASC wykonać ATI, ACL, AVB-B1, AAP i AVB-B2 zgodnie z zależnościami. Nie ogłaszać korzyści netto bez porównania i telemetrii przewidzianych w AVB.
 
 Wynik AVB-B0 z obecnego `main` nie będzie nazywany historycznym pomiarem sprzed implementacji ABI. Zachowany syntetyczny baseline ABI jest odrębnym artefaktem.
