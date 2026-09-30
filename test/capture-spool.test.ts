@@ -152,7 +152,7 @@ test('ABI-A5 retained receipts bind verified build roles to private operation id
     assert.equal(retry!.operationKey, acceptedFirst!.operationKey);
     assert.deepEqual(report.receipts.map(({ buildRole }) => buildRole), ['capture', 'capture', 'writer']);
     assert.deepEqual(report.receipts.map(({ buildId }) => buildId), [build.buildId, build.buildId, build.buildId]);
-    assert.deepEqual(report.receipts.map(({ writer }) => writer), [1, 1, 1]);
+    assert.deepEqual(report.receipts.map(({ writer }) => writer), [2, 2, 2]);
     assert.equal(JSON.stringify(report).includes('private-first'), false);
     assert.equal(JSON.stringify(report).includes('private-second'), false);
     assert.ok(report.retention);
@@ -197,7 +197,7 @@ test('ABI-A5 rejects an incompatible old writer before changing a legacy receipt
   const setup = new CaptureSpool(path);
   setup.close();
   const legacy = new DatabaseSync(path);
-  legacy.exec("DROP TABLE capture_receipts; CREATE TABLE capture_receipts (sequence INTEGER PRIMARY KEY, correlation_key TEXT NOT NULL, disposition TEXT NOT NULL, received_at TEXT NOT NULL) STRICT; UPDATE ael_writer_contract SET minimum_writer = 2 WHERE id = 1;");
+  legacy.exec("DROP TABLE capture_receipts; CREATE TABLE capture_receipts (sequence INTEGER PRIMARY KEY, correlation_key TEXT NOT NULL, disposition TEXT NOT NULL, received_at TEXT NOT NULL) STRICT; UPDATE ael_writer_contract SET minimum_writer = 3 WHERE id = 1;");
   legacy.close();
   const before = readFileSync(path);
   try {

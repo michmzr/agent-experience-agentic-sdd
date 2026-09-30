@@ -8,6 +8,7 @@ import test from 'node:test';
 import { normalizeMappedCapture } from '../src/capture/normalization.js';
 import { CaptureSpool } from '../src/capture/spool.js';
 import { drainCaptureSpool } from '../src/capture/spool-drain.js';
+import { assertWriterCompatible, minimumWriter } from '../src/installation/writer-contract.js';
 
 interface Case { readonly sessionId: string; readonly missingRequestId: string; readonly unrelatedRequestId: string; readonly resultId: string; readonly receivedAt: string; }
 const scenario = JSON.parse(readFileSync(join(process.cwd(), 'test/fixtures/ael-recovery-coverage/cases.json'), 'utf8')) as Case;
@@ -95,6 +96,33 @@ test('ARC-A1 expired worker leases consume the same four-attempt budget', () => 
     try {
       const recovery = database.prepare('SELECT state, attempts FROM capture_recovery_state WHERE delivery_id = ?').get(delivery.deliveryId) as { state: string; attempts: number };
       assert.deepEqual({ ...recovery }, { state: 'held', attempts: 4 });
+    } finally { database.close(); }
+  } finally { spool.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('ARC-A1 recovery-state migration raises the writer floor before an old writer can claim held work', () => {
+  const root = mkdtempSync(join(tmpdir(), 'arc-a1-writer-'));
+  const path = join(root, 'capture-spool.sqlite');
+  const spool = new CaptureSpool(path);
+  try {
+    const delivery = spool.admit({ kind: 'session-start', session: { id: 'arc-writer-session' as never, source: 'codex', startedAt: scenario.receivedAt } }, scenario.receivedAt);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const at = new Date(Date.parse(scenario.receivedAt) + attempt * 1_000).toISOString();
+      spool.claim(at, 1);
+      spool.retry(delivery.deliveryId, at);
+    }
+    const waiting = spool.admit({ kind: 'session-end', source: 'codex', sessionId: 'arc-waiting-session' as never, endedAt: '2026-09-29T08:01:00.000Z' }, scenario.receivedAt);
+    spool.claim('2026-09-29T08:02:00.000Z', 1);
+    spool.waitForDependency(waiting.deliveryId, 'missing-session', 'codex', 'arc-waiting-session', '2026-09-29T08:02:00.000Z');
+    assert.equal(minimumWriter(path), 2);
+    const before = readFileSync(path);
+    assert.throws(() => assertWriterCompatible([path], { capabilities: { writer: 1 } } as never), /INCOMPATIBLE_WRITER/);
+    assert.deepEqual(readFileSync(path), before);
+    const database = new DatabaseSync(path, { readOnly: true });
+    try {
+      assert.equal((database.prepare('SELECT state FROM capture_recovery_state WHERE delivery_id = ?').get(delivery.deliveryId) as { state: string }).state, 'held');
+      assert.equal((database.prepare('SELECT state FROM records WHERE delivery_id = ?').get(delivery.deliveryId) as { state: string }).state, 'pending');
+      assert.equal((database.prepare('SELECT state FROM capture_recovery_state WHERE delivery_id = ?').get(waiting.deliveryId) as { state: string }).state, 'waiting-dependency');
     } finally { database.close(); }
   } finally { spool.close(); rmSync(root, { recursive: true, force: true }); }
 });

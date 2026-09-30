@@ -153,6 +153,8 @@ export class CaptureSpool {
       this.#database.prepare(`INSERT OR IGNORE INTO capture_recovery_state (delivery_id, state, reason, generation, attempts, updated_at)
         SELECT delivery_id, 'eligible', 'unknown-legacy', 1, 0, admitted_at FROM records`).run();
     }
+    const writerFloor = (this.#database.prepare('SELECT minimum_writer FROM ael_writer_contract WHERE id = 1').get() as { minimum_writer: number }).minimum_writer;
+    if (writerFloor < 2) this.#database.prepare('UPDATE ael_writer_contract SET minimum_writer = 2 WHERE id = 1 AND minimum_writer < 2').run();
   }
 
   recordReceipt(input: CaptureReceiptInput): CaptureReceipt {

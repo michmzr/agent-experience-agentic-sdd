@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 export const MANIFEST_NAME = 'build-manifest.json';
-export const CAPABILITIES = Object.freeze({ captureSchema: 1, resultSchema: 1, reader: 1, writer: 1 });
+export const CAPABILITIES = Object.freeze({ captureSchema: 1, resultSchema: 1, reader: 1, writer: 2 });
 export interface BuildManifest {
   readonly schemaVersion: 1;
   readonly packageVersion: string;

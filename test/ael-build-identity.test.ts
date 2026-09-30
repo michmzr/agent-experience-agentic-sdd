@@ -153,9 +153,9 @@ test("ABI-A5 admission carries actual build provenance and refuses newer writer 
     const row = db.prepare("SELECT payload FROM records").get() as { payload: string };
     const provenance = JSON.parse(row.payload).buildProvenance;
     assert.equal(provenance?.buildId, JSON.parse(readFileSync("build-manifest.json", "utf8")).buildId);
-    assert.equal(provenance?.writer, 1);
+    assert.equal(provenance?.writer, 2);
     assert.equal(row.payload.includes(root), false);
-    db.exec("CREATE TABLE IF NOT EXISTS ael_writer_contract (id INTEGER PRIMARY KEY, minimum_writer INTEGER NOT NULL); INSERT OR REPLACE INTO ael_writer_contract VALUES (1, 2);");
+    db.exec("CREATE TABLE IF NOT EXISTS ael_writer_contract (id INTEGER PRIMARY KEY, minimum_writer INTEGER NOT NULL); INSERT OR REPLACE INTO ael_writer_contract VALUES (1, 3);");
     db.close();
     const before = readFileSync(join(root, "capture-spool.sqlite"));
     const result = ingestPassiveHook(options);
