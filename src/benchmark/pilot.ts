@@ -5,7 +5,7 @@ export interface PilotTrial {
   readonly taskCorrect: boolean;
   readonly redundantOperationIds: readonly string[];
   readonly safetyViolations: readonly string[];
-  readonly wallMilliseconds: number | null;
+  readonly wallMilliseconds: number | null; // Task time excluding separately measured AEL overhead.
   readonly aelOverheadMilliseconds: number | null;
   readonly tokens: number | null;
 }
@@ -66,7 +66,9 @@ function assessScenario(id: string, trials: readonly PilotTrial[]) {
     wallMilliseconds: Object.freeze(Object.fromEntries(conditions.map(condition => [condition,
       median(byCondition[condition].map(trial => trial.wallMilliseconds).filter((value): value is number => value !== null))]))),
     aelOverheadMilliseconds: Object.freeze(Object.fromEntries(conditions.map(condition => [condition,
-      median(byCondition[condition].map(trial => trial.aelOverheadMilliseconds).filter((value): value is number => value !== null))]))) });
+      median(byCondition[condition].map(trial => trial.aelOverheadMilliseconds).filter((value): value is number => value !== null))]))),
+    tokens: Object.freeze(Object.fromEntries(conditions.map(condition => [condition,
+      median(byCondition[condition].map(trial => trial.tokens).filter((value): value is number => value !== null))]))) });
 }
 
 function median(values: readonly number[]): number | null {
