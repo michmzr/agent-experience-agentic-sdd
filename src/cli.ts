@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, isAbsolute, join } from 'node:path';
+import { compareBaseline, currentBuildIdentity, runBaseline } from './benchmark/runner.js';
 
 import { defaultDatabasePath } from './storage/database.js';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -52,7 +53,7 @@ const scopes = new Set(['global', 'repo'] as const);
 const initScopes = new Set(['global', 'repo', 'workspace'] as const);
 const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired']);
 const reviewSources = new Set(['codex', 'claude-code', 'cursor'] as const);
-const knownCommands = new Set(['init', 'unregister', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence', 'capture', 'analysis', 'installation']);
+const knownCommands = new Set(['init', 'unregister', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence', 'capture', 'analysis', 'installation', 'benchmark']);
 
 export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory' | 'humanOutput'> = {}): CliResult {
   if (args.length === 1 && args[0] === '--help') return { exitCode: 0, stdout: `${usage()}\n`, stderr: '' };
@@ -60,6 +61,7 @@ export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workin
     const parsed = parseArguments(args);
     const json = parsed.options.has('json');
     if (parsed.positionals[0] === 'installation') return { exitCode: 0, stdout: JSON.stringify(executeInstallation(parsed, options)) + '\n', stderr: '' };
+    if (parsed.positionals[0] === 'benchmark') return success(executeBenchmark(parsed), json, parsed.positionals, options.humanOutput);
     const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
     const value = execute(service, parsed, options);
     return success(value, json, parsed.positionals, options.humanOutput,
@@ -624,6 +626,9 @@ function usage(): string {
     '  installation apply --input <plan.json> [--json]',
     '  installation rollback --input <plan.json> [--json]',
     '  installation inspect [--repository <path>|--repository-id <id>] [--json]',
+    '  benchmark identity [--json]',
+    '  benchmark run --manifest <run.json> --output <report.json>',
+    '  benchmark compare --baseline <report.json> --candidate <report.json> --output <comparison.json>',
     '  unregister [--repository-id <id>]',
     '  status [--repository <path>|--repository-id <id>] [--schema-version 2]',
     '  status-global [--repository <path>|--repository-id <id>] [--schema-version 2]',
@@ -758,4 +763,22 @@ function executeInstallation(parsed: ParsedArguments, options: Pick<RunCliAsyncO
     return applyAlignmentPlan(JSON.parse(readFileSync(requiredString(parsed.options, 'input'), 'utf8')), { rollback: command === 'rollback' });
   }
   throw new SyntaxError('Unknown installation command.');
+}
+
+function executeBenchmark(parsed: ParsedArguments): unknown {
+  if (parsed.positionals.length !== 2) throw new SyntaxError('Unknown benchmark command.');
+  const command = parsed.positionals[1];
+  if (command === 'identity') {
+    assertNoUnknownOptions(parsed.options, ['json']);
+    return currentBuildIdentity();
+  }
+  if (command === 'run') {
+    assertNoUnknownOptions(parsed.options, ['manifest', 'output', 'json']);
+    return runBaseline(requiredString(parsed.options, 'manifest'), requiredString(parsed.options, 'output'));
+  }
+  if (command === 'compare') {
+    assertNoUnknownOptions(parsed.options, ['baseline', 'candidate', 'output', 'json']);
+    return compareBaseline(requiredString(parsed.options, 'baseline'), requiredString(parsed.options, 'candidate'), requiredString(parsed.options, 'output'));
+  }
+  throw new SyntaxError('Unknown benchmark command.');
 }

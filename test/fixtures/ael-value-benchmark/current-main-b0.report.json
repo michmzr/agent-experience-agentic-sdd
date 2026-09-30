@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "status": "complete",
+  "label": "current-main-before-integration",
+  "buildId": "53cc322d91c58a73e6a30d12b71c78c54f7a5db738155a04c50d944773dd8e58",
+  "manifest": {
+    "schemaVersion": 1,
+    "role": "baseline",
+    "label": "current-main-before-integration",
+    "buildId": "53cc322d91c58a73e6a30d12b71c78c54f7a5db738155a04c50d944773dd8e58",
+    "corpusVersion": "b0-1",
+    "environment": {
+      "nodeMajor": 26,
+      "platform": "darwin",
+      "arch": "arm64"
+    },
+    "budgets": {
+      "runMilliseconds": 10000
+    },
+    "telemetry": {
+      "tokens": "unavailable",
+      "wallTime": "available"
+    },
+    "scenarios": [
+      {
+        "id": "codex-resume-matcher",
+        "revision": 1,
+        "kind": "synthetic"
+      }
+    ]
+  },
+  "observations": [
+    {
+      "scenarioId": "codex-resume-matcher",
+      "revision": 1,
+      "kind": "synthetic",
+      "resumeSupported": false,
+      "status": "observed"
+    }
+  ],
+  "actualHost": {
+    "status": "unsupported",
+    "reason": "No controlled host run in B0."
+  },
+  "measurements": {
+    "wallMilliseconds": 1,
+    "tokens": null
+  },
+  "conclusion": "performance-not-established",
+  "reportDigest": "c5a5094bcb0ed0361f2de996c94380bae1aeeee768ddcc38f42a53c736c3c570"
+}
