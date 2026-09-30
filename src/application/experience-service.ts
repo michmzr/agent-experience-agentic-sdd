@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { verifyInstalledHooks } from '../cli/hook-installation.js';
 import { resolveRepositoryRoot } from '../repository/local-repository.js';
+import { CandidateRepository, type CandidateRecord } from '../knowledge/candidate-repository.js';
 
 import { ingestPassiveHook, type HookIngressResult } from '../capture/hook-ingress.js';
 import { drainCaptureSpool } from '../capture/spool-drain.js';
@@ -120,21 +121,60 @@ export class ExperienceService {
   }
 
   list(filter: LessonFilter = {}): RetrievedKnowledgeEntry[] {
-    return this.retrieve({
+    const retrieved = this.retrieve({
       ...(filter.scope ? { scope: filter.scope } : {}),
       ...(filter.repositoryId ? { repositoryId: filter.repositoryId } : {}),
       ...(filter.state ? { state: filter.state } : {}),
       ...(filter.tag ? { tags: [filter.tag] } : {})
     });
+    const additional = this.localCandidateKnowledge({
+      ...(filter.scope ? { scope: filter.scope } : {}),
+      ...(filter.repositoryId ? { repositoryId: filter.repositoryId } : {}),
+      ...(filter.state ? { state: filter.state } : {}),
+      ...(filter.tag ? { tags: [filter.tag] } : {})
+    }, true);
+    const byId = new Map([...retrieved, ...additional].map(entry => [entry.id, entry]));
+    return [...byId.values()];
   }
 
   retrieve(filter: RetrievalFilter): RetrievedKnowledgeEntry[] {
     const store = this.openStore();
     try {
-      return store.retrieve(filter);
+      return [...store.retrieve(filter), ...this.localCandidateKnowledge(filter, false)];
     } finally {
       store.close();
     }
+  }
+
+  private localCandidateKnowledge(filter: RetrievalFilter, allScopes: boolean): RetrievedKnowledgeEntry[] {
+    if (!filter.repositoryId || filter.scope === 'global') return [];
+    const repository = new CandidateRepository(this.databasePath);
+    try {
+      const records = allScopes
+        ? repository.list(filter.repositoryId).filter(candidate => ['observed', 'confirmed', 'verified'].includes(candidate.state))
+        : repository.listAcceptedLocalEntries(filter.repositoryId, filter.path
+          ? { scope: 'subproject', path: filter.path, conditions: filter.tags ?? [] }
+          : { scope: 'repository', conditions: filter.tags ?? [] });
+      const verifiedIds = new Set(repository.listVerifiedLocalEntries(filter.repositoryId).map(entry => entry.candidateId));
+      return records.filter(candidate => candidate.state !== 'verified' || verifiedIds.has(candidate.id))
+        .filter(candidate => filter.state === undefined || candidate.state === filter.state)
+        .map(candidate => this.publicLocalKnowledge(candidate, repository));
+    } finally { repository.close(); }
+  }
+
+  private publicLocalKnowledge(candidate: CandidateRecord, repository: CandidateRepository): RetrievedKnowledgeEntry {
+    const evidenceIds = repository.history(candidate.repositoryId, candidate.id).map(review => review.evidenceId);
+    return Object.freeze({
+      id: candidate.id as KnowledgeEntry['id'],
+      candidateId: candidate.id as KnowledgeEntry['candidateId'],
+      state: candidate.state as KnowledgeState,
+      statement: candidate.statement,
+      evidenceIds: Object.freeze(evidenceIds as unknown as KnowledgeEntry['evidenceIds']),
+      authoritative: false,
+      kind: candidate.kind,
+      applicability: candidate.applicability,
+      revision: candidate.revision
+    });
   }
 
   export(filter: LessonFilter = {}): { knowledge: RetrievedKnowledgeEntry[] } {
