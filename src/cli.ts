@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 import { compareBaseline, currentBuildIdentity, runBaseline } from './benchmark/runner.js';
 import { AdvisoryConfigurationStore } from './advice/configuration.js';
 import { retrieveLocalAdvice, type AdviceRequest } from './advice/service.js';
+import { recordLocalAdviceUsage, type AdviceUsageRequest } from './advice/record.js';
 import { CandidateRepository, type CandidateRecord } from './knowledge/candidate-repository.js';
 
 import { defaultDatabasePath } from './storage/database.js';
@@ -103,6 +104,11 @@ function executeAdvice(parsed: ParsedArguments, workingDirectory?: string): unkn
     const context = readAdviceContext(requiredString(parsed.options, 'input'));
     return retrieveLocalAdvice(dataDir, workingDirectory ?? process.cwd(), context);
   }
+  if (subcommand === 'record') {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'input']);
+    return recordLocalAdviceUsage(dataDir, workingDirectory ?? process.cwd(),
+      readAdviceUsageInput(requiredString(parsed.options, 'input')));
+  }
   throw invalidCommand(command);
 }
 
@@ -121,6 +127,18 @@ function readAdviceContext(path: string): AdviceRequest {
     throw new SyntaxError('Advice context is invalid.');
   }
   return value as unknown as AdviceRequest;
+}
+
+function readAdviceUsageInput(path: string): AdviceUsageRequest {
+  const value = JSON.parse(readBoundedAdviceInput(path)) as Record<string, unknown>;
+  const fields = ['repositoryId', 'lessonId', 'lessonRevision', 'sessionId', 'contextRevision',
+    'bundleId', 'kind', 'origin', 'witnessRef'];
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).length !== fields.length || fields.some(field =>
+      typeof value[field] !== 'string' || !/^[A-Za-z0-9._:/-]{1,160}$/.test(value[field] as string))) {
+    throw new SyntaxError('Advice usage input is invalid.');
+  }
+  return value as unknown as AdviceUsageRequest;
 }
 
 function readBoundedAdviceInput(path: string): string {
@@ -797,6 +815,7 @@ function usage(): string {
     '  advice configure --repository-id <id> --enabled true|false --json',
     '  advice status --repository-id <id> --json',
     '  advice retrieve --input <context.json> --json',
+    '  advice record --input <usage.json> --json',
     '  candidates list --repository-id <id> [--state <state>] --json',
     '  candidates inspect <id> --repository-id <id> --json',
     '  unregister [--repository-id <id>]',

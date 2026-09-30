@@ -16,6 +16,7 @@ export type UsageKind = 'retrieved' | 'delivered' | 'selected' | 'applied' | 'ou
 export type UsageOrigin = 'cli-retrieval' | 'cli-output' | 'agent-claim' | 'agent-selection' | 'operation-evidence' | 'verification-evidence';
 export interface UsageFact { readonly kind: UsageKind; readonly origin: UsageOrigin; readonly witnessRef: string }
 export interface AdviceBundle { readonly id: string }
+export interface StoredAdviceBundle extends AdviceBundle, AdviceScope { readonly operationSignature: string; readonly retrievedAt: string | null }
 
 const migration = `CREATE TABLE IF NOT EXISTS advice_usage_bundles (
   id TEXT PRIMARY KEY,
@@ -24,7 +25,8 @@ const migration = `CREATE TABLE IF NOT EXISTS advice_usage_bundles (
   lesson_revision TEXT NOT NULL,
   session_id TEXT NOT NULL,
   context_revision TEXT NOT NULL,
-  operation_signature TEXT NOT NULL
+  operation_signature TEXT NOT NULL,
+  retrieved_at TEXT
 ) STRICT;
 CREATE TABLE IF NOT EXISTS advice_usage_facts (
   ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,7 +45,7 @@ const allowedOrigins: Record<Exclude<UsageKind, 'retrieved'>, readonly UsageOrig
 };
 
 export class AdvisoryUsageStore {
-  constructor(readonly path: string) {}
+  constructor(readonly path: string, private readonly now: () => string = () => new Date().toISOString()) {}
 
   retrieved(input: AdviceScope & { readonly operationSignature: string; readonly retrievalRef: string }): AdviceBundle {
     validateScope(input);
@@ -57,9 +59,9 @@ export class AdvisoryUsageStore {
       database.exec('BEGIN IMMEDIATE');
       try {
         database.prepare(`INSERT OR IGNORE INTO advice_usage_bundles
-          (id, repository_id, lesson_id, lesson_revision, session_id, context_revision, operation_signature)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, input.repositoryId, input.lessonId, input.lessonRevision,
-          input.sessionId, input.contextRevision, input.operationSignature);
+          (id, repository_id, lesson_id, lesson_revision, session_id, context_revision, operation_signature, retrieved_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.repositoryId, input.lessonId, input.lessonRevision,
+          input.sessionId, input.contextRevision, input.operationSignature, this.now());
         database.prepare(`INSERT OR IGNORE INTO advice_usage_facts (bundle_id, kind, origin, witness_ref)
           VALUES (?, 'retrieved', 'cli-retrieval', ?)`).run(id, input.retrievalRef);
         database.exec('COMMIT');
@@ -106,9 +108,28 @@ export class AdvisoryUsageStore {
     } finally { database.close(); }
   }
 
+  bundle(bundleId: string): StoredAdviceBundle | undefined {
+    validKey(bundleId, 'bundle ID');
+    const database = new DatabaseSync(this.path, { readOnly: true, timeout: 125 });
+    try {
+      const columns = database.prepare('PRAGMA table_info(advice_usage_bundles)').all() as Array<{ name: string }>;
+      const retrievalTime = columns.some(column => column.name === 'retrieved_at') ? 'retrieved_at' : 'NULL AS retrieved_at';
+      const row = database.prepare(`SELECT id, repository_id, lesson_id, lesson_revision, session_id,
+        context_revision, operation_signature, ${retrievalTime} FROM advice_usage_bundles WHERE id = ?`).get(bundleId) as {
+          id: string; repository_id: string; lesson_id: string; lesson_revision: string;
+          session_id: string; context_revision: string; operation_signature: string; retrieved_at: string | null
+        } | undefined;
+      return row === undefined ? undefined : Object.freeze({ id: row.id, repositoryId: row.repository_id,
+        lessonId: row.lesson_id, lessonRevision: row.lesson_revision, sessionId: row.session_id,
+        contextRevision: row.context_revision, operationSignature: row.operation_signature, retrievedAt: row.retrieved_at });
+    } finally { database.close(); }
+  }
+
   private open(): DatabaseSync {
     const database = openExperienceDatabase(this.path, { timeoutMs: 125 });
     database.exec(migration);
+    const columns = database.prepare('PRAGMA table_info(advice_usage_bundles)').all() as Array<{ name: string }>;
+    if (!columns.some(column => column.name === 'retrieved_at')) database.exec('ALTER TABLE advice_usage_bundles ADD COLUMN retrieved_at TEXT');
     return database;
   }
 }
