@@ -7,6 +7,36 @@ import { createHash } from 'node:crypto';
 import { runCli } from '../src/cli.js';
 import { assertComparable } from '../src/benchmark/manifest.js';
 import { assessBenchmarkSafety, type SafetyRunObservation } from '../src/benchmark/compare.js';
+import { assessPairedPilot, type PilotTrial } from '../src/benchmark/pilot.js';
+
+test('AVB-A4/A5 paired local pilot requires five safe correct runs and a median reduction', () => {
+  const baseline = [3, 3, 2, 3, 2];
+  const advice = [2, 2, 1, 2, 1];
+  const trials: PilotTrial[] = baseline.flatMap((count, pair) => [
+    { scenarioId: 'scoped-tooling', condition: 'disabled', pair, taskCorrect: true,
+      redundantOperationIds: Array.from({ length: count }, (_, index) => `disabled-${pair}-${index}`),
+      safetyViolations: [], wallMilliseconds: 1000, aelOverheadMilliseconds: 0, tokens: null },
+    { scenarioId: 'scoped-tooling', condition: 'passive', pair, taskCorrect: true,
+      redundantOperationIds: Array.from({ length: count }, (_, index) => `passive-${pair}-${index}`),
+      safetyViolations: [], wallMilliseconds: 1020, aelOverheadMilliseconds: 20, tokens: null },
+    { scenarioId: 'scoped-tooling', condition: 'advice', pair, taskCorrect: true,
+      redundantOperationIds: Array.from({ length: advice[pair]! }, (_, index) => `advice-${pair}-${index}`),
+      safetyViolations: [], wallMilliseconds: 900, aelOverheadMilliseconds: 30, tokens: null }
+  ]);
+  const result = assessPairedPilot(trials);
+  assert.equal(result.status, 'behavioral-pass');
+  assert.equal(result.conclusion, 'performance-not-established');
+  assert.deepEqual(result.scenarios[0]?.medianRedundantOperations, { disabled: 3, passive: 3, advice: 2 });
+  assert.equal(assessPairedPilot(trials.slice(1)).status, 'incomplete');
+  assert.equal(assessPairedPilot(trials.map(trial => trial.condition === 'advice' && trial.pair === 1
+    ? { ...trial, safetyViolations: ['wrong-scope-advice'] } : trial)).status, 'safety-fail');
+  assert.equal(assessPairedPilot(trials.map(trial => trial.condition === 'advice' && trial.pair === 1
+    ? { ...trial, taskCorrect: false } : trial)).status, 'correctness-fail');
+  const measured = trials.map(trial => ({ ...trial, tokens: trial.condition === 'advice' ? 900 : 1000 }));
+  assert.equal(assessPairedPilot(measured).conclusion, 'measured-improvement');
+  const slower = measured.map(trial => trial.condition === 'advice' ? { ...trial, wallMilliseconds: 1200 } : trial);
+  assert.equal(assessPairedPilot(slower).conclusion, 'performance-not-established');
+});
 import { DatabaseSync } from 'node:sqlite';
 
 test('AVB-A1 public run pins current build and preserves the frozen synthetic baseline', () => {
