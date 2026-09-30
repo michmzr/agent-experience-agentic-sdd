@@ -5,7 +5,8 @@ import { compareBaseline, currentBuildIdentity, runBaseline } from './benchmark/
 
 import { defaultDatabasePath } from './storage/database.js';
 import { importTypedEvidence } from './evidence/import.js';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { applyRecoveryPlan, createRecoveryPlan, type RecoveryPlan } from './capture/recovery.js';
+import { closeSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { createAlignmentPlan, applyAlignmentPlan } from './installation/alignment.js';
 import { qualifyInstallation } from './installation/qualification.js';
 import { inspectInstallation, registeredInstallationRoots } from './installation/inspection.js';
@@ -321,6 +322,26 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   if (command === 'capture' && subcommand === 'status' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json']); return service.captureStatus();
   }
+  if (command === 'capture' && subcommand === 'recovery' && rest.length === 1 && rest[0] === 'plan') {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'output', 'limit', 'cursor']);
+    const dataDir = optionalString(parsed.options, 'data-dir') ?? dirname(defaultDatabasePath());
+    const limitInput = optionalString(parsed.options, 'limit');
+    const limit = limitInput === undefined ? undefined : Number(limitInput);
+    const plan = createRecoveryPlan({ spoolPath: join(dataDir, 'capture-spool.sqlite'),
+      experiencePath: join(dataDir, 'experience.sqlite'), repositoryId: requiredString(parsed.options, 'repository-id'),
+      now: new Date().toISOString(), ...(limit === undefined ? {} : { limit }),
+      ...(optionalString(parsed.options, 'cursor') === undefined ? {} : { cursor: optionalString(parsed.options, 'cursor') }) });
+    writeFileSync(requiredString(parsed.options, 'output'), JSON.stringify(plan, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+    return { schemaVersion: 1, planHash: plan.planHash, selected: plan.selections.length, ineligible: plan.ineligible.length,
+      ...(plan.nextCursor === undefined ? {} : { nextCursor: plan.nextCursor }) };
+  }
+  if (command === 'capture' && subcommand === 'recovery' && rest.length === 1 && rest[0] === 'apply') {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'input']);
+    const dataDir = optionalString(parsed.options, 'data-dir') ?? dirname(defaultDatabasePath());
+    const plan = JSON.parse(readBoundedRecoveryPlan(requiredString(parsed.options, 'input'))) as RecoveryPlan;
+    return applyRecoveryPlan({ spoolPath: join(dataDir, 'capture-spool.sqlite'), experiencePath: join(dataDir, 'experience.sqlite'),
+      plan, now: new Date().toISOString() });
+  }
   if (command === 'analysis' && subcommand === 'run' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id']);
     return service.runOperationalAnalysis(contextualRepositoryId(parsed.options, options.workingDirectory));
@@ -436,6 +457,22 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   }
   if (command === 'skill') return executeSkill(parsed, options);
   throw invalidCommand(command);
+}
+
+function readBoundedRecoveryPlan(path: string): string {
+  const maximumBytes = 256 * 1024;
+  const descriptor = openSync(path, 'r');
+  try {
+    const bytes = Buffer.alloc(maximumBytes + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = readSync(descriptor, bytes, length, bytes.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    if (length > maximumBytes) throw new RangeError('Recovery plan exceeds 256 KiB.');
+    return bytes.toString('utf8', 0, length);
+  } finally { closeSync(descriptor); }
 }
 
 function diagnosticDirectory(options: Map<string, string | true>, workingDirectory?: string): string {
@@ -660,6 +697,8 @@ function usage(): string {
     '  evidence import --repository-id <id> --input <artifact.json> --json',
     '  capture drain',
     '  capture status',
+    '  capture recovery plan --repository-id <id> --output <plan.json> [--limit <1..100>] [--cursor <id>]',
+    '  capture recovery apply --input <plan.json> --json',
     '  analysis run [--repository-id <id>]',
     '  analysis reconcile --repository-id <id> [--apply] [--after-session <id>] --json',
     '  analysis report [--repository-id <id>] [--session <id>] [--schema-version 2]',
