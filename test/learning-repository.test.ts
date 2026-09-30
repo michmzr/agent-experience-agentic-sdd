@@ -1279,6 +1279,31 @@ test('keeps migrated m6 jobs separate from a completed typed-evidence stream', (
   } finally { reopened.close(); }
 });
 
+test('repairs an orphaned committed stream once and signals the worker without duplicating active work', () => {
+  const databasePath = path();
+  const initial = new OperationalLearningRepository(databasePath);
+  let removedId: string;
+  try {
+    const job = initial.enqueue({ repositoryId: 'repo-1', sessionId: 'orphan', inputHighWater: 5 });
+    assert.ok(job);
+    removedId = job.id;
+  } finally { initial.close(); }
+  const database = new DatabaseSync(databasePath);
+  try { database.prepare('DELETE FROM operational_analysis_jobs WHERE id = ?').run(removedId!); }
+  finally { database.close(); }
+  const recovered = new OperationalLearningRepository(databasePath);
+  try {
+    const first = recovered.enqueueWithOutcome({ repositoryId: 'repo-1', sessionId: 'orphan', inputHighWater: 5 });
+    assert.equal(first.workAdded, true);
+    assert.equal(first.job?.state, 'pending');
+    assert.notEqual(first.job?.id, removedId!);
+    const repeated = recovered.enqueueWithOutcome({ repositoryId: 'repo-1', sessionId: 'orphan', inputHighWater: 5 });
+    assert.equal(repeated.workAdded, false);
+    assert.equal(repeated.job?.id, first.job?.id);
+    assert.equal(recovered.jobsForStream('repo-1', 'orphan').filter(({ state }) => state === 'pending').length, 1);
+  } finally { recovered.close(); }
+});
+
 test('fences a stale worker after its lease is reclaimed', () => {
   let now = '2026-09-13T10:00:00.000Z';
   const repository = new OperationalLearningRepository(path(), () => now);

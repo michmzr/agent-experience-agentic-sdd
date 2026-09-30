@@ -270,6 +270,7 @@ export class OperationalLearningRepository {
       const pending = this.database.prepare(`SELECT id FROM operational_analysis_jobs WHERE repository_id = ? AND session_id = ?
         AND detector_set_version = ? AND state IN ('pending', 'retryable-failure')`).get(input.repositoryId, input.sessionId, version) as { id: string } | undefined;
       let job: AnalysisJob | undefined;
+      let insertedJob = false;
       if (pending) {
         this.database.prepare('UPDATE operational_analysis_jobs SET input_high_water = MAX(input_high_water, ?), updated_at = ? WHERE id = ?')
           .run(stream.committed_high_water, timestamp, pending.id);
@@ -280,10 +281,12 @@ export class OperationalLearningRepository {
         // Repository conventions also need one initial analysis when the stream contains no events.
         if (isNewStream || stream.committed_high_water > Math.max(stream.processed_high_water, running?.input_high_water ?? 0)) {
           job = this.insertPendingJob(stream, timestamp);
+          insertedJob = true;
         }
       }
       this.database.exec('COMMIT');
-      const workAdded = job !== undefined && (isNewStream || input.inputHighWater > previousStream.committed_high_water);
+      const workAdded = job !== undefined && (insertedJob
+        || (previousStream !== undefined && input.inputHighWater > previousStream.committed_high_water));
       return Object.freeze({ job, workAdded });
     } catch (error) { this.database.exec('ROLLBACK'); throw error; }
   }
