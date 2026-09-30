@@ -16,9 +16,10 @@ import {
   type OperationalFinding
 } from './contracts.js';
 import { createTypedEpisode, createTypedFinding, type DerivedOperationalEpisode, type DerivedOperationalFinding } from './detectors.js';
-import type { InstructionContext, ProjectToolConvention, ScopedToolConvention } from './project-conventions.js';
+import { CONVENTION_PARSER_VERSION, type InstructionContext, type ProjectToolConvention, type ScopedToolConvention } from './project-conventions.js';
 
-export const DETECTOR_SET_VERSION = 'm9-typed-evidence@1';
+export const DETECTOR_SET_VERSION = `m9-typed-evidence@1/asc-parser@${CONVENTION_PARSER_VERSION}`;
+export const PREVIOUS_DETECTOR_SET_VERSION = 'm9-typed-evidence@1';
 // Legacy jobs were produced exclusively by this detector set, regardless of future defaults.
 const LEGACY_DETECTOR_SET_VERSION = 'm6-deterministic@1';
 const emptyCheckpointJson = '{"version":1,"pendingEvents":[]}';
@@ -193,6 +194,7 @@ export interface OperationalLearningReport {
   readonly candidates: readonly (Omit<LearningCandidate, 'state'> & { readonly state: 'candidate' | 'disputed' })[];
   readonly findings: readonly DerivedOperationalFinding[]; readonly episodes: readonly DerivedOperationalEpisode[];
   readonly episodeEvidence: readonly EpisodeEvidence[]; readonly coverage: readonly AnalysisCoverage[];
+  readonly historicalInstructionGaps: number;
   readonly cost: { readonly completedRuns: number; readonly total: number };
 }
 export interface OperationalAnalysisQuality {
@@ -513,8 +515,13 @@ export class OperationalLearningRepository {
     const coverage = (this.database.prepare(`SELECT c.* FROM operational_analysis_coverage c JOIN operational_analysis_jobs j ON j.id = c.job_id WHERE j.repository_id = ? ORDER BY c.detector, j.id`).all(repositoryId) as Array<{ detector: string; status: AnalysisCoverage['status']; examined_events: number; findings: number; detector_set_version: string; input_low_water: number; requested_high_water: number; processed_high_water: number }>).map((row) => Object.freeze({ detector: row.detector, status: row.status, examinedEvents: row.examined_events, findings: row.findings, detectorSetVersion: row.detector_set_version, inputLowWater: row.input_low_water, requestedHighWater: row.requested_high_water, processedHighWater: row.processed_high_water }));
     const cost = this.database.prepare(`SELECT COUNT(*) AS completed_runs, COALESCE(SUM(events_loaded), 0) AS total
       FROM operational_analysis_attempts WHERE repository_id = ? AND outcome = 'completed'`).get(repositoryId) as { completed_runs: number; total: number };
+    const gaps = this.database.prepare(`SELECT COUNT(DISTINCT j.session_id) AS count FROM operational_analysis_jobs j
+      WHERE j.repository_id = ? AND j.state = 'completed' AND NOT EXISTS
+      (SELECT 1 FROM operational_context_snapshots s WHERE s.repository_id = j.repository_id AND s.session_id = j.session_id)`)
+      .get(repositoryId) as { count: number };
     return publicReport(Object.freeze({ episodes: Object.freeze(episodes), findings: Object.freeze(findings),
       candidates: Object.freeze(candidates), episodeEvidence: Object.freeze(episodeEvidence), coverage: Object.freeze(coverage),
+      historicalInstructionGaps: gaps.count,
       cost: Object.freeze({ completedRuns: cost.completed_runs, total: cost.total }) }), this.contextSecret());
   }
 
@@ -1078,7 +1085,8 @@ export class OperationalLearningRepository {
     for (const rawEpisode of result.episodes) {
       const episode = isTypedEpisode(rawEpisode) ? createTypedEpisode(rawEpisode) : createOperationalEpisode(rawEpisode);
       if (episode.repositoryId !== job.repositoryId || episode.sessionId !== job.sessionId ||
-        (episode.detector !== job.detectorSetVersion && episode.detector !== LEGACY_DETECTOR_SET_VERSION))
+        (episode.detector !== job.detectorSetVersion && episode.detector !== PREVIOUS_DETECTOR_SET_VERSION
+          && episode.detector !== LEGACY_DETECTOR_SET_VERSION))
         throw new TypeError('Episode scope or detector version conflicts with job.');
       if (isTypedEpisode(episode) && !this.referencesEvidenceInScope(typedEpisodeReferences(episode), job, stagedEvidence)) {
         throw new TypeError('Episode evidence is missing from the analysis job scope.');

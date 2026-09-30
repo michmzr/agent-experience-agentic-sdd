@@ -1255,8 +1255,8 @@ test('keeps migrated m6 jobs separate from a completed typed-evidence stream', (
       processedHighWater: migrated.stream('repo-1', 'session-mixed', 'm6-deterministic@1')?.processedHighWater
     }, { committedHighWater: 9, processedHighWater: 0 });
     assert.deepEqual({
-      committedHighWater: migrated.stream('repo-1', 'session-mixed', DETECTOR_SET_VERSION)?.committedHighWater,
-      processedHighWater: migrated.stream('repo-1', 'session-mixed', DETECTOR_SET_VERSION)?.processedHighWater
+      committedHighWater: migrated.stream('repo-1', 'session-mixed', 'm9-typed-evidence@1')?.committedHighWater,
+      processedHighWater: migrated.stream('repo-1', 'session-mixed', 'm9-typed-evidence@1')?.processedHighWater
     }, { committedHighWater: 7, processedHighWater: 7 });
     assert.equal(migrated.jobById('legacy-covered-5')?.state, 'completed');
     assert.equal(migrated.jobById('legacy-new-9')?.state, 'retryable-failure');
@@ -1264,7 +1264,7 @@ test('keeps migrated m6 jobs separate from a completed typed-evidence stream', (
     assert.deepEqual(migrated.quality('repo-1').cost, { completedRuns: 1, total: 7 });
     assert.equal(migrated.report('repo-1').episodeEvidence.length, 1);
     assert.equal(migrated.report('repo-1').episodes.some((episode) => 'kind' in episode && episode.kind === 'verification-gap'), true);
-    assert.equal(migrated.report('repo-1').coverage.some((item) => item.detector === DETECTOR_SET_VERSION && item.examinedEvents === 7), true);
+    assert.equal(migrated.report('repo-1').coverage.some((item) => item.detector === 'm9-typed-evidence@1' && item.examinedEvents === 7), true);
     assert.equal(migrated.contextSnapshotFor('repo-1', 'session-mixed')?.repositoryFamilyKey, 'family-1');
     assert.equal(Buffer.from(migrated.contextSecret()).equals(Buffer.alloc(32)), true);
     const claimed = claimFor(migrated, 'legacy-m6');

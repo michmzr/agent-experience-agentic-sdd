@@ -1,10 +1,12 @@
 import { createHash, createHmac } from 'node:crypto';
-import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { configuredInstructionLocations, loadProjectSettings, type ProjectSettings } from '../config/project-settings.js';
 
 const maxInstructionBytes = 128 * 1024;
+const contextCache = new Map<string, { readonly signatures: string; readonly context: ProjectInstructionContext }>();
+const maxCachedContexts = 64;
 export type InstructionState = 'yes' | 'no' | 'unknown';
 export interface InstructionContext { readonly location: string; readonly scope: 'repository'; readonly found: boolean; readonly delivered: InstructionState; readonly explicitlyRead: InstructionState; readonly digest: string; readonly evidenceId: string; }
 export interface ProjectToolConvention { readonly tool: 'pnpm' | 'uv'; readonly replaces: 'npm' | 'pip'; readonly source: string; readonly digest: string; }
@@ -14,11 +16,18 @@ export const CONVENTION_PARSER_VERSION = 2;
 
 export function readProjectInstructionContext(repositoryRoot: string, settings?: Pick<ProjectSettings, 'instructionLocations' | 'instructionScopes'>): ProjectInstructionContext {
   const configured = settings ?? loadProjectSettings(repositoryRoot);
+  const locations = configuredInstructionLocations(configured);
+  const signatures = locations.map(location => safeFileSignature(repositoryRoot, location));
+  const cacheKey = JSON.stringify([repositoryRoot, locations, configured.instructionScopes ?? []]);
+  const signatureKey = JSON.stringify(signatures);
+  const cached = contextCache.get(cacheKey);
+  if (cached?.signatures === signatureKey) return cached.context;
   const instructions: InstructionContext[] = []; const conventions: ProjectToolConvention[] = [];
   const scopedConventions: ScopedToolConvention[] = []; const unresolvedScopes: string[] = [];
-  for (const location of configuredInstructionLocations(configured)) {
-    const path = join(repositoryRoot, location); let text: string | undefined;
-    if (existsSync(path)) try { const stat = lstatSync(path); if (stat.isFile() && !stat.isSymbolicLink() && stat.size <= maxInstructionBytes) text = readFileSync(path, 'utf8'); } catch { /* unavailable evidence remains unknown */ }
+  let cacheable = true;
+  for (const [index, location] of locations.entries()) {
+    const text = signatures[index] === undefined ? undefined : readBoundedRegularFile(repositoryRoot, location, signatures[index]!);
+    if (signatures[index] !== undefined && text === undefined) cacheable = false;
     const digest = contextDigest(repositoryRoot, location, text ?? '');
     instructions.push(Object.freeze({ location, scope: 'repository', found: text !== undefined, delivered: 'unknown', explicitlyRead: 'unknown', digest, evidenceId: `instruction-context:${location}` }));
     if (text === undefined) continue;
@@ -37,8 +46,51 @@ export function readProjectInstructionContext(repositoryRoot: string, settings?:
       }
     }
   }
-  return Object.freeze({ instructions: Object.freeze(instructions.sort((a, b) => a.location.localeCompare(b.location))), conventions: Object.freeze(conventions.sort(compareConvention)),
+  const context = Object.freeze({ instructions: Object.freeze(instructions.sort((a, b) => a.location.localeCompare(b.location))), conventions: Object.freeze(conventions.sort(compareConvention)),
     scopedConventions: Object.freeze(scopedConventions.sort(compareConvention)), unresolvedScopes: Object.freeze(unresolvedScopes.sort()) });
+  contextCache.delete(cacheKey);
+  if (cacheable) {
+    contextCache.set(cacheKey, { signatures: signatureKey, context });
+    if (contextCache.size > maxCachedContexts) contextCache.delete(contextCache.keys().next().value!);
+  }
+  return context;
+}
+
+function safeFileSignature(root: string, location: string): string | undefined {
+  let current = root;
+  try {
+    for (const segment of location.split('/')) {
+      current = join(current, segment);
+      const stat = lstatSync(current, { bigint: true });
+      if (stat.isSymbolicLink()) return undefined;
+      if (current !== join(root, location) && !stat.isDirectory()) return undefined;
+      if (current === join(root, location)) {
+        if (!stat.isFile() || stat.size > BigInt(maxInstructionBytes)) return undefined;
+        return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+      }
+    }
+  } catch { /* Missing or inaccessible instruction is unknown. */ }
+  return undefined;
+}
+
+function readBoundedRegularFile(root: string, location: string, signature: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(join(root, location), constants.O_RDONLY | constants.O_NOFOLLOW);
+    const stat = fstatSync(fd, { bigint: true });
+    if (!stat.isFile() || stat.size > BigInt(maxInstructionBytes)
+      || [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':') !== signature) return undefined;
+    const bytes = Buffer.alloc(maxInstructionBytes + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = readSync(fd, bytes, length, bytes.length - length, length);
+      if (count === 0) break;
+      length += count;
+    }
+    if (length > maxInstructionBytes || safeFileSignature(root, location) !== signature) return undefined;
+    return bytes.toString('utf8', 0, length);
+  } catch { return undefined; }
+  finally { if (fd !== undefined) closeSync(fd); }
 }
 
 export function readProjectToolConventions(repositoryRoot: string): readonly ProjectToolConvention[] { return readProjectInstructionContext(repositoryRoot).conventions; }

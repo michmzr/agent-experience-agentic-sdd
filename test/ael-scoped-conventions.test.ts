@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { loadProjectSettings } from '../src/config/project-settings.js';
 import { readProjectInstructionContext, readScopedToolConventions } from '../src/learning/project-conventions.js';
-import { OperationalLearningRepository } from '../src/learning/repository.js';
+import { DETECTOR_SET_VERSION, OperationalLearningRepository } from '../src/learning/repository.js';
 import { OperationalLearningService } from '../src/learning/service.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 import { initializeGitRepository } from './helpers/git-repository.js';
@@ -107,4 +107,48 @@ test('ASC-A3 preserves the instruction revision and scoped evidence across edits
       assert.deepEqual(current?.conventions, []);
     } finally { repository.close(); }
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('ASC-A4 refuses current instructions for a legacy operation without retained historical context', () => {
+  const root = mkdtempSync(join(tmpdir(), 'asc-reanalysis-'));
+  const project = join(root, 'project'); const databasePath = join(root, 'experience.sqlite');
+  try {
+    mkdirSync(project); initializeGitRepository(project);
+    const store = new ExperienceStore(databasePath);
+    try {
+      store.registerRepository({ id: 'repo-1', root: project, observedAt: '2026-09-29T10:00:00.000Z' });
+      store.appendIncremental({ session: { id: 'legacy-session' as never, source: 'codex', startedAt: '2026-09-29T10:00:00.000Z', repositoryId: 'repo-1' as never } });
+    } finally { store.close(); }
+    const repository = new OperationalLearningRepository(databasePath);
+    try { repository.enqueue({ repositoryId: 'repo-1', sessionId: 'legacy-session', inputHighWater: 0 }); }
+    finally { repository.close(); }
+    writeFileSync(join(project, 'AGENTS.md'), 'Use pnpm (never npm).\n');
+    assert.equal(new OperationalLearningService(databasePath).runNext().status, 'completed');
+    const reopened = new OperationalLearningRepository(databasePath);
+    try {
+      assert.equal(reopened.contextSnapshotFor('repo-1', 'legacy-session'), undefined);
+      assert.deepEqual(reopened.report('repo-1').candidates, []);
+      assert.equal(reopened.report('repo-1').historicalInstructionGaps, 1);
+    } finally { reopened.close(); }
+    assert.match(DETECTOR_SET_VERSION, /asc-parser@2/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('ASC-A5 bounds instruction reads and rejects symlinked ancestor paths', () => {
+  const root = mkdtempSync(join(tmpdir(), 'asc-bounded-'));
+  const outside = mkdtempSync(join(tmpdir(), 'asc-external-'));
+  try {
+    writeFileSync(join(outside, 'AGENTS.md'), 'Use pnpm (never npm).\n');
+    symlinkSync(outside, join(root, '.agents'));
+    let context = readProjectInstructionContext(root);
+    assert.equal(context.instructions.find(({ location }) => location === '.agents/AGENTS.md')?.found, false);
+    assert.deepEqual(context.conventions, []);
+    writeFileSync(join(root, 'AGENTS.md'), `${'x'.repeat(128 * 1024)}\nUse uv rather than pip.\n`);
+    context = readProjectInstructionContext(root);
+    assert.equal(context.instructions.find(({ location }) => location === 'AGENTS.md')?.found, false);
+    assert.deepEqual(context.conventions, []);
+    writeFileSync(join(root, 'AGENTS.md'), 'Use uv rather than pip.\n');
+    context = readProjectInstructionContext(root);
+    assert.deepEqual(context.conventions.map(({ tool }) => tool), ['uv']);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
 });

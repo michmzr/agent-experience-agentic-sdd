@@ -15,9 +15,10 @@ import {
   type EpisodeEvidenceState
 } from './contracts.js';
 import { detectOperationalEpisodes } from './detectors.js';
-import { readProjectInstructionContext, readProjectToolConventions, type ProjectToolConvention } from './project-conventions.js';
+import { readProjectInstructionContext, type ProjectToolConvention } from './project-conventions.js';
 import {
   DETECTOR_SET_VERSION,
+  PREVIOUS_DETECTOR_SET_VERSION,
   OperationalLearningRepository,
   type AnalysisFailureReason,
   type AnalysisJob,
@@ -57,14 +58,14 @@ export class OperationalLearningService {
   private readonly monotonicNow: () => number;
   private readonly detect: typeof detectOperationalEpisodes;
   private readonly openStore: (databasePath: string) => ExperienceStore;
-  private readonly readConventions: (repositoryRoot: string) => readonly ProjectToolConvention[];
+  private readonly readConventions?: (repositoryRoot: string) => readonly ProjectToolConvention[];
   private readonly readContext: typeof readProjectInstructionContext;
 
   constructor(private readonly databasePath: string, dependencies: OperationalLearningDependencies = {}) {
     this.monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
     this.detect = dependencies.detect ?? detectOperationalEpisodes;
     this.openStore = dependencies.openStore ?? ((path) => new ExperienceStore(path));
-    this.readConventions = dependencies.readConventions ?? readProjectToolConventions;
+    this.readConventions = dependencies.readConventions;
     this.readContext = dependencies.readContext ?? readProjectInstructionContext;
   }
 
@@ -120,7 +121,8 @@ export class OperationalLearningService {
         } catch {
           return this.fail(repository, job, ownerId, 'execution-failure');
         }
-        if (!session || session.repositoryId !== job.repositoryId || !registration || !stream || job.detectorSetVersion !== DETECTOR_SET_VERSION) {
+        if (!session || session.repositoryId !== job.repositoryId || !registration || !stream
+          || ![DETECTOR_SET_VERSION, PREVIOUS_DETECTOR_SET_VERSION].includes(job.detectorSetVersion)) {
           return this.fail(repository, job, ownerId, 'invalid-input');
         }
         try { checkpoint = validateDetectorCheckpoint(stream.checkpoint, job.sessionId); }
@@ -128,7 +130,7 @@ export class OperationalLearningService {
         repositoryRoot = registration.root;
         try {
           const snapshot = repository.contextSnapshotFor(job.repositoryId, job.sessionId);
-          conventions = snapshot?.conventions ?? this.readConventions(repositoryRoot);
+          conventions = snapshot?.conventions ?? this.readConventions?.(repositoryRoot) ?? [];
         } catch {
           return this.fail(repository, job, ownerId, 'execution-failure');
         }
