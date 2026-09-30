@@ -34,7 +34,8 @@ export function recordLocalAdviceUsage(dataDir: string, workingDirectory: string
     if (!existsSync(experiencePath)) throw new Error('Operation evidence is unavailable.');
     const database = new DatabaseSync(experiencePath, { readOnly: true, timeout: 125 });
     try {
-      if (input.kind === 'applied') verifyApplied(database, bundle.operationSignature, bundle.retrievedAt, input);
+      if (input.kind === 'applied') verifyApplied(database, bundle.operationSignature,
+        bundle.retrievedAt, usage.firstFactTime(input.bundleId, 'selected'), input);
       else verifyOutcome(experiencePath, usage, bundle.operationSignature, input);
     } finally { database.close(); }
   }
@@ -42,7 +43,8 @@ export function recordLocalAdviceUsage(dataDir: string, workingDirectory: string
   return Object.freeze({ status: 'recorded' as const, kind: input.kind, origin: input.origin });
 }
 
-function verifyApplied(database: DatabaseSync, expectedSignature: string, retrievedAt: string | null, input: AdviceUsageRequest): void {
+function verifyApplied(database: DatabaseSync, expectedSignature: string, retrievedAt: string | null,
+  selectedAt: string | null, input: AdviceUsageRequest): void {
   const row = database.prepare(`SELECT COALESCE(ce.signature_json, re.signature_json) AS signature_json,
       COALESCE(e.occurred_at, re.occurred_at) AS occurred_at
     FROM logical_evidence l JOIN sessions s ON s.id = l.session_id
@@ -52,8 +54,9 @@ function verifyApplied(database: DatabaseSync, expectedSignature: string, retrie
     WHERE l.event_id = ? AND l.session_id = ? AND s.repository_id = ?
       AND COALESCE(ce.phase, re.phase) = 'pre-action'`)
     .get(input.witnessRef, input.sessionId, input.repositoryId) as { signature_json: string; occurred_at: string } | undefined;
-  if (!row || !retrievedAt || !Number.isFinite(Date.parse(retrievedAt))
-    || !Number.isFinite(Date.parse(row.occurred_at)) || Date.parse(row.occurred_at) <= Date.parse(retrievedAt)
+  if (!row || !retrievedAt || !selectedAt || !Number.isFinite(Date.parse(retrievedAt))
+    || !Number.isFinite(Date.parse(selectedAt)) || !Number.isFinite(Date.parse(row.occurred_at))
+    || Date.parse(row.occurred_at) <= Math.max(Date.parse(retrievedAt), Date.parse(selectedAt))
     || operationSignatureFromStoredJson(row.signature_json) !== expectedSignature) {
     throw new Error('Applied operation witness does not match the retrieved advice scope.');
   }

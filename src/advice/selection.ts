@@ -34,7 +34,8 @@ export function selectLocalAdvice(entries: readonly VerifiedAdviceEntry[], conte
     if (now() > deadline) return Object.freeze({ status: 'unavailable', entries: Object.freeze([]) });
     if (entry.state !== 'verified' || entry.contradictionState !== 'clear'
       || entry.repositoryId !== context.repositoryId || entry.contextRevision !== context.contextRevision
-      || entry.operationSignature !== context.operationSignature
+      || !(entry.operationSignature === context.operationSignature
+        || entry.operationSignature === null && (entry.kind === 'convention' || entry.kind === 'project-fact'))
       || entry.applicability.scope === 'subproject' && entry.applicability.path !== context.subproject
       || entry.applicability.scope !== 'repository' && entry.applicability.scope !== 'subproject'
       || !(entry.applicability.conditions ?? []).every(condition => context.conditions.includes(condition))

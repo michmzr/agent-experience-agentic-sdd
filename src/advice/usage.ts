@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS advice_usage_facts (
   kind TEXT NOT NULL,
   origin TEXT NOT NULL,
   witness_ref TEXT NOT NULL,
+  recorded_at TEXT,
   UNIQUE(bundle_id, kind, origin, witness_ref)
 ) STRICT;
 CREATE UNIQUE INDEX IF NOT EXISTS advice_single_retrieval ON advice_usage_facts(bundle_id) WHERE kind = 'retrieved';`;
@@ -54,6 +55,7 @@ export class AdvisoryUsageStore {
     const id = `advice-use:${createHash('sha256').update(JSON.stringify([
       input.repositoryId, input.lessonId, input.lessonRevision, input.sessionId, input.contextRevision, input.operationSignature
     ])).digest('hex')}`;
+    const retrievedAt = this.now();
     const database = this.open();
     try {
       database.exec('BEGIN IMMEDIATE');
@@ -61,9 +63,9 @@ export class AdvisoryUsageStore {
         database.prepare(`INSERT OR IGNORE INTO advice_usage_bundles
           (id, repository_id, lesson_id, lesson_revision, session_id, context_revision, operation_signature, retrieved_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.repositoryId, input.lessonId, input.lessonRevision,
-          input.sessionId, input.contextRevision, input.operationSignature, this.now());
-        database.prepare(`INSERT OR IGNORE INTO advice_usage_facts (bundle_id, kind, origin, witness_ref)
-          VALUES (?, 'retrieved', 'cli-retrieval', ?)`).run(id, input.retrievalRef);
+          input.sessionId, input.contextRevision, input.operationSignature, retrievedAt);
+        database.prepare(`INSERT OR IGNORE INTO advice_usage_facts (bundle_id, kind, origin, witness_ref, recorded_at)
+          VALUES (?, 'retrieved', 'cli-retrieval', ?, ?)`).run(id, input.retrievalRef, retrievedAt);
         database.exec('COMMIT');
       } catch (error) { database.exec('ROLLBACK'); throw error; }
     } finally { database.close(); }
@@ -91,8 +93,8 @@ export class AdvisoryUsageStore {
         const prerequisite = input.kind === 'selected' ? 'delivered' : input.kind === 'applied' ? 'selected'
           : input.kind === 'outcome-observed' ? 'applied' : 'retrieved';
         if (!prior.has(prerequisite)) throw new TypeError(`Usage fact requires ${prerequisite} witness.`);
-        database.prepare('INSERT OR IGNORE INTO advice_usage_facts (bundle_id, kind, origin, witness_ref) VALUES (?, ?, ?, ?)')
-          .run(input.bundleId, input.kind, input.origin, input.witnessRef);
+        database.prepare('INSERT OR IGNORE INTO advice_usage_facts (bundle_id, kind, origin, witness_ref, recorded_at) VALUES (?, ?, ?, ?, ?)')
+          .run(input.bundleId, input.kind, input.origin, input.witnessRef, this.now());
         database.exec('COMMIT');
       } catch (error) { database.exec('ROLLBACK'); throw error; }
     } finally { database.close(); }
@@ -105,6 +107,18 @@ export class AdvisoryUsageStore {
       return Object.freeze((database.prepare('SELECT kind, origin, witness_ref FROM advice_usage_facts WHERE bundle_id = ? ORDER BY ordinal')
         .all(bundleId) as { kind: UsageKind; origin: UsageOrigin; witness_ref: string }[])
         .map(row => Object.freeze({ kind: row.kind, origin: row.origin, witnessRef: row.witness_ref })));
+    } finally { database.close(); }
+  }
+
+  firstFactTime(bundleId: string, kind: UsageKind): string | null {
+    validKey(bundleId, 'bundle ID');
+    const database = new DatabaseSync(this.path, { readOnly: true, timeout: 125 });
+    try {
+      const columns = database.prepare('PRAGMA table_info(advice_usage_facts)').all() as Array<{ name: string }>;
+      if (!columns.some(column => column.name === 'recorded_at')) return null;
+      const row = database.prepare('SELECT recorded_at FROM advice_usage_facts WHERE bundle_id = ? AND kind = ? ORDER BY ordinal LIMIT 1')
+        .get(bundleId, kind) as { recorded_at: string | null } | undefined;
+      return row?.recorded_at ?? null;
     } finally { database.close(); }
   }
 
@@ -130,6 +144,8 @@ export class AdvisoryUsageStore {
     database.exec(migration);
     const columns = database.prepare('PRAGMA table_info(advice_usage_bundles)').all() as Array<{ name: string }>;
     if (!columns.some(column => column.name === 'retrieved_at')) database.exec('ALTER TABLE advice_usage_bundles ADD COLUMN retrieved_at TEXT');
+    const factColumns = database.prepare('PRAGMA table_info(advice_usage_facts)').all() as Array<{ name: string }>;
+    if (!factColumns.some(column => column.name === 'recorded_at')) database.exec('ALTER TABLE advice_usage_facts ADD COLUMN recorded_at TEXT');
     return database;
   }
 }

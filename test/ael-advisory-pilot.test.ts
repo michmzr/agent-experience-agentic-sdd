@@ -134,12 +134,18 @@ test('AAP-A3 public application and outcome link captured operation to resolved 
     store.registerRepository({ id: repositoryId as never, root: repositoryRoot, observedAt: '2026-09-30T10:00:00.000Z' });
     store.appendIncremental({ session: { id: sessionId, source: 'codex', repositoryId: repositoryId as never,
       startedAt: '2026-09-30T10:00:00.000Z' } });
+    const operationTime = new Date(Date.now() + 60_000).toISOString();
+    const resultTime = new Date(Date.parse(operationTime) + 1_000).toISOString();
     const request = normalizeMappedCapture({ source: 'codex', sourceEventId: 'operation-b',
-      sessionId, phase: 'pre-action', occurredAt: '2026-09-30T10:00:01.000Z',
+      sessionId, phase: 'pre-action', occurredAt: operationTime,
       tool: 'shell', action: 'install', summary: 'Install dependencies.' });
     const result = normalizeMappedCapture({ source: 'codex', sourceEventId: 'result-b',
-      sessionId, phase: 'post-result', relatedEventId: 'operation-b', occurredAt: '2026-09-30T10:00:02.000Z',
+      sessionId, phase: 'post-result', relatedEventId: 'operation-b', occurredAt: resultTime,
       tool: 'shell', action: 'install', outcome: 'succeeded', exitStatus: 0, summary: 'Installation succeeded.' });
+    const oldRequest = normalizeMappedCapture({ source: 'codex', sourceEventId: 'operation-before-selection',
+      sessionId, phase: 'pre-action', occurredAt: '2026-09-30T10:00:00.000Z',
+      tool: 'shell', action: 'install', summary: 'Install dependencies.' });
+    store.appendIncremental({ event: oldRequest });
     store.appendIncremental({ event: request });
     store.appendIncremental({ event: result });
     store.preserveOperationInstructionContext(request,
@@ -172,13 +178,15 @@ test('AAP-A3 public application and outcome link captured operation to resolved 
     };
     assert.equal(record('delivered', 'agent-claim', 'delivery-b').exitCode, 0);
     assert.equal(record('selected', 'agent-selection', 'selection-b').exitCode, 0);
+    assert.equal(record('applied', 'operation-evidence', oldRequest.id).exitCode, 1);
     assert.equal(record('applied', 'operation-evidence', request.id).exitCode, 0);
     assert.equal(record('outcome-observed', 'verification-evidence', evidenceId).exitCode, 0);
     assert.deepEqual(usage.facts(bundle.id).map(fact => fact.kind),
       ['retrieved', 'delivered', 'selected', 'applied', 'outcome-observed']);
     assert.equal(record('outcome-observed', 'verification-evidence', 'unknown-evidence').exitCode, 1);
     const lateScope = { ...scope, lessonRevision: '2' };
-    const lateUsage = new AdvisoryUsageStore(advicePath, () => '2026-09-30T11:00:00.000Z');
+    const lateUsage = new AdvisoryUsageStore(advicePath,
+      () => new Date(Date.parse(operationTime) + 60_000).toISOString());
     const lateBundle = lateUsage.retrieved({ ...lateScope, operationSignature: witness.operationSignature!, retrievalRef: 'late-cli-call' });
     writeFileSync(inputPath, JSON.stringify({ ...lateScope, bundleId: lateBundle.id,
       kind: 'delivered', origin: 'agent-claim', witnessRef: 'late-delivery' }));
