@@ -1,14 +1,16 @@
 #!/usr/bin/env node
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { compareBaseline, currentBuildIdentity, runBaseline } from './benchmark/runner.js';
 import { AdvisoryConfigurationStore } from './advice/configuration.js';
 import { retrieveLocalAdvice, type AdviceRequest } from './advice/service.js';
+import { CandidateRepository, type CandidateRecord } from './knowledge/candidate-repository.js';
 
 import { defaultDatabasePath } from './storage/database.js';
 import { importTypedEvidence } from './evidence/import.js';
 import { applyRecoveryPlan, createRecoveryPlan, type RecoveryPlan } from './capture/recovery.js';
-import { closeSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { createAlignmentPlan, applyAlignmentPlan } from './installation/alignment.js';
 import { qualifyInstallation } from './installation/qualification.js';
 import { inspectInstallation, registeredInstallationRoots } from './installation/inspection.js';
@@ -57,7 +59,7 @@ const scopes = new Set(['global', 'repo'] as const);
 const initScopes = new Set(['global', 'repo', 'workspace'] as const);
 const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired']);
 const reviewSources = new Set(['codex', 'claude-code', 'cursor'] as const);
-const knownCommands = new Set(['init', 'unregister', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence', 'capture', 'analysis', 'installation', 'benchmark', 'advice']);
+const knownCommands = new Set(['init', 'unregister', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence', 'capture', 'analysis', 'installation', 'benchmark', 'advice', 'candidates']);
 
 export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory' | 'humanOutput'> = {}): CliResult {
   if (args.length === 1 && args[0] === '--help') return { exitCode: 0, stdout: `${usage()}\n`, stderr: '' };
@@ -67,6 +69,7 @@ export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workin
     if (parsed.positionals[0] === 'installation') return { exitCode: 0, stdout: JSON.stringify(executeInstallation(parsed, options)) + '\n', stderr: '' };
     if (parsed.positionals[0] === 'benchmark') return success(executeBenchmark(parsed), json, parsed.positionals, options.humanOutput);
     if (parsed.positionals[0] === 'advice') return success(executeAdvice(parsed, options.workingDirectory), json, parsed.positionals, options.humanOutput);
+    if (parsed.positionals[0] === 'candidates') return success(executeCandidates(parsed), json, parsed.positionals, options.humanOutput);
     const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
     const value = execute(service, parsed, options);
     return success(value, json, parsed.positionals, options.humanOutput,
@@ -134,6 +137,54 @@ function readBoundedAdviceInput(path: string): string {
     if (length > maximumBytes) throw new SyntaxError('Advice context exceeds 16 KiB.');
     return bytes.toString('utf8', 0, length);
   } finally { closeSync(descriptor); }
+}
+
+function executeCandidates(parsed: ParsedArguments): unknown {
+  const [, subcommand, ...rest] = parsed.positionals;
+  const repositoryId = requiredString(parsed.options, 'repository-id');
+  const dataDir = optionalString(parsed.options, 'data-dir') ?? dirname(defaultDatabasePath());
+  const databasePath = join(dataDir, 'experience.sqlite');
+  if (subcommand === 'list' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'state']);
+    if (!existsSync(databasePath)) return Object.freeze([]);
+    const repository = new CandidateRepository(databasePath);
+    try {
+      const state = optionalString(parsed.options, 'state');
+      if (state !== undefined && !states.has(state as KnowledgeState)) throw new SyntaxError('Knowledge state is unsupported.');
+      return Object.freeze(repository.list(repositoryId).filter(candidate => state === undefined || candidate.state === state)
+        .map(candidate => publicCandidate(candidate)));
+    } finally { repository.close(); }
+  }
+  if (subcommand === 'inspect' && rest.length === 1) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id']);
+    if (!existsSync(databasePath)) throw new DomainError('NOT_FOUND', 'Candidate was not found.');
+    const repository = new CandidateRepository(databasePath);
+    try {
+      const candidate = repository.inspect(repositoryId, rest[0]!);
+      if (!candidate) throw new DomainError('NOT_FOUND', 'Candidate was not found.');
+      const history = repository.history(repositoryId, candidate.id).map(review => Object.freeze({
+        from: review.from, to: review.to, evidenceKey: opaquePublicKey(review.evidenceId),
+        actorKey: opaquePublicKey(review.actorId), reviewedAt: review.reviewedAt
+      }));
+      return Object.freeze({ ...publicCandidate(candidate), history: Object.freeze(history) });
+    } finally { repository.close(); }
+  }
+  throw invalidCommand('candidates');
+}
+
+function publicCandidate(candidate: CandidateRecord) {
+  return Object.freeze({
+    id: candidate.id, repositoryId: candidate.repositoryId, state: candidate.state, kind: candidate.kind,
+    statement: candidate.statement, applicability: candidate.applicability, revision: candidate.revision,
+    contradictionState: candidate.contradictionState,
+    origins: Object.freeze(candidate.origins.map(origin => Object.freeze({
+      source: origin.source, originKey: opaquePublicKey(origin.originId), evidenceCount: origin.evidenceEventIds.length
+    })))
+  });
+}
+
+function opaquePublicKey(value: string): string {
+  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
 }
 
 export async function runCliAsync(args: string[], options: RunCliAsyncOptions = {}): Promise<CliResult> {
@@ -746,6 +797,8 @@ function usage(): string {
     '  advice configure --repository-id <id> --enabled true|false --json',
     '  advice status --repository-id <id> --json',
     '  advice retrieve --input <context.json> --json',
+    '  candidates list --repository-id <id> [--state <state>] --json',
+    '  candidates inspect <id> --repository-id <id> --json',
     '  unregister [--repository-id <id>]',
     '  status [--repository <path>|--repository-id <id>] [--schema-version <2|3>]',
     '  status-global [--repository <path>|--repository-id <id>] [--schema-version <2|3>]',
