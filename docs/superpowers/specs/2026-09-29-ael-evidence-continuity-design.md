@@ -6,6 +6,8 @@ Approved for implementation on 2026-09-30; drafted 2026-09-29. Change ID: `AEC`.
 
 The user authorized implementation on 2026-09-30; the delivery index records this decision. Existing approved behavior remains authoritative until the implementation passes its acceptance gates.
 
+Implementation checkpoint 2026-09-30: logical evidence pagination, late-result relations and migration have component tests. Real installed-host result envelopes remain unqualified, so source-dependent A1/A4/A5 acceptance remains open. See the [requirement manifest](../../verification/2026-09-30-ael-requirement-traceability.json).
+
 ## Problem
 
 All 2503 technical results in the audited snapshot have unknown outcomes. Current resumed events can be preserved in capture_run_events while learning and repository quality read only legacy capture_events. Result interpretation exists in reconstruction but is not the input consumed by the repair detector.

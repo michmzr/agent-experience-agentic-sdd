@@ -6,6 +6,8 @@ Approved for implementation on 2026-09-30; drafted 2026-09-29. Change ID: `ASC`.
 
 The user authorized implementation on 2026-09-30; the delivery index records this decision. Existing approved behavior remains authoritative until the implementation passes its acceptance gates.
 
+Implementation checkpoint 2026-09-30: directive grammar, scope handling, immutable operation context and legacy-context exclusions have tests. The [requirement manifest](../../verification/2026-09-30-ael-requirement-traceability.json) records the verification scope.
+
 ## Problem
 
 The audited instruction snapshots contain no recognized conventions. The parser accepts Use pnpm instead of npm but rejects the observed Use pnpm (never npm) form. A project instruction may constrain only one subproject, which cannot be widened into a repository-wide recommendation.

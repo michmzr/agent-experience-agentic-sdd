@@ -6,6 +6,8 @@ Approved for implementation on 2026-09-30; drafted 2026-09-29. Change ID: `ATI`.
 
 The user authorized implementation on 2026-09-30; the delivery index records this decision. Existing approved behavior remains authoritative until the implementation passes its acceptance gates.
 
+Implementation checkpoint 2026-09-30: public bounded annotation import, indexed decision relations and worker restart paths have tests. Native task-verification remains unsupported; user-declared verification retains its distinct origin. See the [requirement manifest](../../verification/2026-09-30-ael-requirement-traceability.json).
+
 ## Problem
 
 The typed episode detector has contracts for claims, instructions, task verification and closure, but the ordinary capture projection supplies only tool requests and results. Tests inject richer evidence directly. Decision relations also need to survive separate pages and jobs.

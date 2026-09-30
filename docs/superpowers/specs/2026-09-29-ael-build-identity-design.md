@@ -4,6 +4,8 @@
 
 Approved for implementation by the user request “Implement ABI specs”, 2026-09-29. Change ID: `ABI`. Priority: P0. Dependencies: None for the baseline stage.
 
+Implementation checkpoint 2026-09-30: deterministic build identity, alignment recovery and per-operation capture/retry receipt attribution have tests. Installed-host qualification remains unsupported. The [requirement manifest](../../verification/2026-09-30-ael-requirement-traceability.json) separates test presence from acceptance evidence.
+
 Implementation authorization and user acceptance of the verified ABI core on 2026-09-29 are recorded in the delivery index. This acceptance covers controlled-fixture qualification and does not record live-host qualification or rollout. Full ABI acceptance remains pending until the ARC receipt provenance integration is verified.
 
 ## Problem
@@ -80,11 +82,11 @@ AVB records the pre-change case and the post-change behavior. The matching plan 
 
 ## Implementation amendment
 
-The user authorized automatic lock recovery and this spec update on 2026-09-29. SQLite locking replaces the directory/owner-file acquisition protocol; lock lifetime follows the process rather than persisted owner metadata. The accepted ABI core scope remains unchanged, and receipt persistence still depends on ARC.
+The user authorized automatic lock recovery and this spec update on 2026-09-29. SQLite locking replaces the directory/owner-file acquisition protocol; lock lifetime follows the process rather than persisted owner metadata. The accepted ABI core scope remains unchanged. Receipt persistence was integrated with ARC on 2026-09-30.
 
 On 2026-09-29, the user accepted the controlled process-interruption test as sufficient evidence for the ABI-A3 lock-recovery behavior. This acceptance does not approve rollout or complete ABI-A5 and live-host qualification.
 
-ABI-A5 now specifies per-operation persisted receipt attribution separately from the existing admission-envelope check. Its swapped-attribution negative control and receipt assertions remain pending ARC task 4; the existing ABI-A5 core test does not satisfy them.
+ABI-A5 specifies per-operation persisted receipt attribution separately from the existing admission-envelope check. ARC task 4 added retained-receipt assertions and a swapped-attribution negative control on 2026-09-30. The earlier ABI-A5 core test alone does not satisfy them.
 
 Receipt attribution is defined only for retained receipts inside ARC's reported retention window. An absent receipt has no receipt-level attribution even if another record still describes the operation. The public health report must separate operation counts from retained receipt counts and expose retention coverage; a lower receipt count is not evidence of a missing operation. Retention metadata describes coverage, not the cause of an individual absence; no unbounded tombstone ledger is required.
 

@@ -6,6 +6,8 @@ Approved for implementation on 2026-09-30; drafted 2026-09-29. Change ID: `ARC`.
 
 The user authorized implementation on 2026-09-30; the delivery index records this decision. Existing approved behavior remains authoritative until the implementation passes its acceptance gates.
 
+Implementation checkpoint 2026-09-30: bounded recovery, receipt attribution, reconciliation and health v3 have tests. An orphaned committed stream without a job still reports unavailable coverage. See the [requirement manifest](../../verification/2026-09-30-ael-requirement-traceability.json).
+
 ## Problem
 
 The audited spool contains 41 pending records and 988 records classified CORRUPT; one pending record reached 1411 attempts. Some captured sessions have no analysis stream. Global delivery counters cannot explain per-project completeness, and an empty analysis result does not distinguish inapplicable detectors from useful negative evidence.

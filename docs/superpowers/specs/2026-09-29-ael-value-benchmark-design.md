@@ -6,6 +6,8 @@ Approved for implementation on 2026-09-30; drafted 2026-09-29. Change ID: `AVB`.
 
 The user authorized implementation on 2026-09-30; the delivery index records this decision. Existing approved behavior remains authoritative until the implementation passes its acceptance gates.
 
+Implementation checkpoint 2026-09-30: synthetic B0 baseline, public-path B1 tests and a five-pair B2 protocol are present. Real-host trials, token telemetry and measured improvement remain unsupported. See the [requirement manifest](../../verification/2026-09-30-ael-requirement-traceability.json).
+
 ## Problem
 
 The reliable-observation evaluator counts supplied fixture facts, while component success and increasing lesson counts do not demonstrate useful behavior across the capture-to-reuse path. No comparable production baseline supports savings claims.

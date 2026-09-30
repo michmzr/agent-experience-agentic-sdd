@@ -18,6 +18,14 @@
     "artifactPath": null,
     "reason": "No completed five-pair real-session B report and safety/context gate."
   },
+  "integrationCheck": {
+    "command": "rtk pnpm check",
+    "result": "passed",
+    "passedTests": 1037,
+    "failedTests": 0,
+    "artifactPath": "docs/verification/2026-09-30-ael-eight-spec-integration.md",
+    "scope": "Full local test suite; requirement acceptance and real-host qualification are separate."
+  },
   "requirements": [
     {
       "spec": "ABI",
@@ -672,16 +680,16 @@
       "task": "Task 4",
       "specPath": "docs/superpowers/specs/2026-09-29-ael-advisory-pilot-design.md",
       "planPath": "docs/superpowers/plans/2026-09-29-ael-advisory-pilot.md",
-      "testPath": "test/ael-value-traceability.test.ts",
-      "status": "unsupported",
-      "reason": "No tagged acceptance test or recorded paired host session for advisory visibility.",
+      "testPath": "test/ael-advisory-session-reuse.test.ts",
+      "status": "test-present",
+      "limitation": "Controlled CLI session B uses agent-claimed delivery; independent live-agent visibility remains unqualified.",
       "run": {
         "status": "not-run",
         "artifactPath": null,
         "currentRevisionVerified": false,
         "command": null
       },
-      "testCommand": "rtk proxy node --test dist/test/ael-value-traceability.test.js"
+      "testCommand": "rtk proxy node --test dist/test/ael-advisory-session-reuse.test.js"
     },
     {
       "spec": "AAP",
@@ -690,16 +698,15 @@
       "task": "Task 5",
       "specPath": "docs/superpowers/specs/2026-09-29-ael-advisory-pilot-design.md",
       "planPath": "docs/superpowers/plans/2026-09-29-ael-advisory-pilot.md",
-      "testPath": "test/ael-value-traceability.test.ts",
-      "status": "unsupported",
-      "reason": "No tagged acceptance test or recorded real-host advisory handoff.",
+      "testPath": "test/ael-advisory-fail-open.test.ts",
+      "status": "test-present",
       "run": {
         "status": "not-run",
         "artifactPath": null,
         "currentRevisionVerified": false,
         "command": null
       },
-      "testCommand": "rtk proxy node --test dist/test/ael-value-traceability.test.js"
+      "testCommand": "rtk proxy node --test dist/test/ael-advisory-fail-open.test.js"
     },
     {
       "spec": "AVB",

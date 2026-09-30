@@ -6,6 +6,8 @@ Approved for implementation on 2026-09-30; drafted 2026-09-29. Change ID: `AAP`.
 
 The user authorized implementation on 2026-09-30; the delivery index records this decision. Existing approved behavior remains authoritative until the implementation passes its acceptance gates.
 
+Implementation checkpoint 2026-09-30: controlled CLI session A→B tests cover a convention and a newly acquired project fact; public fail-open and forged-usage tests are present. Delivery is recorded as an agent claim, not independent live-agent observation. See the [requirement manifest](../../verification/2026-09-30-ael-requirement-traceability.json).
+
 ## Problem
 
 Stored knowledge cannot reduce repeated work unless a later session receives applicable advice. Full Draft M8 depends on cloud and SSO M7, delaying a narrower local proof of reuse.

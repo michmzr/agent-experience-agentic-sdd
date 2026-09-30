@@ -1,6 +1,6 @@
 # Plan wykonania specyfikacji AEL
 
-Status: w trakcie. Użytkownik zlecił 2026-09-30 wykonanie wszystkich ośmiu specyfikacji z indeksu AEL z podziałem na subagentów. Ten plan koordynuje istniejące plany kryteriów, nie zastępuje ich.
+Status: implementacja lokalnej ścieżki i testy zintegrowane; kwalifikacja rzeczywistego hosta oraz pomiar AVB-B2 pozostają otwarte. Użytkownik zlecił 2026-09-30 wykonanie wszystkich ośmiu specyfikacji z indeksu AEL z podziałem na subagentów. Ten plan koordynuje istniejące plany kryteriów, nie zastępuje ich.
 
 ## Stan końcowy i weryfikacja
 
@@ -28,5 +28,9 @@ Główny checkout zawiera niezatwierdzone pliki dokumentacji użytkownika. Nikt 
 2. Domknąć błędy znalezione w przeglądzie AEC: niepełny backfill bez restartu, konflikt identyfikatorów między starymi tabelami i kolejność zdarzeń na granicy strony. Dokończyć AEC-A4–A6 i stabilną tożsamość operacji ABI-A5 po zmianie buildu; każdą zmianę ponownie zweryfikować.
 3. Zintegrować ARC-A1 oraz ASC-A1/A2 z osobnych worktrees, potem dokończyć ARC i ASC. Zmiany `src/learning/**` i `src/cli.ts` integrować kolejno.
 4. Po zamknięciu ARC i ASC wykonać ATI, ACL, AVB-B1, AAP i AVB-B2 zgodnie z zależnościami. Nie ogłaszać korzyści netto bez porównania i telemetrii przewidzianych w AVB.
+
+## Zapis wykonania z 2026-09-30
+
+ABI, AEC, ARC, ASC, ATI, ACL i lokalne ścieżki AAP/AVB-B1 zintegrowano w `codex/abi-build-identity`. Publiczny przepływ AAP sesja A→B przeszedł dla konwencji i nowego faktu projektu; dostarczenie pozostaje `agent-claim`. AVB-B2 ma protokół pięciu par i status `incomplete`, bez rzeczywistych prób hosta i bez pomiaru oszczędności. Wyniki komend i ograniczenia kwalifikacji są w [nocie weryfikacyjnej](../docs/verification/2026-09-30-ael-eight-spec-integration.md), a przypisanie 46 wymagań do dowodów w [manifeście](../docs/verification/2026-09-30-ael-requirement-traceability.json).
 
 Wynik AVB-B0 z obecnego `main` nie będzie nazywany historycznym pomiarem sprzed implementacji ABI. Zachowany syntetyczny baseline ABI jest odrębnym artefaktem.

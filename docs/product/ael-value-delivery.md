@@ -2,7 +2,7 @@
 
 ## Status
 
-ABI implementation was authorized by the user on 2026-09-29. The user accepted its verified core on 2026-09-29 before real-host qualification; full ABI-A5 receipt persistence is pending ARC. On 2026-09-30 the user authorized implementation of all eight AEL specifications and requested subagents. Work proceeds in isolated worktrees with explicit file ownership. No additional acceptance or live rollout is recorded here.
+ABI implementation was authorized by the user on 2026-09-29. The user accepted its verified core on 2026-09-29 before real-host qualification. On 2026-09-30 the user authorized implementation of all eight AEL specifications and requested subagents. Work proceeds in isolated worktrees with explicit file ownership. No additional acceptance or live rollout is recorded here.
 
 On 2026-09-29, the user accepted the controlled process-interruption test as sufficient evidence for ABI-A3 lock recovery. This decision does not approve rollout or complete the remaining ABI acceptance work.
 
@@ -12,16 +12,16 @@ The intended outcome is an attributable, complete and reviewable path from retai
 
 | ID | Priority | Scope | Specification | Plan | Approval / execution |
 |---|---|---|---|---|---|
-| ABI | P0 | Build identity and installation alignment | [Spec](../superpowers/specs/2026-09-29-ael-build-identity-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-build-identity.md) | Core accepted 2026-09-29; receipt attribution integrated 2026-09-30; public health reporting and live-host qualification pending |
-| AEC | P0 | Result facts and resumed evidence continuity | [Spec](../superpowers/specs/2026-09-29-ael-evidence-continuity-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-evidence-continuity.md) | Authorized 2026-09-30; implementation in progress |
-| ARC | P0 | Bounded recovery and scoped coverage | [Spec](../superpowers/specs/2026-09-29-ael-recovery-coverage-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-recovery-coverage.md) | Authorized 2026-09-30; A1 bounded recovery, A2 public recovery plans and A3 reconciliation integrated; A4–A6 in progress |
+| ABI | P0 | Build identity and installation alignment | [Spec](../superpowers/specs/2026-09-29-ael-build-identity-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-build-identity.md) | Core accepted 2026-09-29; per-operation capture and retry receipt attribution tested; real-host qualification unsupported |
+| AEC | P0 | Result facts and resumed evidence continuity | [Spec](../superpowers/specs/2026-09-29-ael-evidence-continuity-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-evidence-continuity.md) | Logical index, pagination, late result and migration tests integrated; real host envelopes unqualified |
+| ARC | P0 | Bounded recovery and scoped coverage | [Spec](../superpowers/specs/2026-09-29-ael-recovery-coverage-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-recovery-coverage.md) | Recovery plans, reconciliation, receipts and health v3 tested; orphaned unprocessed stream coverage remains unavailable |
 | ASC | P1 | Explicit conventions and subproject scope | [Spec](../superpowers/specs/2026-09-29-ael-scoped-conventions-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-scoped-conventions.md) | Authorized 2026-09-30; A1–A5 integrated, including immutable per-operation instruction revisions; final requirement-level review pending |
-| ATI | P1 | Typed evidence from a public producer | [Spec](../superpowers/specs/2026-09-29-ael-typed-evidence-ingestion-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-typed-evidence-ingestion.md) | Authorized 2026-09-30; A1/A2 public import and A5 explicit native-source unsupported capability integrated; A3/A4/A6 in progress |
-| ACL | P1 | Candidate review, lifecycle and retrieval | [Spec](../superpowers/specs/2026-09-29-ael-candidate-lifecycle-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-candidate-lifecycle.md) | Authorized 2026-09-30; queued after ASC and ATI |
-| AAP | P1 | Default-off local advisory pilot | [Spec](../superpowers/specs/2026-09-29-ael-advisory-pilot-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-advisory-pilot.md) | Authorized 2026-09-30 under ADR 002; queued after AVB B1 |
-| AVB | P0 baseline, P1 comparison | End-to-end value benchmark | [Spec](../superpowers/specs/2026-09-29-ael-value-benchmark-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-value-benchmark.md) | Authorized 2026-09-30; B0 synthetic baseline frozen from main, host qualification unsupported; A3 safety evaluator and A4/A5 paired evaluator integrated but public B1/B2 runs pending |
+| ATI | P1 | Typed evidence from a public producer | [Spec](../superpowers/specs/2026-09-29-ael-typed-evidence-ingestion-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-typed-evidence-ingestion.md) | Bounded public import, indexed relations, restart and worker tests integrated; native task-verification unsupported |
+| ACL | P1 | Candidate review, lifecycle and retrieval | [Spec](../superpowers/specs/2026-09-29-ael-candidate-lifecycle-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-candidate-lifecycle.md) | Public list, inspect, evidence-bound review and backfill tested; source-qualified convention and Git fact witnesses integrated |
+| AAP | P1 | Default-off local advisory pilot | [Spec](../superpowers/specs/2026-09-29-ael-advisory-pilot-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-advisory-pilot.md) | Public retrieval and usage tested; controlled A→B CLI scenarios pass for convention and project fact with delivery labeled agent-claim; live-agent delivery unqualified |
+| AVB | P0 baseline, P1 comparison | End-to-end value benchmark | [Spec](../superpowers/specs/2026-09-29-ael-value-benchmark-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-value-benchmark.md) | B0 synthetic baseline and B1 pipeline tests integrated; B2 paired protocol reports incomplete without qualified host runs; no measured improvement |
 
-Each specification contains problem, evidence, goals, exclusions, observable behavior, architecture, lifecycle, failure/privacy rules, rollout and numbered acceptance criteria. Each plan names source/test files, TDD steps, regression commands and rollback evidence. The [traceability manifest](ael-value-delivery-traceability.json) maps 46 requirements to 46 tasks and planned tests. A planned test path is not a claim that the test exists or passes.
+Each specification contains problem, evidence, goals, exclusions, observable behavior, architecture, lifecycle, failure/privacy rules, rollout and numbered acceptance criteria. Each plan names source/test files, TDD steps, regression commands and rollback evidence. The [implementation traceability manifest](../verification/2026-09-30-ael-requirement-traceability.json) maps 46 requirements to tests and scoped run records. A test path alone is not acceptance evidence.
 
 ## Order and dependencies
 
@@ -73,7 +73,7 @@ RAG, additional reviewers, broad cloud/SSO integration and new enforcement are o
 - [ ] Run its full acceptance path after the last change and attach actual requirement-level evidence.
 - [ ] Review the implementation, migration and rollback outcomes before recording acceptance or rollout.
 
-Source/test paths in plans distinguish existing files from proposed modules. Commands in specs are proposed interfaces and must not be presented as available in the current CLI. Hook installation, trust, migration, recovery and advisory enablement remain separate concrete operations; approval of a document alone does not claim they have occurred.
+Source/test paths in plans distinguish the original proposals from the tested implementation. The [implementation manifest](../verification/2026-09-30-ael-requirement-traceability.json) identifies current public-path tests and unsupported host evidence. Hook installation, trust, migration, recovery and advisory enablement remain separate concrete operations; approval of a document alone does not claim they have occurred.
 
 [^basis]: [Audit](../analysis/2026-09-29-ael-records-and-lessons.md), [verified findings](../analysis/2026-09-29-ael-value-findings.md), [improvement proposal](../sdd/proposals/2026-09-29-ael-value-delivery.md), [requirements](requirements.md).
 [^milestones]: [Roadmap](roadmap.md), [operational memory index](operational-memory-milestones.md), [proposed staged reuse ADR](../decisions/002-staged-local-knowledge-reuse.md).

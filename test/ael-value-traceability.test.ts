@@ -56,4 +56,17 @@ test('AVB-A6 maps every requirement to truthful test and run evidence', () => {
   assert.equal(manifest.hostQualification.artifactPath, null);
   assert.equal(manifest.measuredImprovement.status, 'unsupported');
   assert.equal(manifest.measuredImprovement.artifactPath, null);
+  assert.equal(manifest.integrationCheck.command, 'rtk pnpm check');
+  assert.equal(manifest.integrationCheck.result, 'passed');
+  assert.equal(manifest.integrationCheck.passedTests, 1037);
+  assert.equal(manifest.integrationCheck.failedTests, 0);
+  assert.ok(existsSync(join(root, manifest.integrationCheck.artifactPath)));
+  for (const [acceptance, testPath] of [
+    ['AAP-A4', 'test/ael-advisory-session-reuse.test.ts'],
+    ['AAP-A5', 'test/ael-advisory-fail-open.test.ts']
+  ]) {
+    const entry = manifest.requirements.find((item: { acceptance: string }) => item.acceptance === acceptance);
+    assert.equal(entry.status, 'test-present');
+    assert.equal(entry.testPath, testPath);
+  }
 });

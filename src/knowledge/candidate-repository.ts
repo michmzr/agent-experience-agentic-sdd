@@ -269,6 +269,7 @@ export class CandidateRepository {
       const instructionEvidence = new Map<string, readonly InstructionContextEvidence[]>();
       for (const row of rows) {
         if (!kinds.has(row.kind)) continue;
+        assertIdentifier(row.session_id);
         const evidenceRows = this.tableExists('operational_candidate_evidence')
           ? this.database.prepare('SELECT event_id, polarity FROM operational_candidate_evidence WHERE candidate_id = ? ORDER BY event_id')
               .all(row.id) as Array<{ event_id: string; polarity: string }>

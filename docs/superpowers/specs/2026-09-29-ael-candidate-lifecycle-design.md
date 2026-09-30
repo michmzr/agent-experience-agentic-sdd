@@ -6,6 +6,8 @@ Approved for implementation on 2026-09-30; drafted 2026-09-29. Change ID: `ACL`.
 
 The user authorized implementation on 2026-09-30; the delivery index records this decision. Existing approved behavior remains authoritative until the implementation passes its acceptance gates.
 
+Implementation checkpoint 2026-09-30: public candidate list, inspect, staged evidence-bound review and restart-safe backfill have tests. Persisted instruction directives and Git-tracked packageManager facts provide scoped verification witnesses. See the [requirement manifest](../../verification/2026-09-30-ael-requirement-traceability.json).
+
 ## Problem
 
 Operational candidates, manual-review candidates and retrievable knowledge use separate paths. A reproduced convention candidate appears in analysis but not lessons list. Legacy manual-review findings are all typed successful-workflow, independent of their actual evidence.
