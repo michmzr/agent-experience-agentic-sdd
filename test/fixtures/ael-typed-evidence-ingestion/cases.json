@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "producer": { "kind": "local-annotation", "version": "1", "namespace": "controlled-test" },
+  "repositoryId": "ati-repo",
+  "sessionId": "ati-session",
+  "contextRevision": "rev-1",
+  "records": [
+    {
+      "id": "verified-criterion",
+      "origin": "user-declared",
+      "kind": "task-verification",
+      "state": "succeeded",
+      "decisionKey": "decision-1",
+      "scopeKey": "task-1",
+      "reasonClass": "verification",
+      "operation": { "source": "codex", "sourceEventId": "ati-request" }
+    }
+  ]
+}

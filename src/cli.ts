@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 import { compareBaseline, currentBuildIdentity, runBaseline } from './benchmark/runner.js';
 
 import { defaultDatabasePath } from './storage/database.js';
+import { importTypedEvidence } from './evidence/import.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createAlignmentPlan, applyAlignmentPlan } from './installation/alignment.js';
 import { qualifyInstallation } from './installation/qualification.js';
@@ -380,6 +381,12 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json']);
     return service.sessionEvidence(rest[0]);
   }
+  if (command === 'evidence' && subcommand === 'import' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'input']);
+    const databasePath = parsed.options.has('data-dir')
+      ? join(requiredString(parsed.options, 'data-dir'), 'experience.sqlite') : defaultDatabasePath();
+    return importTypedEvidence(databasePath, requiredString(parsed.options, 'repository-id'), requiredString(parsed.options, 'input'));
+  }
   if (command === 'status-global' && subcommand === undefined && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository', 'schema-version']);
     const schemaVersion = optionalSchemaVersion(parsed.options); const repository = optionalRepositoryId(parsed.options);
@@ -650,6 +657,7 @@ function usage(): string {
     '  list records [--repository <path>|--repository-id <id>]',
     '  stats [--repository <path>|--repository-id <id>]',
     '  evidence session <session-id>',
+    '  evidence import --repository-id <id> --input <artifact.json> --json',
     '  capture drain',
     '  capture status',
     '  analysis run [--repository-id <id>]',
