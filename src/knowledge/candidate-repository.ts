@@ -9,6 +9,10 @@ import { canonicalCandidateIdentity, type CandidateIdentityInput } from './candi
 const kinds = new Set<LessonKind>(['failure', 'successful-workflow', 'project-fact', 'convention', 'tool-capability', 'environment-quirk', 'heuristic', 'preference']);
 const MAX_TEXT = 2_048;
 const BACKFILL_BATCH = 1_024;
+const pendingOperationalWhere = `FROM operational_candidates c JOIN operational_episodes e ON e.id = c.episode_id
+  WHERE e.repository_id = ? AND c.state = 'candidate' AND c.kind IN ('convention', 'successful-workflow')
+  AND NOT EXISTS (SELECT 1 FROM acl_candidate_origins o JOIN acl_candidates a ON a.id = o.candidate_id
+    WHERE o.source = 'operational' AND o.origin_id = c.id AND a.repository_id = e.repository_id)`;
 
 export interface CandidateRegistration extends CandidateIdentityInput {
   readonly source: 'operational' | 'manual-review';
@@ -25,6 +29,8 @@ export interface CandidateRecord {
   readonly applicability: CandidateIdentityInput['applicability'];
   readonly revision: number;
   readonly contradictionState: 'clear' | 'disputed';
+  readonly supersedesId?: string;
+  readonly supersededById?: string;
   readonly origins: readonly { readonly source: CandidateRegistration['source']; readonly originId: string;
     readonly sessionId?: string; readonly evidenceEventIds: readonly string[] }[];
 }
@@ -40,6 +46,7 @@ export interface VerifiedLocalEntry {
   readonly contradictionState: 'clear';
   readonly contextRevision: string;
   readonly verificationEvidenceId: string;
+  readonly supportingEvidenceIds: readonly string[];
   readonly operationSignature: string | null;
 }
 export interface ReviewRequiredRegistration {
@@ -70,11 +77,27 @@ export interface CandidateReviewWitness {
   readonly operationSignature?: string;
   readonly revalidatesCandidateId?: string;
 }
+export interface CandidateReviewHistoryEntry {
+  readonly from: CandidateRecord['state'];
+  readonly to: CandidateRecord['state'];
+  readonly evidenceId: string;
+  readonly actorId: string;
+  readonly reviewedAt: string;
+}
+export interface CandidateSupersessionRequest {
+  readonly repositoryId: string;
+  readonly priorCandidateId: string;
+  readonly replacement: CandidateRegistration;
+  readonly actorId: string;
+  readonly evidenceId: string;
+  readonly reviewedAt: string;
+}
 
 interface CandidateRow {
   id: string; repository_id: string; kind: LessonKind; state: CandidateRecord['state']; statement: string;
   applicability_json: string; revision: number; contradiction_state: CandidateRecord['contradictionState']; verified_at: string | null;
   proposition_key: string | null; procedure_key: string | null;
+  supersedes_id: string | null; superseded_by_id: string | null;
 }
 interface OperationalRow { id: string; session_id: string; kind: LessonKind; statement: string; }
 
@@ -130,10 +153,69 @@ export class CandidateRepository {
     });
     return this.inspect(request.repositoryId, request.candidateId)!;
   }
+  history(repositoryId: string, candidateId: string): readonly CandidateReviewHistoryEntry[] {
+    if (!this.inspect(repositoryId, candidateId)) return [];
+    const rows = this.database.prepare(`SELECT from_state, to_state, evidence_id, actor_id, reviewed_at
+      FROM acl_candidate_reviews WHERE candidate_id = ? ORDER BY rowid`).all(candidateId) as Array<{
+        from_state: CandidateRecord['state']; to_state: CandidateRecord['state']; evidence_id: string;
+        actor_id: string; reviewed_at: string }>;
+    return Object.freeze(rows.map((row) => Object.freeze({ from: row.from_state, to: row.to_state,
+      evidenceId: row.evidence_id, actorId: row.actor_id, reviewedAt: row.reviewed_at })));
+  }
+  supersede(request: CandidateSupersessionRequest, witness: CandidateReviewWitness): CandidateRecord {
+    assertIdentifier(request.repositoryId); assertIdentifier(request.priorCandidateId);
+    assertIdentifier(request.actorId); assertIdentifier(request.evidenceId); assertTimestamp(request.reviewedAt);
+    if (witness.id !== request.evidenceId || witness.repositoryId !== request.repositoryId ||
+      (witness.kind !== 'observation' && witness.kind !== 'task-verification')) {
+      throw new Error('Supersession requires scoped change evidence.');
+    }
+    let replacementId = '';
+    this.transaction(() => {
+      const prior = this.database.prepare('SELECT * FROM acl_candidates WHERE repository_id = ? AND id = ?')
+        .get(request.repositoryId, request.priorCandidateId) as unknown as CandidateRow | undefined;
+      if (!prior || !canTransition(prior.state, 'superseded')) throw new Error('Prior candidate cannot be superseded.');
+      if (request.replacement.repositoryId !== request.repositoryId || request.replacement.kind !== prior.kind ||
+        (request.replacement.propositionKey ?? null) !== prior.proposition_key) {
+        throw new Error('Successor candidate scope or proposition is incompatible.');
+      }
+      replacementId = canonicalCandidateIdentity({ ...request.replacement,
+        originId: `${request.replacement.source}:${request.replacement.originId}` });
+      if (replacementId === prior.id || this.database.prepare('SELECT 1 FROM acl_candidates WHERE id = ?').get(replacementId)) {
+        throw new Error('Successor candidate must have a new identity.');
+      }
+      this.insertCandidate(request.replacement);
+      this.database.prepare('UPDATE acl_candidates SET revision = ?, supersedes_id = ? WHERE id = ?')
+        .run(prior.revision + 1, prior.id, replacementId);
+      this.database.prepare(`UPDATE acl_candidates SET state = 'superseded', superseded_by_id = ?, verified_at = NULL WHERE id = ?`)
+        .run(replacementId, prior.id);
+      const reviewId = `acl-review:v1:${createHash('sha256').update(JSON.stringify([prior.id, request.evidenceId])).digest('hex')}`;
+      this.database.prepare(`INSERT INTO acl_candidate_reviews
+        (id, candidate_id, revision, from_state, to_state, actor_id, evidence_id, evidence_origin_id,
+         evidence_kind, verification_evidence_id, context_revision, operation_signature, reviewed_at)
+        VALUES (?, ?, ?, ?, 'superseded', ?, ?, ?, ?, NULL, NULL, NULL, ?)`)
+        .run(reviewId, prior.id, prior.revision, prior.state, request.actorId, request.evidenceId,
+          witness.originId, witness.kind, request.reviewedAt);
+    });
+    return this.inspect(request.repositoryId, replacementId)!;
+  }
   list(repositoryId: string): readonly CandidateRecord[] {
     assertIdentifier(repositoryId);
     const rows = this.database.prepare('SELECT * FROM acl_candidates WHERE repository_id = ? ORDER BY id').all(repositoryId) as unknown as CandidateRow[];
     return Object.freeze(rows.map((row) => this.toRecord(row)));
+  }
+  listAcceptedLocalEntries(repositoryId: string, applicability: CandidateIdentityInput['applicability']): readonly CandidateRecord[] {
+    assertIdentifier(repositoryId);
+    const rows = this.database.prepare(`SELECT * FROM acl_candidates WHERE repository_id = ?
+      AND state IN ('observed', 'confirmed', 'verified') AND contradiction_state = 'clear' ORDER BY id`)
+      .all(repositoryId) as unknown as CandidateRow[];
+    const contextConditions = new Set(applicability.conditions ?? []);
+    const qualifiedVerified = new Set(this.listVerifiedLocalEntries(repositoryId).map((entry) => entry.candidateId));
+    return Object.freeze(rows.filter((row) => {
+      if (row.state === 'verified' && !qualifiedVerified.has(row.id)) return false;
+      const scope = JSON.parse(row.applicability_json) as CandidateIdentityInput['applicability'];
+      if (scope.scope === 'subproject' && (applicability.scope !== 'subproject' || scope.path !== applicability.path)) return false;
+      return (scope.conditions ?? []).every((condition) => contextConditions.has(condition));
+    }).map((row) => this.toRecord(row)));
   }
   inspect(repositoryId: string, id: string): CandidateRecord | undefined {
     assertIdentifier(repositoryId); assertIdentifier(id);
@@ -156,6 +238,9 @@ export class CandidateRepository {
       applicability: JSON.parse(row.applicability_json) as CandidateIdentityInput['applicability'],
       state: 'verified' as const, verifiedAt: row.verified_at!, contradictionState: 'clear' as const,
       contextRevision: row.context_revision, verificationEvidenceId: row.verification_evidence_id,
+      supportingEvidenceIds: Object.freeze((this.database.prepare(`SELECT evidence_id FROM acl_candidate_reviews
+        WHERE candidate_id = ? AND revision = ? AND to_state IN ('observed', 'confirmed') ORDER BY rowid`)
+        .all(row.id, row.revision) as Array<{ evidence_id: string }>).map(({ evidence_id }) => evidence_id)),
       operationSignature: row.operation_signature })));
   }
   registerReviewRequired(input: ReviewRequiredRegistration): ReviewRequiredRecord {
@@ -176,11 +261,7 @@ export class CandidateRepository {
     assertIdentifier(repositoryId);
     if (!this.tableExists('operational_candidates') || !this.tableExists('operational_episodes')) return 0;
     return this.transaction(() => {
-      const rows = this.database.prepare(`SELECT c.id, e.session_id, c.kind, c.statement
-        FROM operational_candidates c JOIN operational_episodes e ON e.id = c.episode_id
-        WHERE e.repository_id = ? AND c.state = 'candidate' AND c.kind IN ('convention', 'successful-workflow')
-        AND NOT EXISTS (SELECT 1 FROM acl_candidate_origins o JOIN acl_candidates a ON a.id = o.candidate_id
-          WHERE o.source = 'operational' AND o.origin_id = c.id AND a.repository_id = e.repository_id)
+      const rows = this.database.prepare(`SELECT c.id, e.session_id, c.kind, c.statement ${pendingOperationalWhere}
         ORDER BY c.id LIMIT ?`).all(repositoryId, BACKFILL_BATCH) as unknown as OperationalRow[];
       for (const row of rows) {
         if (!kinds.has(row.kind)) continue;
@@ -194,6 +275,15 @@ export class CandidateRepository {
       }
       return rows.length;
     });
+  }
+  previewOperationalBackfill(repositoryId: string): { readonly pendingCount: number; readonly nextCursor: string | null } {
+    assertIdentifier(repositoryId);
+    if (!this.tableExists('operational_candidates') || !this.tableExists('operational_episodes')) {
+      return { pendingCount: 0, nextCursor: null };
+    }
+    const row = this.database.prepare(`SELECT COUNT(*) AS pending_count, MIN(c.id) AS next_cursor ${pendingOperationalWhere}`)
+      .get(repositoryId) as { pending_count: number; next_cursor: string | null };
+    return Object.freeze({ pendingCount: row.pending_count, nextCursor: row.next_cursor });
   }
 
   private validateReviewEvidence(row: CandidateRow, request: CandidateReviewRequest, witness: CandidateReviewWitness): void {
@@ -251,6 +341,7 @@ export class CandidateRepository {
       id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, kind TEXT NOT NULL,
       state TEXT NOT NULL CHECK(state IN ('candidate','observed','confirmed','verified','disputed','superseded','rejected','expired')),
       statement TEXT NOT NULL, applicability_json TEXT NOT NULL, proposition_key TEXT, procedure_key TEXT,
+      supersedes_id TEXT REFERENCES acl_candidates(id), superseded_by_id TEXT REFERENCES acl_candidates(id),
       revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
       contradiction_state TEXT NOT NULL DEFAULT 'clear' CHECK(contradiction_state IN ('clear','disputed')),
       verified_at TEXT
@@ -312,6 +403,8 @@ export class CandidateRepository {
     return Object.freeze({ id: row.id, repositoryId: row.repository_id, state: row.state, kind: row.kind,
       statement: row.statement, applicability: JSON.parse(row.applicability_json) as CandidateIdentityInput['applicability'],
       revision: row.revision, contradictionState: row.contradiction_state,
+      ...(row.supersedes_id === null ? {} : { supersedesId: row.supersedes_id }),
+      ...(row.superseded_by_id === null ? {} : { supersededById: row.superseded_by_id }),
       origins: Object.freeze(origins.map((origin) => Object.freeze({ source: origin.source, originId: origin.origin_id,
         ...(origin.session_id === null ? {} : { sessionId: origin.session_id }),
         evidenceEventIds: Object.freeze(JSON.parse(origin.evidence_json) as string[]) }))) });
