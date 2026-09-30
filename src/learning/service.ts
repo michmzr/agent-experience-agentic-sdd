@@ -5,7 +5,7 @@ import { validateNormalizedCaptureEvent } from '../capture/normalization.js';
 import { loadProjectSettings } from '../config/project-settings.js';
 import type { SessionId } from '../domain/types.js';
 import { resolveRepository } from '../repository/local-repository.js';
-import { readIndexedAnnotation } from '../evidence/import.js';
+import { annotationEvidenceId, readIndexedAnnotation } from '../evidence/import.js';
 import { ExperienceStore, type IndexedAnnotationEvidence } from '../storage/experience-store.js';
 import {
   createEpisodeEvidence,
@@ -171,7 +171,7 @@ export class OperationalLearningService {
         let episodeEvidence: readonly EpisodeEvidence[];
         try {
           episodeEvidence = mergeEpisodeEvidence(
-            [...episodeEvidenceFromCapture([...checkpoint.pendingEvents, ...range.events]),
+            [...(checkpoint.typedEvidence ?? []), ...episodeEvidenceFromCapture([...checkpoint.pendingEvents, ...range.events]),
               ...range.annotations.map(annotationEvidenceFromIndexed)], suppliedEvidence);
           result = this.detect({
             repositoryId: job.repositoryId,
@@ -264,16 +264,16 @@ function episodeEvidenceFromCapture(events: readonly CapturedEventRecord[]): rea
 
 function annotationEvidenceFromIndexed(indexed: IndexedAnnotationEvidence): EpisodeEvidence {
   const { record, contextRevision } = readIndexedAnnotation(indexed);
-  const id = `annotation-${createHash('sha256').update(JSON.stringify([
-    indexed.producerNamespace, indexed.repositoryId, indexed.sessionId, indexed.evidenceId
-  ])).digest('hex')}`;
+  const id = annotationEvidenceId(indexed.producerNamespace, indexed.repositoryId, indexed.sessionId, indexed.evidenceId);
   const decisionKey = `decision-${createHash('sha256').update(record.decisionKey).digest('hex')}`;
   const scopeKey = `scope-${createHash('sha256').update(JSON.stringify([
     indexed.repositoryId, contextRevision, record.scopeKey
   ])).digest('hex')}`;
   return createEpisodeEvidence({ id, kind: record.kind, state: record.state, origin: record.origin,
     decisionKey, scopeKey, reasonClass: record.reasonClass,
-    evidenceIds: [captureEvidenceId(record.operation.source, record.operation.sourceEventId)] });
+    evidenceIds: [captureEvidenceId(record.operation.source, record.operation.sourceEventId),
+      ...(record.relatedEvidenceIds ?? []).map((related) => annotationEvidenceId(indexed.producerNamespace,
+        indexed.repositoryId, indexed.sessionId, related))] });
 }
 
 function validateSuppliedEpisodeEvidence(supplied: readonly EpisodeEvidence[] | undefined): readonly EpisodeEvidence[] {

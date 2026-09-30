@@ -211,3 +211,87 @@ test('ATI-A6 pending annotation waits for its source and reconciliation restores
   assert.equal(JSON.parse(apply.stdout).added, 1);
   assert.equal(JSON.parse(runCli(['analysis', 'reconcile', '--repository-id', 'ati-repo', '--apply', '--data-dir', dataDir, '--json']).stdout).added, 0);
 });
+
+test('ATI-A3 explicit decision relation produces correction while changed context prevents repeated acceptance', () => {
+  const { dataDir, invoke } = fixture();
+  const base = example.records[0];
+  const records = [
+    { ...base, id: 'original', kind: 'user-instruction', state: 'observed', reasonClass: 'instruction' },
+    { ...base, id: 'changed', kind: 'user-instruction', state: 'observed', reasonClass: 'superseded', relatedEvidenceIds: ['original'] },
+    { ...base, id: 'closure', kind: 'task-transition', state: 'closed', reasonClass: 'verification' }
+  ];
+  const imported = invoke({ ...example, records });
+  assert.equal(imported.exitCode, 0, imported.stdout);
+  assert.equal(runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']).exitCode, 0);
+  const reported = runCli(['analysis', 'report', '--repository-id', 'ati-repo', '--schema-version', '2', '--data-dir', dataDir, '--json']);
+  assert.equal(reported.exitCode, 0, reported.stdout);
+  const episodes = JSON.parse(reported.stdout).typed.episodes as Array<{ kind: string; criterionState?: string }>;
+  assert.equal(episodes.some(({ kind }) => kind === 'correction'), true);
+  assert.equal(episodes.some(({ kind, criterionState }) => kind === 'verification-gap' && criterionState === 'unknown'), true);
+
+  const claim = { ...base, origin: 'agent-claimed', kind: 'agent-claim', state: 'succeeded', reasonClass: 'verification' };
+  assert.equal(invoke({ ...example, records: [{ ...claim, id: 'accept-one' }] }).exitCode, 0);
+  assert.equal(invoke({ ...example, contextRevision: 'new-context', records: [{ ...claim, id: 'accept-two' }] }).exitCode, 0);
+  assert.equal(runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']).exitCode, 0);
+  const after = runCli(['analysis', 'report', '--repository-id', 'ati-repo', '--schema-version', '2', '--data-dir', dataDir, '--json']);
+  assert.equal(after.exitCode, 0, after.stdout);
+  assert.equal((JSON.parse(after.stdout).typed.episodes as Array<{ kind: string }>).some(({ kind }) => kind === 'repeated-acceptance'), false);
+});
+
+test('ATI-A4 bounded decision relation survives three worker jobs and a reopened store', () => {
+  const { dataDir, databasePath, invoke } = fixture();
+  const base = example.records[0];
+  const records = [
+    { ...base, id: 'first-decision', kind: 'user-instruction', state: 'observed', reasonClass: 'instruction' },
+    { ...base, id: 'second-decision', kind: 'user-instruction', state: 'observed', reasonClass: 'superseded', relatedEvidenceIds: ['first-decision'] },
+    { ...base, id: 'late-closure', kind: 'task-transition', state: 'closed', reasonClass: 'verification' }
+  ];
+  for (const record of records) {
+    const imported = invoke({ ...example, records: [record] });
+    assert.equal(imported.exitCode, 0, imported.stdout);
+    const run = runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']);
+    assert.equal(run.exitCode, 0, run.stdout);
+  }
+  const reopened = new ExperienceStore(databasePath);
+  assert.equal(reopened.logicalEvidenceHighWater('ati-session' as SessionId), 4);
+  reopened.close();
+  const reported = runCli(['analysis', 'report', '--repository-id', 'ati-repo', '--schema-version', '2', '--data-dir', dataDir, '--json']);
+  assert.equal(reported.exitCode, 0, reported.stdout);
+  const episodes = JSON.parse(reported.stdout).typed.episodes as Array<{ kind: string }>;
+  assert.equal(episodes.some(({ kind }) => kind === 'correction'), true);
+  assert.equal(episodes.some(({ kind }) => kind === 'verification-gap'), true);
+});
+
+test('ATI-A3 unresolved decision links stay pending and cross-session links are rejected', () => {
+  const { databasePath, invoke } = fixture();
+  const base = example.records[0];
+  const changed = { ...base, id: 'linked-change', kind: 'user-instruction', state: 'observed',
+    reasonClass: 'superseded', relatedEvidenceIds: ['linked-original'] };
+  assert.equal(JSON.parse(invoke({ ...example, records: [changed] }).stdout).pending, 1);
+  const first = new DatabaseSync(databasePath, { readOnly: true });
+  assert.equal((first.prepare('SELECT COUNT(*) AS count FROM logical_annotation_evidence').get() as { count: number }).count, 0);
+  first.close();
+  const original = { ...base, id: 'linked-original', kind: 'user-instruction', state: 'observed', reasonClass: 'instruction' };
+  assert.equal(invoke({ ...example, records: [original] }).exitCode, 0);
+  assert.equal(JSON.parse(invoke({ ...example, records: [changed] }).stdout).indexed, 1);
+
+  const store = new ExperienceStore(databasePath);
+  store.appendIncremental({ session: { id: 'other-session' as SessionId, source: 'codex',
+    startedAt: '2026-09-30T10:00:02.000Z', repositoryId: 'ati-repo' as RepositoryId } });
+  store.appendIncremental({ event: normalizeMappedCapture({ source: 'codex', sourceEventId: 'other-request',
+    sessionId: 'other-session', phase: 'pre-action', occurredAt: '2026-09-30T10:00:03.000Z',
+    tool: 'shell', action: 'test', summary: 'Test.' }) });
+  store.close();
+  const foreign = invoke({ ...example, sessionId: 'other-session', records: [{ ...changed, id: 'foreign-change',
+    operation: { source: 'codex', sourceEventId: 'other-request' } }] });
+  assert.equal(foreign.exitCode, 1);
+  const last = new DatabaseSync(databasePath, { readOnly: true });
+  assert.equal((last.prepare("SELECT COUNT(*) AS count FROM imported_typed_evidence WHERE evidence_id = 'foreign-change'")
+    .get() as { count: number }).count, 0);
+  last.close();
+  const cycle = invoke({ ...example, records: [
+    { ...original, id: 'cycle-one', relatedEvidenceIds: ['cycle-two'] },
+    { ...original, id: 'cycle-two', relatedEvidenceIds: ['cycle-one'] }
+  ] });
+  assert.equal(cycle.exitCode, 1);
+});

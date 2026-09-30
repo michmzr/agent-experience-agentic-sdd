@@ -165,12 +165,57 @@ export class ImportedTypedEvidenceRepository {
         }
         return { record, payloadJson, digest, existing, resolution: own ? 'resolved' : 'pending' } as const;
       });
+      const batch = new Map(rows.map((row) => [row.record.id, row]));
+      const visited = new Set<string>();
+      const visiting = new Set<string>();
+      const visit = (id: string): void => {
+        if (visiting.has(id)) throw new TypeError('Annotation relation contains a cycle.');
+        if (visited.has(id)) return;
+        visiting.add(id);
+        for (const related of batch.get(id)?.record.relatedEvidenceIds ?? []) if (batch.has(related)) visit(related);
+        visiting.delete(id);
+        visited.add(id);
+      };
+      for (const id of batch.keys()) visit(id);
+      const resolvedRows = rows.map((row) => {
+        let resolution: 'resolved' | 'pending' = row.resolution;
+        for (const relatedId of row.record.relatedEvidenceIds ?? []) {
+          const sibling = batch.get(relatedId);
+          if (sibling) {
+            if (sibling.resolution !== 'resolved') resolution = 'pending';
+            continue;
+          }
+          const references = this.database.prepare(`SELECT repository_id, session_id, resolution FROM imported_typed_evidence
+            WHERE producer_namespace = ? AND evidence_id = ?`).all(artifact.producer.namespace, relatedId) as Array<{
+              repository_id: string; session_id: string; resolution: string;
+            }>;
+          if (references.some(({ repository_id, session_id }) => repository_id !== artifact.repositoryId || session_id !== artifact.sessionId)) {
+            throw new TypeError('Annotation relation crosses repository or session scope.');
+          }
+          if (!references.some(({ resolution: state }) => state === 'resolved')) resolution = 'pending';
+        }
+        return { ...row, resolution };
+      });
+      // A relation can point through another record in the same batch. Propagate pending
+      // state to a fixed point before any row is persisted or indexed.
+      let pendingChanged: boolean;
+      do {
+        pendingChanged = false;
+        for (const row of resolvedRows) {
+          if (row.resolution === 'pending') continue;
+          if ((row.record.relatedEvidenceIds ?? []).some((id) => resolvedRows.some((candidate) =>
+            candidate.record.id === id && candidate.resolution === 'pending'))) {
+            row.resolution = 'pending';
+            pendingChanged = true;
+          }
+        }
+      } while (pendingChanged);
       let retained = 0;
       let pending = 0;
       let indexed = 0;
       const retainedAt = this.now();
       assertCanonicalTimestamp(retainedAt);
-      for (const row of rows) {
+      for (const row of resolvedRows) {
         if (row.resolution === 'pending') pending++;
         if (row.existing) {
           this.database.prepare(`UPDATE imported_typed_evidence SET resolution = ? WHERE producer_namespace = ?

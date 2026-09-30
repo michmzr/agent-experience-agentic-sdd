@@ -1,4 +1,5 @@
 import { closeSync, openSync, readSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import type { AgentSource } from '../domain/types.js';
 import { containsCredentialMaterial } from '../privacy/structured-arguments.js';
 import { MAX_TYPED_IMPORT_BYTES, MAX_TYPED_IMPORT_RECORDS, type AnnotationKind, type AnnotationOrigin,
@@ -50,7 +51,7 @@ export function parseTypedAnnotationArtifact(input: string): TypedAnnotationArti
   const contextRevision = key(artifact.contextRevision);
   const seen = new Set<string>();
   const records = artifact.records.map((raw): TypedAnnotationRecord => {
-    const record = object(raw, ['id', 'origin', 'kind', 'state', 'decisionKey', 'scopeKey', 'reasonClass', 'operation']);
+    const record = object(raw, ['id', 'origin', 'kind', 'state', 'decisionKey', 'scopeKey', 'reasonClass', 'operation'], ['relatedEvidenceIds']);
     const id = key(record.id);
     if (seen.has(id)) throw new TypeError('Annotation artifact contains duplicate evidence identity.');
     seen.add(id);
@@ -65,9 +66,16 @@ export function parseTypedAnnotationArtifact(input: string): TypedAnnotationArti
     }
     const operation = object(record.operation, ['source', 'sourceEventId']);
     if (!sources.has(operation.source as AgentSource)) throw new TypeError('Annotation operation source is invalid.');
+    const relatedEvidenceIds = record.relatedEvidenceIds === undefined ? undefined : record.relatedEvidenceIds;
+    if (relatedEvidenceIds !== undefined && (!Array.isArray(relatedEvidenceIds) || relatedEvidenceIds.length > 16
+      || relatedEvidenceIds.some((value) => typeof value !== 'string' || value === id || !identifier.test(value)
+        || containsCredentialMaterial(value)) || new Set(relatedEvidenceIds).size !== relatedEvidenceIds.length)) {
+      throw new TypeError('Annotation related evidence is invalid.');
+    }
     return Object.freeze({ id, origin, kind, state, decisionKey: key(record.decisionKey), scopeKey: key(record.scopeKey),
       reasonClass: record.reasonClass as TypedAnnotationRecord['reasonClass'],
-      operation: Object.freeze({ source: operation.source as AgentSource, sourceEventId: key(operation.sourceEventId) }) });
+      operation: Object.freeze({ source: operation.source as AgentSource, sourceEventId: key(operation.sourceEventId) }),
+      ...(relatedEvidenceIds === undefined ? {} : { relatedEvidenceIds: Object.freeze(relatedEvidenceIds as string[]) }) });
   });
   return Object.freeze({ version: 1, producer: Object.freeze({ kind: 'local-annotation', version: producerVersion, namespace }),
     repositoryId, sessionId, contextRevision, records: Object.freeze(records) });
@@ -86,10 +94,14 @@ export function readIndexedAnnotation(input: {
   return Object.freeze({ record: artifact.records[0]!, contextRevision: artifact.contextRevision });
 }
 
-function object(value: unknown, keys: readonly string[]): Record<string, unknown> {
+export function annotationEvidenceId(namespace: string, repositoryId: string, sessionId: string, evidenceId: string): string {
+  return `annotation-${createHash('sha256').update(JSON.stringify([namespace, repositoryId, sessionId, evidenceId])).digest('hex')}`;
+}
+
+function object(value: unknown, keys: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Annotation object is invalid.');
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).length !== keys.length || keys.some((key) => !Object.hasOwn(record, key))) {
+  if (keys.some((key) => !Object.hasOwn(record, key)) || Object.keys(record).some((key) => !keys.includes(key) && !optional.includes(key))) {
     throw new TypeError('Annotation schema contains unknown or missing fields.');
   }
   return record;

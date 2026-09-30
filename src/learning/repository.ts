@@ -131,7 +131,7 @@ export interface AnalysisAdmissionOutcome { readonly job: AnalysisJob | undefine
 export interface AnalysisStream {
   readonly repositoryId: string; readonly sessionId: string; readonly detectorSetVersion: string;
   readonly committedHighWater: number; readonly processedHighWater: number;
-  readonly checkpoint: { readonly version: number; readonly pendingEvents: readonly unknown[] };
+  readonly checkpoint: { readonly version: number; readonly pendingEvents: readonly unknown[]; readonly typedEvidence?: readonly unknown[] };
 }
 export interface AnalysisJob {
   readonly id: string; readonly repositoryId: string; readonly sessionId: string; readonly detectorSetVersion: string;
@@ -1232,7 +1232,8 @@ function sqlFilters(filters: AnalysisFilters): { sql: string; values: string[] }
 
 function validateCheckpoint(checkpoint: AnalysisStream['checkpoint'], sessionId: string): string {
   if (!checkpoint || checkpoint.version !== 1 || !Array.isArray(checkpoint.pendingEvents) || checkpoint.pendingEvents.length > 128 ||
-    Object.keys(checkpoint).some((key) => key !== 'version' && key !== 'pendingEvents')) throw new TypeError('Detector checkpoint is invalid.');
+    (checkpoint.typedEvidence !== undefined && (!Array.isArray(checkpoint.typedEvidence) || checkpoint.typedEvidence.length > 128)) ||
+    Object.keys(checkpoint).some((key) => key !== 'version' && key !== 'pendingEvents' && key !== 'typedEvidence')) throw new TypeError('Detector checkpoint is invalid.');
   const identities = new Set<string>();
   const pendingEvents = checkpoint.pendingEvents.map((value) => {
     const event = validateNormalizedCaptureEvent(value as NormalizedCaptureEvent);
@@ -1240,7 +1241,8 @@ function validateCheckpoint(checkpoint: AnalysisStream['checkpoint'], sessionId:
     identities.add(event.id);
     return event;
   });
-  return JSON.stringify({ version: 1, pendingEvents });
+  const typedEvidence = checkpoint.typedEvidence?.map(createEpisodeEvidence);
+  return JSON.stringify({ version: 1, pendingEvents, ...(typedEvidence === undefined ? {} : { typedEvidence }) });
 }
 
 function freezeJson(value: unknown): unknown {

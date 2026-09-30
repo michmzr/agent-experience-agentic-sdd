@@ -29,6 +29,7 @@ export interface EpisodeEvidence {
 export interface DetectorCheckpoint {
   readonly version: 1;
   readonly pendingEvents: readonly CapturedEventRecord[];
+  readonly typedEvidence?: readonly EpisodeEvidence[];
 }
 
 export function emptyDetectorCheckpoint(): DetectorCheckpoint {
@@ -39,7 +40,8 @@ export function validateDetectorCheckpoint(value: unknown, sessionId: string): D
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Detector checkpoint is invalid.');
   const record = value as Record<string, unknown>;
   if (record.version !== 1 || !Array.isArray(record.pendingEvents) || record.pendingEvents.length > 128 ||
-    Object.keys(record).some((key) => key !== 'version' && key !== 'pendingEvents')) {
+    (record.typedEvidence !== undefined && (!Array.isArray(record.typedEvidence) || record.typedEvidence.length > 128)) ||
+    Object.keys(record).some((key) => key !== 'version' && key !== 'pendingEvents' && key !== 'typedEvidence')) {
     throw new TypeError('Detector checkpoint is invalid.');
   }
   const identities = new Set<string>();
@@ -50,7 +52,12 @@ export function validateDetectorCheckpoint(value: unknown, sessionId: string): D
     identities.add(event.id);
     return event;
   });
-  return Object.freeze({ version: 1, pendingEvents: Object.freeze(pendingEvents) });
+  const typedEvidence = record.typedEvidence === undefined ? undefined : (record.typedEvidence as EpisodeEvidence[]).map(createEpisodeEvidence);
+  if (typedEvidence && new Set(typedEvidence.map(({ id }) => id)).size !== typedEvidence.length) {
+    throw new TypeError('Detector checkpoint contains duplicate typed evidence identity.');
+  }
+  return Object.freeze({ version: 1, pendingEvents: Object.freeze(pendingEvents),
+    ...(typedEvidence === undefined ? {} : { typedEvidence: Object.freeze(typedEvidence) }) });
 }
 
 export interface AnalysisCoverage {

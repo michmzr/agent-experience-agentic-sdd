@@ -77,7 +77,9 @@ export function detectOperationalEpisodes(input: DetectorInput): DetectorResult 
   const typed = typedEpisodes(input);
   const checkpoint = validateDetectorCheckpoint({
     version: 1,
-    pendingEvents: repairs.pendingEvents.slice(-128)
+    pendingEvents: repairs.pendingEvents.slice(-128),
+    typedEvidence: [...new Map([...(previous.typedEvidence ?? []), ...(input.episodeEvidence ?? [])]
+      .filter(({ id }) => id.startsWith('annotation-')).map((item) => [item.id, item])).values()]
   }, input.sessionId);
   return Object.freeze({
     episodes: Object.freeze([...convention.episodes, ...repairs.episodes, ...typed.episodes].sort(byId)),

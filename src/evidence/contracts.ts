@@ -18,6 +18,7 @@ export interface TypedAnnotationRecord {
   readonly scopeKey: string;
   readonly reasonClass: 'failure' | 'instruction' | 'superseded' | 'verification';
   readonly operation: { readonly source: AgentSource; readonly sourceEventId: string };
+  readonly relatedEvidenceIds?: readonly string[];
 }
 
 export interface TypedAnnotationArtifact {
