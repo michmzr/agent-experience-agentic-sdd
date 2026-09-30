@@ -5,6 +5,10 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { loadProjectSettings } from '../src/config/project-settings.js';
 import { readProjectInstructionContext, readScopedToolConventions } from '../src/learning/project-conventions.js';
+import { OperationalLearningRepository } from '../src/learning/repository.js';
+import { OperationalLearningService } from '../src/learning/service.js';
+import { ExperienceStore } from '../src/storage/experience-store.js';
+import { initializeGitRepository } from './helpers/git-repository.js';
 
 test('ASC-A1 recognizes finite pnpm and uv directives without quoting, code or negation', () => {
   const root = mkdtempSync(join(tmpdir(), 'asc-grammar-'));
@@ -60,4 +64,47 @@ test('ASC-A2 rejects traversal, ambiguous mappings, and symlink escapes', () => 
     symlinkSync(outside, join(root, 'apps/escape'));
     save([{ ...valid, path: 'apps/escape' }]); assert.throws(() => loadProjectSettings(root), /symlink|scope/i);
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
+});
+
+test('ASC-A3 preserves the instruction revision and scoped evidence across edits and restart', () => {
+  const root = mkdtempSync(join(tmpdir(), 'asc-history-'));
+  const databasePath = join(root, 'experience.sqlite');
+  const project = join(root, 'project');
+  try {
+    mkdirSync(project); initializeGitRepository(project);
+    mkdirSync(join(project, '.ael')); mkdirSync(join(project, 'apps/mobile'), { recursive: true });
+    writeFileSync(join(project, '.ael/settings.json'), JSON.stringify({ version: 1, captureDeliveryDeadlineMs: 2000,
+      instructionScopes: [{ location: 'AGENTS.md', qualifier: 'mobile app', path: 'apps/mobile' }] }));
+    writeFileSync(join(project, 'AGENTS.md'), 'For mobile app, use pnpm (never npm).\n');
+    const store = new ExperienceStore(databasePath);
+    try {
+      store.registerRepository({ id: 'repo-1', root: project, observedAt: '2026-09-29T10:00:00.000Z' });
+      store.appendIncremental({ session: { id: 'old-session' as never, source: 'codex', startedAt: '2026-09-29T10:00:00.000Z', repositoryId: 'repo-1' as never } });
+    } finally { store.close(); }
+    assert.equal(new OperationalLearningService(databasePath).enqueueCommittedSession('repo-1', 'old-session'), true);
+    writeFileSync(join(project, 'AGENTS.md'), 'For mobile app, use uv rather than pip.\n');
+    const secondStore = new ExperienceStore(databasePath);
+    try { secondStore.appendIncremental({ session: { id: 'new-session' as never, source: 'codex', startedAt: '2026-09-29T11:00:00.000Z', repositoryId: 'repo-1' as never } }); }
+    finally { secondStore.close(); }
+    const restarted = new OperationalLearningService(databasePath);
+    assert.equal(restarted.enqueueCommittedSession('repo-1', 'old-session'), false);
+    assert.equal(restarted.enqueueCommittedSession('repo-1', 'new-session'), true);
+    const repository = new OperationalLearningRepository(databasePath);
+    try {
+      const old = repository.contextSnapshotFor('repo-1', 'old-session');
+      const current = repository.contextSnapshotFor('repo-1', 'new-session');
+      const scoped = (snapshot: unknown): readonly { tool: string; scopePath: string }[] | undefined =>
+        (snapshot as { scopedConventions?: readonly { tool: string; scopePath: string }[] } | undefined)?.scopedConventions;
+      assert.deepEqual(scoped(old)?.map(({ tool, scopePath }) => ({ tool, scopePath })), [{ tool: 'pnpm', scopePath: 'apps/mobile' }]);
+      assert.deepEqual(scoped(current)?.map(({ tool, scopePath }) => ({ tool, scopePath })), [{ tool: 'uv', scopePath: 'apps/mobile' }]);
+      const oldInstruction = old?.instructions.find(({ location }) => location === 'AGENTS.md');
+      const currentInstruction = current?.instructions.find(({ location }) => location === 'AGENTS.md');
+      assert.notEqual(oldInstruction?.digest, currentInstruction?.digest);
+      assert.equal(oldInstruction?.found, true);
+      assert.equal(oldInstruction?.delivered, 'unknown');
+      assert.equal(oldInstruction?.explicitlyRead, 'unknown');
+      assert.deepEqual(old?.conventions, []);
+      assert.deepEqual(current?.conventions, []);
+    } finally { repository.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

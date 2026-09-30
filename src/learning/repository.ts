@@ -16,7 +16,7 @@ import {
   type OperationalFinding
 } from './contracts.js';
 import { createTypedEpisode, createTypedFinding, type DerivedOperationalEpisode, type DerivedOperationalFinding } from './detectors.js';
-import type { InstructionContext, ProjectToolConvention } from './project-conventions.js';
+import type { InstructionContext, ProjectToolConvention, ScopedToolConvention } from './project-conventions.js';
 
 export const DETECTOR_SET_VERSION = 'm9-typed-evidence@1';
 // Legacy jobs were produced exclusively by this detector set, regardless of future defaults.
@@ -186,6 +186,7 @@ export type OperationalAnalysisStatus = AnalysisStatus;
 export interface OperationalContextSnapshot {
   readonly repositoryId: string; readonly sessionId: string; readonly repositoryFamilyKey: string; readonly worktreeKey: string;
   readonly instructions: readonly InstructionContext[]; readonly conventions: readonly ProjectToolConvention[];
+  readonly scopedConventions?: readonly ScopedToolConvention[];
   readonly sourceAgentKey?: string; readonly runKey?: string; readonly conversationKey?: string;
 }
 export interface OperationalLearningReport {
@@ -1289,5 +1290,6 @@ function reportPseudonym(secret: Uint8Array, category: 'evidence' | 'key' | 'rec
 function freezeContext(value: OperationalContextSnapshot): OperationalContextSnapshot {
   return Object.freeze({ ...value,
     instructions: Object.freeze(value.instructions.map((instruction) => Object.freeze({ ...instruction }))),
-    conventions: Object.freeze(value.conventions.map((convention) => Object.freeze({ ...convention }))) });
+    conventions: Object.freeze(value.conventions.map((convention) => Object.freeze({ ...convention }))),
+    ...(value.scopedConventions === undefined ? {} : { scopedConventions: Object.freeze(value.scopedConventions.map((convention) => Object.freeze({ ...convention }))) }) });
 }

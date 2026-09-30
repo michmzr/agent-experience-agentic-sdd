@@ -78,12 +78,12 @@ export class OperationalLearningService {
       const repository = new OperationalLearningRepository(this.databasePath);
       try {
         const local = resolveRepository(registration.root);
-        if (local) {
+        if (local && repository.contextSnapshotFor(repositoryId, sessionId) === undefined) {
           const settings = loadProjectSettings(local.root);
           const context = this.readContext(local.root, settings);
           repository.preserveContextSnapshot({ repositoryId, sessionId,
             repositoryFamilyKey: local.repositoryFamilyKey, worktreeKey: local.worktreeKey,
-            instructions: context.instructions, conventions: context.conventions,
+            instructions: context.instructions, conventions: context.conventions, scopedConventions: context.scopedConventions,
             ...lifecycleContext(store, sessionId, repository.contextSecret()) });
         }
         return repository.enqueueWithOutcome({ repositoryId, sessionId,
