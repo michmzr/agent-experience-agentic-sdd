@@ -73,6 +73,8 @@ export interface CandidateReviewWitness {
   readonly taskId?: string;
   readonly procedureKey?: string;
   readonly factKey?: string;
+  readonly propositionKey?: string;
+  readonly applicability?: CandidateIdentityInput['applicability'];
   readonly contextRevision?: string;
   readonly operationSignature?: string;
   readonly revalidatesCandidateId?: string;
@@ -323,10 +325,27 @@ export class CandidateRepository {
       if (!row.proposition_key || witness.factKey !== row.proposition_key) {
         throw new Error('Project fact witness does not match the proposition.');
       }
+      if (witness.kind === 'deterministic-fact') {
+        const candidateScope = JSON.parse(row.applicability_json) as CandidateIdentityInput['applicability'];
+        if (!witness.applicability || witness.applicability.scope !== candidateScope.scope ||
+          (witness.applicability.path ?? null) !== (candidateScope.path ?? null) ||
+          (witness.applicability.conditions?.length ?? 0) !== 0 ||
+          (candidateScope.conditions?.length ?? 0) !== 0) {
+          throw new Error('Project fact witness does not match scope.');
+        }
+      }
       return;
     }
     if (row.kind === 'convention') {
-      if (witness.kind !== 'instruction-context') throw new Error('Convention requires instruction context evidence.');
+      const candidateScope = JSON.parse(row.applicability_json) as CandidateIdentityInput['applicability'];
+      if (witness.kind !== 'instruction-context' || !row.proposition_key ||
+        witness.propositionKey !== row.proposition_key || !witness.applicability ||
+        witness.applicability.scope !== candidateScope.scope ||
+        (witness.applicability.path ?? null) !== (candidateScope.path ?? null) ||
+        (witness.applicability.conditions?.length ?? 0) !== 0 ||
+        (candidateScope.conditions?.length ?? 0) !== 0) {
+        throw new Error('Convention witness does not match proposition and scope.');
+      }
       return;
     }
     if (witness.kind !== 'task-verification' || !witness.taskId ||

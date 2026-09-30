@@ -2,12 +2,32 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
 import { annotationEvidenceId, readIndexedAnnotation } from '../evidence/import.js';
-import { validateProjectInstructionContext } from '../learning/project-conventions.js';
+import { validateProjectInstructionContext, type ProjectToolConvention, type ScopedToolConvention } from '../learning/project-conventions.js';
+import type { CandidateIdentityInput } from './candidate-identity.js';
 import type { CandidateReviewWitness } from './candidate-repository.js';
+import { resolvePackageManagerFact } from './package-manager-fact.js';
 
 const MAX_ANNOTATIONS_PER_SESSION = 10_000;
 const MAX_CONTEXT_BYTES = 128 * 1024;
 const identifier = /^[A-Za-z0-9._:@/-]{1,512}$/;
+
+type Applicability = CandidateIdentityInput['applicability'];
+export interface InstructionContextEvidence {
+  readonly id: string;
+  readonly propositionKey: string;
+  readonly contextRevision: string;
+  readonly applicability: Applicability;
+  readonly source: string;
+  readonly tool: 'pnpm' | 'uv';
+  readonly replaces: 'npm' | 'pip';
+}
+
+export function conventionPropositionKey(tool: 'pnpm' | 'uv', replaces: 'npm' | 'pip'): string {
+  if (!((tool === 'pnpm' && replaces === 'npm') || (tool === 'uv' && replaces === 'pip'))) {
+    throw new TypeError('Unsupported tool convention.');
+  }
+  return `tool-convention:${tool}-instead-of-${replaces}`;
+}
 
 /** Hash the exact persisted JSON text. Do not parse or reserialize it. */
 export function operationSignatureFromStoredJson(signatureJson: string): string {
@@ -43,8 +63,40 @@ export class SqliteCandidateEvidenceResolver {
 
   close(): void { this.database.close(); }
 
-  capabilities(): { readonly observation: 'supported'; readonly taskVerification: 'conditional'; readonly projectFact: 'unsupported' } {
-    return Object.freeze({ observation: 'supported', taskVerification: 'conditional', projectFact: 'unsupported' });
+  capabilities(): { readonly observation: 'supported'; readonly taskVerification: 'conditional'; readonly instructionContext: 'conditional'; readonly projectFact: 'conditional' } {
+    return Object.freeze({ observation: 'supported', taskVerification: 'conditional', instructionContext: 'conditional', projectFact: 'conditional' });
+  }
+
+  listInstructionContextEvidence(repositoryId: string): readonly InstructionContextEvidence[] {
+    if (!identifier.test(repositoryId) || !this.sessionBelongsTo(repositoryId) ||
+      !this.tableExists('capture_instruction_contexts')) return [];
+    const rows = this.database.prepare(`SELECT c.source, c.source_event_id, c.payload_json
+      FROM capture_instruction_contexts c JOIN sessions s ON s.id = c.session_id
+      WHERE c.session_id = ? AND c.repository_id = ? AND s.repository_id = ?
+      ORDER BY c.source, c.source_event_id LIMIT 10001`)
+      .all(this.sessionId, repositoryId, repositoryId) as Array<{
+        source: string; source_event_id: string; payload_json: string | null }>;
+    if (rows.length > 10000) return [];
+    const evidence: InstructionContextEvidence[] = [];
+    for (const row of rows) {
+      if (!row.payload_json || Buffer.byteLength(row.payload_json) > MAX_CONTEXT_BYTES) continue;
+      if (this.captureBySource(repositoryId, row.source, row.source_event_id)?.phase !== 'pre-action') continue;
+      let context: ReturnType<typeof validateProjectInstructionContext>;
+      try { context = validateProjectInstructionContext(JSON.parse(row.payload_json) as unknown); }
+      catch { continue; }
+      const directives: Array<{ convention: ProjectToolConvention | ScopedToolConvention; applicability: Applicability }> = [
+        ...context.conventions.map((convention) => ({ convention, applicability: { scope: 'repository' as const } })),
+        ...context.scopedConventions.map((convention) => ({ convention,
+          applicability: { scope: 'subproject' as const, path: convention.scopePath } })) ];
+      for (const { convention, applicability } of directives) {
+        const id = instructionEvidenceId(repositoryId, this.sessionId, row.source, row.source_event_id,
+          row.payload_json, convention, applicability);
+        evidence.push(Object.freeze({ id, propositionKey: conventionPropositionKey(convention.tool, convention.replaces),
+          contextRevision: `instruction:v1:${sha256(row.payload_json)}`,
+          applicability, source: convention.source, tool: convention.tool, replaces: convention.replaces }));
+      }
+    }
+    return Object.freeze(evidence);
   }
 
   resolve(repositoryId: string, evidenceId: string): CandidateReviewWitness | undefined {
@@ -54,7 +106,17 @@ export class SqliteCandidateEvidenceResolver {
     if (capture?.phase === 'pre-action') {
       return Object.freeze({ id: evidenceId, repositoryId, originId: this.sessionId, kind: 'observation' });
     }
-    return this.annotationWitness(repositoryId, evidenceId);
+    return this.instructionWitness(repositoryId, evidenceId)
+      ?? resolvePackageManagerFact(this.database, repositoryId, this.sessionId, evidenceId)
+      ?? this.annotationWitness(repositoryId, evidenceId);
+  }
+
+  private instructionWitness(repositoryId: string, evidenceId: string): CandidateReviewWitness | undefined {
+    const matches = this.listInstructionContextEvidence(repositoryId).filter((entry) => entry.id === evidenceId);
+    if (matches.length !== 1) return undefined;
+    const match = matches[0]!;
+    return Object.freeze({ id: evidenceId, repositoryId, originId: this.sessionId, kind: 'instruction-context',
+      propositionKey: match.propositionKey, applicability: match.applicability, contextRevision: match.contextRevision });
   }
 
   private sessionBelongsTo(repositoryId: string): boolean {
@@ -149,3 +211,9 @@ export class SqliteCandidateEvidenceResolver {
 }
 
 function sha256(value: string): string { return createHash('sha256').update(value).digest('hex'); }
+
+function instructionEvidenceId(repositoryId: string, sessionId: string, source: string, sourceEventId: string,
+  payloadJson: string, convention: ProjectToolConvention | ScopedToolConvention, applicability: Applicability): string {
+  return `instruction-witness:v1:${sha256(JSON.stringify([repositoryId, sessionId, source, sourceEventId,
+    sha256(payloadJson), convention.source, convention.digest, convention.tool, convention.replaces, applicability]))}`;
+}
