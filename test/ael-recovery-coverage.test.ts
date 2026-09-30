@@ -1,0 +1,100 @@
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import test from 'node:test';
+
+import { normalizeMappedCapture } from '../src/capture/normalization.js';
+import { CaptureSpool } from '../src/capture/spool.js';
+import { drainCaptureSpool } from '../src/capture/spool-drain.js';
+
+interface Case { readonly sessionId: string; readonly missingRequestId: string; readonly unrelatedRequestId: string; readonly resultId: string; readonly receivedAt: string; }
+const scenario = JSON.parse(readFileSync(join(process.cwd(), 'test/fixtures/ael-recovery-coverage/cases.json'), 'utf8')) as Case;
+
+test('ARC-A1 missing request waits without accumulating attempts and only its arrival opens a new generation', () => {
+  const root = mkdtempSync(join(tmpdir(), 'arc-a1-'));
+  const spoolPath = join(root, 'capture-spool.sqlite');
+  const databasePath = join(root, 'experience.sqlite');
+  mkdirSync(join(root, '.ael'));
+  writeFileSync(join(root, '.ael/settings.json'), '{"version":1,"captureDeliveryDeadlineMs":100}\n');
+  const spool = new CaptureSpool(spoolPath);
+  const event = (sourceEventId: string, phase: 'pre-action' | 'post-result', relatedEventId?: string) => normalizeMappedCapture({
+    source: 'codex', sourceEventId, sessionId: scenario.sessionId as never, phase,
+    occurredAt: '2026-09-29T08:01:00.000Z', tool: 'git', action: 'status', summary: 'Run git status.',
+    ...(relatedEventId === undefined ? {} : { relatedEventId, outcome: 'succeeded' as const })
+  });
+  try {
+    spool.admit({ kind: 'session-start', session: { id: scenario.sessionId as never, source: 'codex', startedAt: scenario.receivedAt } }, scenario.receivedAt);
+    const missing = spool.admit({ kind: 'technical', event: event(scenario.resultId, 'post-result', scenario.missingRequestId) }, scenario.receivedAt);
+    let drainSecond = 0;
+    const drain = () => {
+      const at = new Date(Date.parse('2026-09-29T08:02:00.000Z') + drainSecond++ * 1_000).toISOString();
+      return drainCaptureSpool({ databasePath, projectRoot: root, now: () => at });
+    };
+    drain();
+    for (let repeat = 0; repeat < 5; repeat += 1) drain();
+    const database = new DatabaseSync(spoolPath);
+    const attempts = database.prepare('SELECT attempts FROM records WHERE delivery_id = ?').get(missing.deliveryId) as { attempts: number };
+    assert.equal(attempts.attempts, 1);
+    const waiting = database.prepare('SELECT state, reason, generation FROM capture_recovery_state WHERE delivery_id = ?').get(missing.deliveryId) as { state: string; reason: string; generation: number };
+    assert.deepEqual({ ...waiting }, { state: 'waiting-dependency', reason: 'missing-request', generation: 1 });
+    spool.admit({ kind: 'technical', event: event(scenario.unrelatedRequestId, 'pre-action') }, scenario.receivedAt);
+    drain();
+    assert.deepEqual({ ...database.prepare('SELECT state, generation FROM capture_recovery_state WHERE delivery_id = ?').get(missing.deliveryId) }, { state: 'waiting-dependency', generation: 1 });
+    spool.admit({ kind: 'technical', event: event(scenario.missingRequestId, 'pre-action') }, scenario.receivedAt);
+    drain();
+    const eligible = database.prepare('SELECT state, generation FROM capture_recovery_state WHERE delivery_id = ?').get(missing.deliveryId) as { state: string; generation: number };
+    assert.deepEqual({ ...eligible }, { state: 'eligible', generation: 2 });
+    drain();
+    assert.equal(database.prepare('SELECT COUNT(*) AS count FROM records WHERE delivery_id = ?').get(missing.deliveryId)?.count, 0);
+    const completed = database.prepare('SELECT state, reason, generation, dependency_key FROM capture_recovery_state WHERE delivery_id = ?').get(missing.deliveryId) as { state: string; reason: string; generation: number; dependency_key: string | null };
+    assert.deepEqual({ ...completed }, { state: 'committed', reason: 'missing-request', generation: 2, dependency_key: null });
+    database.close();
+    assert.equal(spool.status().committed, 4);
+  } finally { spool.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('ARC-A1 transient attempts stop at four across restart and keep the record held', () => {
+  const root = mkdtempSync(join(tmpdir(), 'arc-a1-held-'));
+  const path = join(root, 'capture-spool.sqlite');
+  let spool = new CaptureSpool(path);
+  try {
+    const delivery = spool.admit({ kind: 'session-start', session: { id: 'arc-private-session' as never, source: 'codex', startedAt: scenario.receivedAt } }, scenario.receivedAt);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const at = new Date(Date.parse(scenario.receivedAt) + attempt * 1_000).toISOString();
+      assert.equal(spool.claim(at, 1).length, 1);
+      spool.retry(delivery.deliveryId, at, 'storage-unavailable');
+    }
+    spool.close();
+    spool = new CaptureSpool(path);
+    assert.equal(spool.claim('2026-09-29T08:10:00.000Z', 1).length, 0);
+    const database = new DatabaseSync(path, { readOnly: true });
+    try {
+      const recovery = database.prepare('SELECT state, reason, generation, attempts, dependency_key FROM capture_recovery_state WHERE delivery_id = ?').get(delivery.deliveryId) as { state: string; reason: string; generation: number; attempts: number; dependency_key: string | null };
+      assert.deepEqual({ ...recovery }, { state: 'held', reason: 'storage-unavailable', generation: 1, attempts: 4, dependency_key: null });
+      assert.equal(JSON.stringify(recovery).includes('arc-private-session'), false);
+      assert.equal((database.prepare('SELECT COUNT(*) AS count FROM records WHERE delivery_id = ?').get(delivery.deliveryId) as { count: number }).count, 1);
+    } finally { database.close(); }
+  } finally { spool.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('ARC-A1 expired worker leases consume the same four-attempt budget', () => {
+  const root = mkdtempSync(join(tmpdir(), 'arc-a1-lease-'));
+  const path = join(root, 'capture-spool.sqlite');
+  let spool = new CaptureSpool(path);
+  try {
+    const delivery = spool.admit({ kind: 'session-start', session: { id: 'arc-lease-session' as never, source: 'codex', startedAt: scenario.receivedAt } }, scenario.receivedAt);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      assert.equal(spool.claim(new Date(Date.parse(scenario.receivedAt) + attempt * 31_000).toISOString(), 1).length, 1);
+    }
+    spool.close();
+    spool = new CaptureSpool(path);
+    assert.equal(spool.claim('2026-09-29T08:05:00.000Z', 1).length, 0);
+    const database = new DatabaseSync(path, { readOnly: true });
+    try {
+      const recovery = database.prepare('SELECT state, attempts FROM capture_recovery_state WHERE delivery_id = ?').get(delivery.deliveryId) as { state: string; attempts: number };
+      assert.deepEqual({ ...recovery }, { state: 'held', attempts: 4 });
+    } finally { database.close(); }
+  } finally { spool.close(); rmSync(root, { recursive: true, force: true }); }
+});

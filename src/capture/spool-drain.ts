@@ -1,11 +1,12 @@
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 
 import { ExperienceStore } from '../storage/experience-store.js';
 import { loadProjectSettings } from '../config/project-settings.js';
 import { OperationalLearningRepository } from '../learning/repository.js';
 import { startAnalysisWorker, type AnalysisWorkerScheduler } from '../learning/worker-launcher.js';
-import { persistPassiveCapture } from './passive-service.js';
+import { persistPassiveCapture, type PassiveCaptureRecord } from './passive-service.js';
 import { CaptureSpool, type CaptureSpoolStatus } from './spool.js';
 
 export interface LearningAdmission {
@@ -42,21 +43,27 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
         const deadlineAt = new Date(Date.parse(claimed.admittedAt) + settings.captureDeliveryDeadlineMs).toISOString();
         if (Date.parse(observedAt) > Date.parse(deadlineAt)) spool.recordDelayedDelivery(claimed.deliveryId, deadlineAt, observedAt);
         try {
+          const dependency = missingDependency(store, input.databasePath, claimed.record);
+          if (dependency !== undefined) {
+            spool.waitForDependency(claimed.deliveryId, dependency.reason, dependency.source, dependency.id, input.now());
+            continue;
+          }
           persistPassiveCapture(store, claimed.record);
           const analysisAdmission = admitCommittedSession(store, claimed.record, input.learningAdmission);
           if (analysisAdmission.admitted) unacknowledgedAnalysisAdmissions.add(claimed.deliveryId);
+          releaseSatisfiedDependency(spool, claimed.record, input.now());
           spool.acknowledge(claimed.deliveryId, input.now());
           unacknowledgedAnalysisAdmissions.delete(claimed.deliveryId);
           captureAcknowledged = true;
           analysisWorkAdded ||= analysisAdmission.workAdded;
         } catch (error) {
-          if (isRetryableCaptureError(error)) spool.retry(claimed.deliveryId, input.now());
-          else if (error instanceof TypeError) spool.quarantine(claimed.deliveryId, 'CORRUPT', input.now());
-          else spool.retry(claimed.deliveryId, input.now());
+          if (error instanceof TypeError) spool.quarantine(claimed.deliveryId, 'CORRUPT', input.now());
+          else spool.retry(claimed.deliveryId, input.now(), 'storage-unavailable');
         }
       }
       const status = spool.status();
       if (status.pending === 0) break;
+      if (!spool.hasEligiblePending()) break;
       if (claimedRecords.length === 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     } while (Date.now() < idleDeadline);
     const status = spool.status();
@@ -125,6 +132,35 @@ function scheduleAnalysis(databasePath: string, now: () => string, schedule: Ana
   catch { onFailure(); }
 }
 
-function isRetryableCaptureError(error: unknown): boolean {
-  return error instanceof TypeError && /missing session|requires a new session record|existing related pre-action/i.test(error.message);
+function missingDependency(store: ExperienceStore, databasePath: string, record: PassiveCaptureRecord): { readonly reason: 'missing-session' | 'missing-request'; readonly source: 'codex' | 'cursor'; readonly id: string } | undefined {
+  if (record.kind === 'session-end' && store.loadSession(record.sessionId) === undefined) {
+    return supportedSource(record.source) === undefined ? undefined : { reason: 'missing-session', source: supportedSource(record.source)!, id: record.sessionId };
+  }
+  if (record.kind !== 'technical') return undefined;
+  const source = supportedSource(record.event.source);
+  if (source === undefined) return undefined;
+  if (record.session === undefined && store.loadSession(record.event.sessionId) === undefined) {
+    return { reason: 'missing-session', source, id: record.event.sessionId };
+  }
+  if (record.event.phase !== 'post-result' || record.event.relatedEventId === undefined) return undefined;
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const related = database.prepare("SELECT 1 FROM capture_events WHERE source = ? AND source_event_id = ? AND phase = 'pre-action' LIMIT 1")
+      .get(record.event.source, record.event.relatedEventId);
+    return related === undefined ? { reason: 'missing-request', source, id: record.event.relatedEventId } : undefined;
+  } finally { database.close(); }
+}
+
+function releaseSatisfiedDependency(spool: CaptureSpool, record: PassiveCaptureRecord, now: string): void {
+  if (record.kind === 'session-start') {
+    const source = supportedSource(record.session.source);
+    if (source !== undefined) spool.releaseDependency(source, record.session.id, now);
+  } else if (record.kind === 'technical' && record.event.phase === 'pre-action') {
+    const source = supportedSource(record.event.source);
+    if (source !== undefined) spool.releaseDependency(source, record.event.sourceEventId, now);
+  }
+}
+
+function supportedSource(source: string): 'codex' | 'cursor' | undefined {
+  return source === 'codex' || source === 'cursor' ? source : undefined;
 }

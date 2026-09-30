@@ -6,12 +6,14 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import type { PassiveCaptureRecord } from './passive-service.js';
+import type { CaptureRecoveryReason } from './contracts.js';
 
 const SPOOL_VERSION = 1;
 const ADMISSION_BUSY_TIMEOUT_MS = 100;
 const MAX_ACTIVE_RECORDS = 50_000;
 const MAX_ACTIVE_BYTES = 32 * 1024 * 1024;
 const MAX_RECEIPTS = 10_000;
+const MAX_AUTOMATIC_ATTEMPTS = 4;
 
 export interface SpoolAdmission {
   readonly status: 'admitted' | 'duplicate';
@@ -130,6 +132,15 @@ export class CaptureSpool {
         sequence INTEGER PRIMARY KEY, correlation_key TEXT NOT NULL, disposition TEXT NOT NULL CHECK (disposition IN ('accepted', 'duplicate', 'unsupported-tool', 'privacy-redaction', 'unsafe-normalization', 'malformed-envelope', 'admission-failure', 'delivery-retry', 'quarantine', 'legacy-unknown')),
         received_at TEXT NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS capture_recovery_state (
+        delivery_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL CHECK (state IN ('eligible', 'waiting-dependency', 'held', 'committed', 'quarantined')),
+        reason TEXT NOT NULL CHECK (reason IN ('malformed-record', 'unsupported-schema', 'missing-session', 'missing-request', 'lifecycle-conflict', 'conflicting-identity', 'storage-unavailable', 'unknown-legacy')),
+        generation INTEGER NOT NULL CHECK (generation >= 1),
+        attempts INTEGER NOT NULL CHECK (attempts >= 0),
+        dependency_key TEXT,
+        updated_at TEXT NOT NULL
+      ) STRICT;
       CREATE TABLE IF NOT EXISTS receipt_accounting (id INTEGER PRIMARY KEY CHECK (id = 1), state TEXT NOT NULL CHECK (state IN ('available', 'unavailable'))) STRICT;
       INSERT OR IGNORE INTO counters (id, admitted, committed, quarantined, failed_admission) VALUES (1, 0, 0, 0, 0);
       INSERT OR IGNORE INTO receipt_accounting (id, state) VALUES (1, 'available');
@@ -137,6 +148,11 @@ export class CaptureSpool {
     `);
     ensureDiagnosticColumns(this.#database);
     ensureReceiptColumns(this.#database);
+    if (this.#database.prepare(`SELECT 1 FROM records WHERE NOT EXISTS
+      (SELECT 1 FROM capture_recovery_state WHERE capture_recovery_state.delivery_id = records.delivery_id) LIMIT 1`).get() !== undefined) {
+      this.#database.prepare(`INSERT OR IGNORE INTO capture_recovery_state (delivery_id, state, reason, generation, attempts, updated_at)
+        SELECT delivery_id, 'eligible', 'unknown-legacy', 1, 0, admitted_at FROM records`).run();
+    }
   }
 
   recordReceipt(input: CaptureReceiptInput): CaptureReceipt {
@@ -210,6 +226,7 @@ export class CaptureSpool {
         VALUES (?, ?, ?, ?, 'pending', ?, ?)
       `).run(deliveryId, SPOOL_VERSION, payload, payloadBytes, admittedAt, admittedAt);
       this.#database.prepare('UPDATE counters SET admitted = admitted + 1 WHERE id = 1').run();
+      this.#database.prepare("INSERT INTO capture_recovery_state (delivery_id, state, reason, generation, attempts, updated_at) VALUES (?, 'eligible', 'unknown-legacy', 1, 0, ?)").run(deliveryId, admittedAt);
       if (transaction) this.#database.exec('COMMIT');
       return Object.freeze({ status: 'admitted', deliveryId });
     } catch (error) {
@@ -288,9 +305,13 @@ export class CaptureSpool {
         UPDATE records SET state = 'pending', lease_until = NULL
         WHERE state = 'claimed' AND lease_until <= ?
       `).run(now);
+      this.#database.prepare(`UPDATE capture_recovery_state SET state = 'held', reason = 'storage-unavailable', updated_at = ?
+        WHERE state = 'eligible' AND attempts >= ? AND delivery_id IN (SELECT delivery_id FROM records WHERE state = 'pending')`)
+        .run(now, MAX_AUTOMATIC_ATTEMPTS);
       const rows = this.#database.prepare(`
         SELECT delivery_id, version, payload, attempts, admitted_at
         FROM records WHERE state = 'pending' AND next_retry_at <= ?
+          AND EXISTS (SELECT 1 FROM capture_recovery_state recovery WHERE recovery.delivery_id = records.delivery_id AND recovery.state = 'eligible' AND recovery.attempts < ${MAX_AUTOMATIC_ATTEMPTS})
         ORDER BY admitted_at, delivery_id LIMIT ?
       `).all(now, limit) as Array<{ delivery_id: string; version: number; payload: string; attempts: number; admitted_at: string }>;
       const claimed: ClaimedSpoolRecord[] = [];
@@ -298,6 +319,8 @@ export class CaptureSpool {
         const record = parseRecord(row);
         if (record === undefined) {
           quarantineRow(this.#database, row.delivery_id, row.payload, row.version === SPOOL_VERSION ? 'CORRUPT' : 'UNSUPPORTED', now);
+          this.#database.prepare("UPDATE capture_recovery_state SET state = 'quarantined', reason = ?, updated_at = ? WHERE delivery_id = ?")
+            .run(row.version === SPOOL_VERSION ? 'malformed-record' : 'unsupported-schema', now, row.delivery_id);
           this.#writeReceipt({ source: sourceForPayload(row.payload) ?? 'codex', receivedAt: now, disposition: 'quarantine', correlationInput: row.delivery_id });
           continue;
         }
@@ -305,6 +328,7 @@ export class CaptureSpool {
           UPDATE records SET state = 'claimed', attempts = attempts + 1, lease_until = ?
           WHERE delivery_id = ? AND state = 'pending'
         `).run(leaseUntil, row.delivery_id);
+        this.#database.prepare('UPDATE capture_recovery_state SET attempts = attempts + 1, updated_at = ? WHERE delivery_id = ?').run(now, row.delivery_id);
         claimed.push(Object.freeze({ deliveryId: row.delivery_id, record, attempts: row.attempts + 1, admittedAt: row.admitted_at }));
       }
       this.#database.exec('COMMIT');
@@ -322,6 +346,8 @@ export class CaptureSpool {
       const result = this.#database.prepare("DELETE FROM records WHERE delivery_id = ? AND state = 'claimed'").run(deliveryId);
       if (result.changes === 1) {
         this.#database.prepare('UPDATE counters SET committed = committed + 1, latest_committed_at = CASE WHEN latest_delivery_id = ? THEN ? ELSE latest_committed_at END WHERE id = 1').run(deliveryId, committedAt);
+        this.#database.prepare("UPDATE capture_recovery_state SET state = 'committed', updated_at = ? WHERE delivery_id = ?").run(committedAt, deliveryId);
+        pruneRecoveryHistory(this.#database);
       }
       this.#database.exec('COMMIT');
     } catch (error) {
@@ -344,7 +370,7 @@ export class CaptureSpool {
     } catch (error) { rollback(this.#database); throw error; }
   }
 
-  retry(deliveryId: string, now: string): void {
+  retry(deliveryId: string, now: string, reason: CaptureRecoveryReason = 'storage-unavailable'): void {
     const row = this.#database.prepare('SELECT attempts, payload FROM records WHERE delivery_id = ? AND state = \'claimed\'').get(deliveryId) as { attempts?: number; payload?: string } | undefined;
     if (row?.attempts === undefined) return;
     const delay = Math.min(30_000, 100 * 2 ** Math.max(0, row.attempts - 1));
@@ -355,7 +381,12 @@ export class CaptureSpool {
         UPDATE records SET state = 'pending', lease_until = NULL, next_retry_at = ?
         WHERE delivery_id = ? AND state = 'claimed'
       `).run(nextRetryAt, deliveryId);
-      if (result.changes === 1) this.#writeReceipt({ source: sourceForPayload(row.payload) ?? 'codex', receivedAt: now, disposition: 'delivery-retry', correlationInput: deliveryId }, deliveryId);
+      if (result.changes === 1) {
+        this.#database.prepare(`UPDATE capture_recovery_state SET
+          state = CASE WHEN attempts >= ? THEN 'held' ELSE 'eligible' END,
+          reason = ?, updated_at = ? WHERE delivery_id = ?`).run(MAX_AUTOMATIC_ATTEMPTS, reason, now, deliveryId);
+        this.#writeReceipt({ source: sourceForPayload(row.payload) ?? 'codex', receivedAt: now, disposition: 'delivery-retry', correlationInput: deliveryId }, deliveryId);
+      }
       this.#database.exec('COMMIT');
     } catch (error) {
       rollback(this.#database);
@@ -364,13 +395,56 @@ export class CaptureSpool {
     }
   }
 
-  quarantine(deliveryId: string, code: SpoolQuarantineCode, now = new Date().toISOString()): void {
+  waitForDependency(deliveryId: string, reason: 'missing-session' | 'missing-request', source: 'codex' | 'cursor', dependencyId: string, now: string): void {
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const dependencyKey = this.#dependencyKey(source, dependencyId);
+      this.#database.prepare(`UPDATE capture_recovery_state SET state = 'waiting-dependency', reason = ?,
+        dependency_key = ?, updated_at = ? WHERE delivery_id = ? AND state = 'eligible'`)
+        .run(reason, dependencyKey, now, deliveryId);
+      this.#database.prepare("UPDATE records SET state = 'pending', lease_until = NULL WHERE delivery_id = ? AND state = 'claimed'").run(deliveryId);
+      this.#database.exec('COMMIT');
+    } catch (error) { rollback(this.#database); throw error; }
+  }
+
+  releaseDependency(source: 'codex' | 'cursor', dependencyId: string, now: string): number {
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const dependencyKey = this.#dependencyKey(source, dependencyId);
+      const rows = this.#database.prepare("SELECT delivery_id FROM capture_recovery_state WHERE state = 'waiting-dependency' AND dependency_key = ?").all(dependencyKey) as Array<{ delivery_id: string }>;
+      const nextRetryAt = new Date(Date.parse(now) + 100).toISOString();
+      for (const row of rows) {
+        this.#database.prepare("UPDATE capture_recovery_state SET state = 'eligible', generation = generation + 1, attempts = 0, dependency_key = NULL, updated_at = ? WHERE delivery_id = ?").run(now, row.delivery_id);
+        this.#database.prepare("UPDATE records SET next_retry_at = ? WHERE delivery_id = ? AND state = 'pending'").run(nextRetryAt, row.delivery_id);
+      }
+      this.#database.exec('COMMIT');
+      return rows.length;
+    } catch (error) { rollback(this.#database); throw error; }
+  }
+
+  hasEligiblePending(): boolean {
+    return this.#database.prepare("SELECT 1 FROM records JOIN capture_recovery_state USING (delivery_id) WHERE records.state = 'pending' AND capture_recovery_state.state = 'eligible' LIMIT 1").get() !== undefined;
+  }
+
+  #dependencyKey(source: 'codex' | 'cursor', dependencyId: string): string {
+    let row = this.#database.prepare('SELECT secret FROM receipt_secret WHERE id = 1').get() as { secret?: Uint8Array } | undefined;
+    if (row === undefined) {
+      this.#database.prepare('INSERT INTO receipt_secret (id, secret) VALUES (1, ?)').run(randomBytes(32));
+      row = this.#database.prepare('SELECT secret FROM receipt_secret WHERE id = 1').get() as { secret: Uint8Array };
+    }
+    if (row.secret === undefined) throw new TypeError('Recovery key is unavailable.');
+    return createHmac('sha256', row.secret).update('dependency\0').update(source).update('\0').update(dependencyId).digest('hex');
+  }
+
+  quarantine(deliveryId: string, code: SpoolQuarantineCode, now = new Date().toISOString(), reason: CaptureRecoveryReason = 'malformed-record'): void {
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       const row = this.#database.prepare('SELECT payload FROM records WHERE delivery_id = ?').get(deliveryId) as { payload?: string } | undefined;
       if (row?.payload !== undefined) {
         quarantineRow(this.#database, deliveryId, row.payload, code, now);
+        this.#database.prepare("UPDATE capture_recovery_state SET state = 'quarantined', reason = ?, updated_at = ? WHERE delivery_id = ?").run(reason, now, deliveryId);
         this.#writeReceipt({ source: sourceForPayload(row.payload) ?? 'codex', receivedAt: now, disposition: 'quarantine', correlationInput: deliveryId });
+        pruneRecoveryHistory(this.#database);
       }
       this.#database.exec('COMMIT');
     } catch (error) {
@@ -455,6 +529,11 @@ function ensureReceiptColumns(database: DatabaseSync): void {
     ] as const) if (!columns.has(name)) database.exec(`ALTER TABLE capture_receipts ADD COLUMN ${name} ${definition}`);
     database.exec('COMMIT');
   } catch (error) { rollback(database); throw error; }
+}
+
+function pruneRecoveryHistory(database: DatabaseSync): void {
+  database.prepare(`DELETE FROM capture_recovery_state WHERE delivery_id NOT IN (SELECT delivery_id FROM records)
+    AND rowid NOT IN (SELECT rowid FROM capture_recovery_state ORDER BY rowid DESC LIMIT 10000)`).run();
 }
 
 function rollback(database: DatabaseSync): void {

@@ -1,0 +1,7 @@
+{
+  "sessionId": "arc-a1-session",
+  "missingRequestId": "arc-a1-request:pre",
+  "unrelatedRequestId": "arc-a1-unrelated:pre",
+  "resultId": "arc-a1-request:post",
+  "receivedAt": "2026-09-29T08:00:00.000Z"
+}
