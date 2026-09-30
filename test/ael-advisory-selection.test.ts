@@ -17,6 +17,7 @@ const context = {
 
 test('AAP-A2 exact scope, lifecycle, freshness and bounded selection suppress ineligible advice', () => {
   assert.equal(selectLocalAdvice([entry], context).entries.length, 1);
+  assert.equal(selectLocalAdvice([{ ...entry, kind: 'project-fact', applicability: { scope: 'repository' } }], context).entries.length, 1);
   for (const changed of [
     { ...entry, repositoryId: 'repo-b' },
     { ...entry, applicability: { ...entry.applicability, path: 'package-b' } },

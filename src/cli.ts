@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { compareBaseline, currentBuildIdentity, runBaseline } from './benchmark/runner.js';
 import { AdvisoryConfigurationStore } from './advice/configuration.js';
+import { retrieveLocalAdvice, type AdviceRequest } from './advice/service.js';
 
 import { defaultDatabasePath } from './storage/database.js';
 import { importTypedEvidence } from './evidence/import.js';
@@ -65,7 +66,7 @@ export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workin
     const json = parsed.options.has('json');
     if (parsed.positionals[0] === 'installation') return { exitCode: 0, stdout: JSON.stringify(executeInstallation(parsed, options)) + '\n', stderr: '' };
     if (parsed.positionals[0] === 'benchmark') return success(executeBenchmark(parsed), json, parsed.positionals, options.humanOutput);
-    if (parsed.positionals[0] === 'advice') return success(executeAdvice(parsed), json, parsed.positionals, options.humanOutput);
+    if (parsed.positionals[0] === 'advice') return success(executeAdvice(parsed, options.workingDirectory), json, parsed.positionals, options.humanOutput);
     const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
     const value = execute(service, parsed, options);
     return success(value, json, parsed.positionals, options.humanOutput,
@@ -79,7 +80,7 @@ export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workin
   }
 }
 
-function executeAdvice(parsed: ParsedArguments): unknown {
+function executeAdvice(parsed: ParsedArguments, workingDirectory?: string): unknown {
   const [command, subcommand, ...rest] = parsed.positionals;
   if (command !== 'advice' || rest.length !== 0) throw invalidCommand(command);
   const dataDir = optionalString(parsed.options, 'data-dir') ?? dirname(defaultDatabasePath());
@@ -94,7 +95,45 @@ function executeAdvice(parsed: ParsedArguments): unknown {
     if (enabled !== 'true' && enabled !== 'false') throw new SyntaxError('--enabled must be true or false.');
     return store.setEnabled(requiredString(parsed.options, 'repository-id'), enabled === 'true');
   }
+  if (subcommand === 'retrieve') {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'input']);
+    const context = readAdviceContext(requiredString(parsed.options, 'input'));
+    return retrieveLocalAdvice(dataDir, workingDirectory ?? process.cwd(), context);
+  }
   throw invalidCommand(command);
+}
+
+function readAdviceContext(path: string): AdviceRequest {
+  const value = JSON.parse(readBoundedAdviceInput(path)) as Record<string, unknown>;
+  const required = ['repositoryId', 'sessionId', 'operationSignature', 'contextRevision', 'conditions', 'retrievalRef'];
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).some(key => ![...required, 'subproject'].includes(key))
+    || required.some(key => !(key in value))
+    || ['repositoryId', 'sessionId', 'operationSignature', 'contextRevision', 'retrievalRef'].some(key =>
+      typeof value[key] !== 'string' || !/^[A-Za-z0-9._:/-]{1,160}$/.test(value[key] as string))
+    || value.subproject !== undefined && (typeof value.subproject !== 'string'
+      || !/^[A-Za-z0-9._/-]{1,160}$/.test(value.subproject))
+    || !Array.isArray(value.conditions) || value.conditions.length > 32
+    || value.conditions.some(condition => typeof condition !== 'string' || !/^[A-Za-z0-9._:/-]{1,160}$/.test(condition))) {
+    throw new SyntaxError('Advice context is invalid.');
+  }
+  return value as unknown as AdviceRequest;
+}
+
+function readBoundedAdviceInput(path: string): string {
+  const maximumBytes = 16 * 1024;
+  const descriptor = openSync(path, 'r');
+  try {
+    const bytes = Buffer.alloc(maximumBytes + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = readSync(descriptor, bytes, length, bytes.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    if (length > maximumBytes) throw new SyntaxError('Advice context exceeds 16 KiB.');
+    return bytes.toString('utf8', 0, length);
+  } finally { closeSync(descriptor); }
 }
 
 export async function runCliAsync(args: string[], options: RunCliAsyncOptions = {}): Promise<CliResult> {
@@ -706,6 +745,7 @@ function usage(): string {
     '  benchmark compare --baseline <report.json> --candidate <report.json> --output <comparison.json>',
     '  advice configure --repository-id <id> --enabled true|false --json',
     '  advice status --repository-id <id> --json',
+    '  advice retrieve --input <context.json> --json',
     '  unregister [--repository-id <id>]',
     '  status [--repository <path>|--repository-id <id>] [--schema-version <2|3>]',
     '  status-global [--repository <path>|--repository-id <id>] [--schema-version <2|3>]',

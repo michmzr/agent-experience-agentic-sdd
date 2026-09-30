@@ -37,7 +37,7 @@ export function selectLocalAdvice(entries: readonly VerifiedAdviceEntry[], conte
       || entry.operationSignature !== context.operationSignature
       || entry.applicability.scope === 'subproject' && entry.applicability.path !== context.subproject
       || entry.applicability.scope !== 'repository' && entry.applicability.scope !== 'subproject'
-      || !entry.applicability.conditions?.every(condition => context.conditions.includes(condition))
+      || !(entry.applicability.conditions ?? []).every(condition => context.conditions.includes(condition))
       || entry.evidenceRefs.length === 0 || containsCredentialMaterial(entry.statement)) continue;
     const identity = `${entry.candidateId}\0${entry.revision}`;
     if (seen.has(identity)) continue;
