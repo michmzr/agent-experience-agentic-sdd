@@ -8,7 +8,7 @@ import { AdvisoryConfigurationStore } from '../src/advice/configuration.js';
 import { AdvisoryUsageStore } from '../src/advice/usage.js';
 import { runCli } from '../src/cli.js';
 import { CandidateRepository } from '../src/knowledge/candidate-repository.js';
-import { SqliteCandidateEvidenceResolver } from '../src/knowledge/evidence-resolver.js';
+import { conventionPropositionKey, SqliteCandidateEvidenceResolver } from '../src/knowledge/evidence-resolver.js';
 import { normalizeMappedCapture } from '../src/capture/normalization.js';
 import { annotationEvidenceId, importTypedEvidence } from '../src/evidence/import.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
@@ -39,9 +39,9 @@ test('AAP-A2 public retrieval reads only verified fresh knowledge in its actual 
   const repositoryId = resolveRepository(repositoryRoot)!.id;
   const database = new CandidateRepository(join(dataDir, 'experience.sqlite'));
   try {
-    const candidate = database.register({ repositoryId, kind: 'convention', statement: 'Run the scoped search command first.',
-      applicability: { scope: 'subproject', path: 'packages/app', conditions: ['task:change'] },
-      propositionKey: 'search-first', procedureKey: 'search', originId: 'session-a', source: 'manual-review' });
+    const candidate = database.register({ repositoryId, kind: 'convention', statement: 'Use pnpm in packages/app.',
+      applicability: { scope: 'subproject', path: 'packages/app' },
+      propositionKey: conventionPropositionKey('pnpm', 'npm'), originId: 'session-a', source: 'manual-review' });
     const review = { repositoryId, candidateId: candidate.id, actorId: 'reviewer', reviewedAt: '2026-09-30T10:00:00.000Z' };
     database.review({ ...review, target: 'observed', evidenceId: 'observed-a' },
       { id: 'observed-a', repositoryId, originId: 'session-a', kind: 'observation' });
@@ -49,13 +49,15 @@ test('AAP-A2 public retrieval reads only verified fresh knowledge in its actual 
       { id: 'confirmed-b', repositoryId, originId: 'session-b', kind: 'observation' });
     database.review({ ...review, target: 'verified', evidenceId: 'verified-c' },
       { id: 'verified-c', repositoryId, originId: 'session-c', kind: 'instruction-context',
-        contextRevision: 'agents-sha256:abc', operationSignature: 'operation:v1:search' });
+        propositionKey: conventionPropositionKey('pnpm', 'npm'),
+        applicability: { scope: 'subproject', path: 'packages/app' },
+        contextRevision: 'instruction:v1:abc', operationSignature: 'operation:v1:search' });
     assert.equal(runCli(['advice', 'configure', '--repository-id', repositoryId, '--enabled', 'true',
       '--data-dir', dataDir, '--json']).exitCode, 0);
     const inputPath = join(root, 'context.json');
     const context = { repositoryId, sessionId: 'session-b', subproject: 'packages/app',
-      operationSignature: 'operation:v1:search', contextRevision: 'agents-sha256:abc',
-      conditions: ['task:change'], retrievalRef: 'cli-call-b' };
+      operationSignature: 'operation:v1:search', contextRevision: 'instruction:v1:abc',
+      conditions: [], retrievalRef: 'cli-call-b' };
     const retrieve = (value: typeof context) => {
       writeFileSync(inputPath, JSON.stringify(value));
       return runCli(['advice', 'retrieve', '--input', inputPath, '--data-dir', dataDir, '--json'],
@@ -66,7 +68,7 @@ test('AAP-A2 public retrieval reads only verified fresh knowledge in its actual 
     const bundleId = first.entries[0].bundleId as string;
     assert.deepEqual(new AdvisoryUsageStore(join(dataDir, 'advice.sqlite')).facts(bundleId).map(fact => fact.kind), ['retrieved']);
     assert.equal(JSON.parse(retrieve({ ...context, subproject: 'packages/other' }).stdout).entries.length, 0);
-    assert.equal(JSON.parse(retrieve({ ...context, contextRevision: 'agents-sha256:old' }).stdout).entries.length, 0);
+    assert.equal(JSON.parse(retrieve({ ...context, contextRevision: 'instruction:v1:old' }).stdout).entries.length, 0);
     assert.equal(JSON.parse(retrieve({ ...context, repositoryId: 'other-repo' }).stdout).entries.length, 0);
     assert.equal(runCli(['advice', 'configure', '--repository-id', repositoryId, '--enabled', 'false',
       '--data-dir', dataDir, '--json']).exitCode, 0);

@@ -7,6 +7,8 @@ import { AdvisoryConfigurationStore } from './advice/configuration.js';
 import { retrieveLocalAdvice, type AdviceRequest } from './advice/service.js';
 import { recordLocalAdviceUsage, type AdviceUsageRequest } from './advice/record.js';
 import { CandidateRepository, type CandidateRecord } from './knowledge/candidate-repository.js';
+import { CandidateService } from './knowledge/candidate-service.js';
+import { SqliteCandidateEvidenceResolver } from './knowledge/evidence-resolver.js';
 
 import { defaultDatabasePath } from './storage/database.js';
 import { importTypedEvidence } from './evidence/import.js';
@@ -70,7 +72,7 @@ export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workin
     if (parsed.positionals[0] === 'installation') return { exitCode: 0, stdout: JSON.stringify(executeInstallation(parsed, options)) + '\n', stderr: '' };
     if (parsed.positionals[0] === 'benchmark') return success(executeBenchmark(parsed), json, parsed.positionals, options.humanOutput);
     if (parsed.positionals[0] === 'advice') return success(executeAdvice(parsed, options.workingDirectory), json, parsed.positionals, options.humanOutput);
-    if (parsed.positionals[0] === 'candidates') return success(executeCandidates(parsed), json, parsed.positionals, options.humanOutput);
+    if (parsed.positionals[0] === 'candidates') return success(executeCandidates(parsed, options.workingDirectory), json, parsed.positionals, options.humanOutput);
     const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
     const value = execute(service, parsed, options);
     return success(value, json, parsed.positionals, options.humanOutput,
@@ -157,7 +159,7 @@ function readBoundedAdviceInput(path: string): string {
   } finally { closeSync(descriptor); }
 }
 
-function executeCandidates(parsed: ParsedArguments): unknown {
+function executeCandidates(parsed: ParsedArguments, workingDirectory?: string): unknown {
   const [, subcommand, ...rest] = parsed.positionals;
   const repositoryId = requiredString(parsed.options, 'repository-id');
   const dataDir = optionalString(parsed.options, 'data-dir') ?? dirname(defaultDatabasePath());
@@ -187,7 +189,56 @@ function executeCandidates(parsed: ParsedArguments): unknown {
       return Object.freeze({ ...publicCandidate(candidate), history: Object.freeze(history) });
     } finally { repository.close(); }
   }
+  if (subcommand === 'review' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'input']);
+    if (resolveCliContext(workingDirectory ?? process.cwd())?.id !== repositoryId) {
+      throw new DomainError('INVALID_SCOPE', 'Candidate review repository scope is invalid.');
+    }
+    if (!existsSync(databasePath)) throw new DomainError('NOT_FOUND', 'Candidate evidence was not found.');
+    const input = readCandidateReviewInput(requiredString(parsed.options, 'input'));
+    const repository = new CandidateRepository(databasePath);
+    let resolver: SqliteCandidateEvidenceResolver | undefined;
+    try {
+      resolver = new SqliteCandidateEvidenceResolver(databasePath, input.sessionId);
+      const candidate = new CandidateService(repository, resolver).review({
+        repositoryId, candidateId: input.candidateId, target: input.target,
+        actorId: input.actorId, evidenceId: input.evidenceId, reviewedAt: input.reviewedAt
+      });
+      return publicCandidate(candidate);
+    } finally { resolver?.close(); repository.close(); }
+  }
+  if (subcommand === 'backfill' && (rest[0] === 'preview' || rest[0] === 'apply') && rest.length === 1) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id']);
+    if (resolveCliContext(workingDirectory ?? process.cwd())?.id !== repositoryId) {
+      throw new DomainError('INVALID_SCOPE', 'Candidate backfill repository scope is invalid.');
+    }
+    if (!existsSync(databasePath)) return Object.freeze({ processed: 0, pendingCount: 0, nextCursor: null });
+    const repository = new CandidateRepository(databasePath);
+    try {
+      const service = new CandidateService(repository);
+      const processed = rest[0] === 'apply' ? service.backfillOperational(repositoryId) : 0;
+      return Object.freeze({ processed, ...service.previewOperationalBackfill(repositoryId) });
+    } finally { repository.close(); }
+  }
   throw invalidCommand('candidates');
+}
+
+function readCandidateReviewInput(path: string): {
+  readonly candidateId: string; readonly sessionId: string; readonly target: CandidateRecord['state'];
+  readonly actorId: string; readonly evidenceId: string; readonly reviewedAt: string
+} {
+  const value = JSON.parse(readBoundedAdviceInput(path)) as Record<string, unknown>;
+  const fields = ['candidateId', 'sessionId', 'target', 'actorId', 'evidenceId', 'reviewedAt'];
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).length !== fields.length
+    || fields.some(field => typeof value[field] !== 'string')
+    || ['candidateId', 'sessionId', 'actorId', 'evidenceId'].some(field =>
+      !/^[A-Za-z0-9._:@/-]{1,512}$/.test(value[field] as string))
+    || !states.has(value.target as KnowledgeState)
+    || !Number.isFinite(Date.parse(value.reviewedAt as string))) {
+    throw new SyntaxError('Candidate review input is invalid.');
+  }
+  return value as unknown as ReturnType<typeof readCandidateReviewInput>;
 }
 
 function publicCandidate(candidate: CandidateRecord) {
@@ -818,6 +869,8 @@ function usage(): string {
     '  advice record --input <usage.json> --json',
     '  candidates list --repository-id <id> [--state <state>] --json',
     '  candidates inspect <id> --repository-id <id> --json',
+    '  candidates review --repository-id <id> --input <review.json> --json',
+    '  candidates backfill preview|apply --repository-id <id> --json',
     '  unregister [--repository-id <id>]',
     '  status [--repository <path>|--repository-id <id>] [--schema-version <2|3>]',
     '  status-global [--repository <path>|--repository-id <id>] [--schema-version <2|3>]',
