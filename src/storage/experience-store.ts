@@ -668,28 +668,35 @@ export class ExperienceStore {
       repositoryId: row.repository_id, sessionId: row.session_id, payloadJson: row.payload_json });
   }
 
-  loadPriorScopedClaim(repositoryId: string, id: SessionId, producerNamespace: string,
-    contextRevision: string, decisionKey: string, scopeKey: string, beforeOrdinal: number): IndexedAnnotationEvidence | undefined {
-    if (!Number.isSafeInteger(beforeOrdinal) || beforeOrdinal < 0) throw new TypeError('Annotation lookback cursor is invalid.');
-    const row = this.database.prepare(`SELECT a.producer_namespace, a.evidence_id, a.repository_id,
+  loadPriorScopedClaimsPage(repositoryId: string, id: SessionId, producerNamespace: string,
+    contextRevision: string, decisionKey: string, scopeKey: string, afterOrdinal: number,
+    beforeOrdinal: number, limit: number): { readonly annotations: readonly IndexedAnnotationEvidence[];
+      readonly nextCursor?: number } {
+    if (!Number.isSafeInteger(afterOrdinal) || afterOrdinal < 0 || !Number.isSafeInteger(beforeOrdinal)
+      || beforeOrdinal < afterOrdinal || !Number.isSafeInteger(limit) || limit < 1 || limit > 128) {
+      throw new TypeError('Annotation lookback cursor or page limit is invalid.');
+    }
+    const rows = this.database.prepare(`SELECT a.ordinal, a.producer_namespace, a.evidence_id, a.repository_id,
       a.session_id, i.payload_json, i.content_digest FROM logical_annotation_evidence a
       INDEXED BY logical_annotation_relation_scope
       JOIN imported_typed_evidence i ON i.producer_namespace = a.producer_namespace
         AND i.repository_id = a.repository_id AND i.session_id = a.session_id AND i.evidence_id = a.evidence_id
       WHERE a.repository_id = ? AND a.session_id = ? AND a.producer_namespace = ?
         AND a.context_revision = ? AND a.kind = 'agent-claim' AND a.decision_key = ? AND a.scope_key = ?
-        AND a.ordinal <= ? AND i.resolution = 'resolved'
-      ORDER BY a.ordinal LIMIT 1`)
-      .get(repositoryId, id, producerNamespace, contextRevision, decisionKey, scopeKey, beforeOrdinal) as {
-        producer_namespace: string; evidence_id: string; repository_id: string; session_id: string;
-        payload_json: string; content_digest: string;
-      } | undefined;
-    if (!row) return undefined;
-    if (createHash('sha256').update(row.payload_json).digest('hex') !== row.content_digest) {
-      throw new Error('Indexed annotation content is not immutable.');
+        AND a.ordinal > ? AND a.ordinal <= ? AND i.resolution = 'resolved'
+      ORDER BY a.ordinal LIMIT ?`)
+      .all(repositoryId, id, producerNamespace, contextRevision, decisionKey, scopeKey,
+        afterOrdinal, beforeOrdinal, limit) as Array<{ ordinal: number; producer_namespace: string; evidence_id: string;
+          repository_id: string; session_id: string; payload_json: string; content_digest: string }>;
+    for (const row of rows) {
+      if (createHash('sha256').update(row.payload_json).digest('hex') !== row.content_digest) {
+        throw new Error('Indexed annotation content is not immutable.');
+      }
     }
-    return Object.freeze({ producerNamespace: row.producer_namespace, evidenceId: row.evidence_id,
-      repositoryId: row.repository_id, sessionId: row.session_id, payloadJson: row.payload_json });
+    return Object.freeze({ annotations: Object.freeze(rows.map((row) => Object.freeze({
+      producerNamespace: row.producer_namespace, evidenceId: row.evidence_id,
+      repositoryId: row.repository_id, sessionId: row.session_id, payloadJson: row.payload_json }))),
+    ...(rows.length === limit ? { nextCursor: rows.at(-1)!.ordinal } : {}) });
   }
 
   logicalEvidenceCoverage(id: SessionId): { readonly indexed: number; readonly unindexed: number; readonly conflicts: number } {

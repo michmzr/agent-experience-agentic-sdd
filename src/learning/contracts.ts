@@ -31,6 +31,7 @@ export interface DetectorCheckpoint {
   readonly pendingEvents: readonly CapturedEventRecord[];
   readonly typedEvidence?: readonly EpisodeEvidence[];
   readonly relationCursor?: number;
+  readonly claimCursor?: number;
 }
 
 export function emptyDetectorCheckpoint(): DetectorCheckpoint {
@@ -43,7 +44,10 @@ export function validateDetectorCheckpoint(value: unknown, sessionId: string): D
   if (record.version !== 1 || !Array.isArray(record.pendingEvents) || record.pendingEvents.length > 128 ||
     (record.typedEvidence !== undefined && (!Array.isArray(record.typedEvidence) || record.typedEvidence.length > 128)) ||
     (record.relationCursor !== undefined && (!Number.isSafeInteger(record.relationCursor) || (record.relationCursor as number) < 0)) ||
-    Object.keys(record).some((key) => key !== 'version' && key !== 'pendingEvents' && key !== 'typedEvidence' && key !== 'relationCursor')) {
+    (record.claimCursor !== undefined && (!Number.isSafeInteger(record.claimCursor) || (record.claimCursor as number) < 0
+      || record.relationCursor === undefined)) ||
+    Object.keys(record).some((key) => key !== 'version' && key !== 'pendingEvents' && key !== 'typedEvidence'
+      && key !== 'relationCursor' && key !== 'claimCursor')) {
     throw new TypeError('Detector checkpoint is invalid.');
   }
   const identities = new Set<string>();
@@ -60,7 +64,8 @@ export function validateDetectorCheckpoint(value: unknown, sessionId: string): D
   }
   return Object.freeze({ version: 1, pendingEvents: Object.freeze(pendingEvents),
     ...(typedEvidence === undefined ? {} : { typedEvidence: Object.freeze(typedEvidence) }),
-    ...(record.relationCursor === undefined ? {} : { relationCursor: record.relationCursor as number }) });
+    ...(record.relationCursor === undefined ? {} : { relationCursor: record.relationCursor as number }),
+    ...(record.claimCursor === undefined ? {} : { claimCursor: record.claimCursor as number }) });
 }
 
 export interface AnalysisCoverage {

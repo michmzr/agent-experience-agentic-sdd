@@ -171,10 +171,12 @@ export class OperationalLearningService {
         let result;
         let episodeEvidence: readonly EpisodeEvidence[];
         let relationCursor: number | undefined;
+        let claimCursor: number | undefined;
         try {
           const relationPage = loadRelatedAnnotationPage(store, job.repositoryId, job.sessionId as SessionId,
-            job.inputLowWater, range.annotations, checkpoint.relationCursor ?? 0);
+            job.inputLowWater, range.annotations, checkpoint.relationCursor ?? 0, checkpoint.claimCursor ?? 0);
           relationCursor = relationPage.nextCursor;
+          claimCursor = relationPage.nextClaimCursor;
           episodeEvidence = mergeEpisodeEvidence(
             [...(checkpoint.typedEvidence ?? []), ...episodeEvidenceFromCapture([...checkpoint.pendingEvents, ...range.events]),
               ...range.annotations.map(annotationEvidenceFromIndexed),
@@ -185,7 +187,9 @@ export class OperationalLearningService {
             events: range.events,
             conventions,
             checkpoint,
-            episodeEvidence
+            episodeEvidence,
+            currentTypedEvidenceIds: range.annotations.map((indexed) =>
+              annotationEvidenceFromIndexed(indexed).id)
           });
         } catch {
           const elapsedMs = this.monotonicNow() - startedAt;
@@ -204,7 +208,8 @@ export class OperationalLearningService {
             ownerId, attempt: job.attempts, processedHighWater,
             checkpoint: validateDetectorCheckpoint({ ...result.checkpoint,
               ...(relationCursor === undefined ? {} : { pendingEvents: checkpoint.pendingEvents }),
-              ...(relationCursor === undefined ? {} : { relationCursor }) }, job.sessionId),
+              ...(relationCursor === undefined ? {} : { relationCursor }),
+              ...(claimCursor === undefined ? {} : { claimCursor }) }, job.sessionId),
             metrics: { eventsLoaded: range.events.length + range.annotations.length, findings: result.findings.length, elapsedMs },
             result: { ...result, episodeEvidence, coverage }
           });
@@ -287,8 +292,8 @@ function annotationEvidenceFromIndexed(indexed: IndexedAnnotationEvidence): Epis
 }
 
 function loadRelatedAnnotationPage(store: ExperienceStore, repositoryId: string, sessionId: SessionId,
-  beforeOrdinal: number, current: readonly IndexedAnnotationEvidence[], after: number): {
-    readonly evidence: readonly EpisodeEvidence[]; readonly nextCursor?: number;
+  beforeOrdinal: number, current: readonly IndexedAnnotationEvidence[], after: number, claimAfterOrdinal: number): {
+    readonly evidence: readonly EpisodeEvidence[]; readonly nextCursor?: number; readonly nextClaimCursor?: number;
   } {
   type Lookup = { readonly kind: 'identity'; readonly namespace: string; readonly evidenceId: string } |
     { readonly kind: 'claim'; readonly namespace: string; readonly contextRevision: string;
@@ -308,16 +313,31 @@ function loadRelatedAnnotationPage(store: ExperienceStore, repositoryId: string,
   }
   const ordered = [...keys.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, value]) => value);
   if (after > ordered.length) throw new TypeError('Annotation relation continuation cursor is invalid.');
-  const page = ordered.slice(after, after + RELATION_LOOKBACK_PAGE);
-  const evidence = page.flatMap((lookup) => {
-    const indexed = lookup.kind === 'identity'
-      ? store.loadIndexedAnnotationByIdentity(repositoryId, sessionId, lookup.namespace, lookup.evidenceId, beforeOrdinal)
-      : store.loadPriorScopedClaim(repositoryId, sessionId, lookup.namespace, lookup.contextRevision,
-        lookup.decisionKey, lookup.scopeKey, beforeOrdinal);
-    return indexed === undefined ? [] : [annotationEvidenceFromIndexed(indexed)];
-  });
-  const nextCursor = after + page.length < ordered.length ? after + page.length : undefined;
-  return Object.freeze({ evidence: Object.freeze(evidence), ...(nextCursor === undefined ? {} : { nextCursor }) });
+  let index = after;
+  let remaining = RELATION_LOOKBACK_PAGE;
+  const evidence: EpisodeEvidence[] = [];
+  while (index < ordered.length && remaining > 0) {
+    const lookup = ordered[index]!;
+    if (lookup.kind === 'identity') {
+      const indexed = store.loadIndexedAnnotationByIdentity(repositoryId, sessionId,
+        lookup.namespace, lookup.evidenceId, beforeOrdinal);
+      if (indexed) evidence.push(annotationEvidenceFromIndexed(indexed));
+      remaining--;
+      index++;
+      claimAfterOrdinal = 0;
+      continue;
+    }
+    const page = store.loadPriorScopedClaimsPage(repositoryId, sessionId, lookup.namespace,
+      lookup.contextRevision, lookup.decisionKey, lookup.scopeKey, claimAfterOrdinal, beforeOrdinal, remaining);
+    evidence.push(...page.annotations.map(annotationEvidenceFromIndexed));
+    remaining -= Math.max(1, page.annotations.length);
+    if (page.nextCursor !== undefined) {
+      return Object.freeze({ evidence: Object.freeze(evidence), nextCursor: index, nextClaimCursor: page.nextCursor });
+    }
+    index++;
+    claimAfterOrdinal = 0;
+  }
+  return Object.freeze({ evidence: Object.freeze(evidence), ...(index < ordered.length ? { nextCursor: index } : {}) });
 }
 
 function validateSuppliedEpisodeEvidence(supplied: readonly EpisodeEvidence[] | undefined): readonly EpisodeEvidence[] {

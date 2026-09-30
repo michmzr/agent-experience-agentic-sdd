@@ -132,7 +132,7 @@ export interface AnalysisStream {
   readonly repositoryId: string; readonly sessionId: string; readonly detectorSetVersion: string;
   readonly committedHighWater: number; readonly processedHighWater: number;
   readonly checkpoint: { readonly version: number; readonly pendingEvents: readonly unknown[];
-    readonly typedEvidence?: readonly unknown[]; readonly relationCursor?: number };
+    readonly typedEvidence?: readonly unknown[]; readonly relationCursor?: number; readonly claimCursor?: number };
 }
 export interface AnalysisJob {
   readonly id: string; readonly repositoryId: string; readonly sessionId: string; readonly detectorSetVersion: string;
@@ -1235,7 +1235,10 @@ function validateCheckpoint(checkpoint: AnalysisStream['checkpoint'], sessionId:
   if (!checkpoint || checkpoint.version !== 1 || !Array.isArray(checkpoint.pendingEvents) || checkpoint.pendingEvents.length > 128 ||
     (checkpoint.typedEvidence !== undefined && (!Array.isArray(checkpoint.typedEvidence) || checkpoint.typedEvidence.length > 128)) ||
     (checkpoint.relationCursor !== undefined && (!Number.isSafeInteger(checkpoint.relationCursor) || checkpoint.relationCursor < 0)) ||
-    Object.keys(checkpoint).some((key) => key !== 'version' && key !== 'pendingEvents' && key !== 'typedEvidence' && key !== 'relationCursor')) throw new TypeError('Detector checkpoint is invalid.');
+    (checkpoint.claimCursor !== undefined && (!Number.isSafeInteger(checkpoint.claimCursor) || checkpoint.claimCursor < 0
+      || checkpoint.relationCursor === undefined)) ||
+    Object.keys(checkpoint).some((key) => key !== 'version' && key !== 'pendingEvents' && key !== 'typedEvidence'
+      && key !== 'relationCursor' && key !== 'claimCursor')) throw new TypeError('Detector checkpoint is invalid.');
   const identities = new Set<string>();
   const pendingEvents = checkpoint.pendingEvents.map((value) => {
     const event = validateNormalizedCaptureEvent(value as NormalizedCaptureEvent);
@@ -1245,7 +1248,8 @@ function validateCheckpoint(checkpoint: AnalysisStream['checkpoint'], sessionId:
   });
   const typedEvidence = checkpoint.typedEvidence?.map(createEpisodeEvidence);
   return JSON.stringify({ version: 1, pendingEvents, ...(typedEvidence === undefined ? {} : { typedEvidence }),
-    ...(checkpoint.relationCursor === undefined ? {} : { relationCursor: checkpoint.relationCursor }) });
+    ...(checkpoint.relationCursor === undefined ? {} : { relationCursor: checkpoint.relationCursor }),
+    ...(checkpoint.claimCursor === undefined ? {} : { claimCursor: checkpoint.claimCursor }) });
 }
 
 function freezeJson(value: unknown): unknown {

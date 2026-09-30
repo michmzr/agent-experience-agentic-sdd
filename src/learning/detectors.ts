@@ -27,6 +27,7 @@ export interface DetectorInput {
   readonly events: readonly CapturedEventRecord[];
   readonly conventions: readonly ProjectToolConvention[];
   readonly episodeEvidence?: readonly EpisodeEvidence[];
+  readonly currentTypedEvidenceIds?: readonly string[];
   readonly checkpoint?: DetectorCheckpoint;
 }
 
@@ -149,8 +150,10 @@ function typedEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 
   }
 
   const acceptances = evidence.filter((item) => item.kind === 'agent-claim' && item.state === 'succeeded' && item.decisionKey !== undefined && item.scopeKey !== undefined);
+  const currentIds = input.currentTypedEvidenceIds === undefined ? undefined : new Set(input.currentTypedEvidenceIds);
   for (let index = 0; index < acceptances.length; index += 1) for (let next = index + 1; next < acceptances.length; next += 1) {
     const first = acceptances[index]!; const repeated = acceptances[next]!;
+    if (currentIds && !currentIds.has(first.id) && !currentIds.has(repeated.id)) continue;
     if (first.decisionKey !== repeated.decisionKey || first.scopeKey !== repeated.scopeKey || first.scopeKey === undefined) continue;
     const evidenceEventIds = [first.id, repeated.id];
     episodes.push(createTypedEpisode({

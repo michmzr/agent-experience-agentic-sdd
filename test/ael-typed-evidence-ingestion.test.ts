@@ -447,6 +447,67 @@ test('ATI-A4 repeated acceptance finds a scoped claim older than the checkpoint'
   assert.equal((JSON.parse(reported.stdout).typed.episodes as Array<{ kind: string }>).some(({ kind }) => kind === 'repeated-acceptance'), true);
 });
 
+test('ATI-A4 paged claim lookback preserves every earlier matching acceptance', () => {
+  const { dataDir, invoke } = fixture();
+  const base = example.records[0];
+  const claim = { ...base, origin: 'agent-claimed', kind: 'agent-claim', state: 'succeeded',
+    reasonClass: 'verification' };
+  assert.equal(invoke({ ...example, records: [{ ...claim, id: 'first-claim' }, { ...claim, id: 'second-claim' }] }).exitCode, 0);
+  assert.equal(JSON.parse(runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']).stdout).status, 'completed');
+  const filler = (index: number) => ({ ...base, id: `pair-filler-${index}`, kind: 'user-instruction',
+    state: 'observed', reasonClass: 'instruction', decisionKey: `other-${index}` });
+  for (const [start, count] of [[0, 128], [128, 1]]) {
+    assert.equal(invoke({ ...example, records: Array.from({ length: count }, (_, offset) => filler(start + offset)) }).exitCode, 0);
+    assert.equal(JSON.parse(runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']).stdout).status, 'completed');
+  }
+  assert.equal(invoke({ ...example, records: [{ ...claim, id: 'third-claim' }] }).exitCode, 0);
+  assert.equal(JSON.parse(runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']).stdout).status, 'completed');
+  const reported = runCli(['analysis', 'report', '--repository-id', 'ati-repo', '--schema-version', '2', '--data-dir', dataDir, '--json']);
+  assert.equal(reported.exitCode, 0, reported.stdout);
+  const matches = (JSON.parse(reported.stdout).typed.episodes as Array<{ kind: string }>)
+    .filter(({ kind }) => kind === 'repeated-acceptance');
+  assert.equal(matches.length, 3);
+});
+
+test('ATI-A4 more than 128 matching claims resume from an indexed ordinal cursor', () => {
+  const { dataDir, databasePath, invoke } = fixture();
+  const base = example.records[0];
+  const claim = (index: number) => ({ ...base, id: `claim-${String(index).padStart(3, '0')}`,
+    origin: 'agent-claimed', kind: 'agent-claim', state: 'succeeded', reasonClass: 'verification' });
+  assert.equal(invoke({ ...example, records: [claim(0)] }).exitCode, 0);
+  assert.equal(JSON.parse(runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']).stdout).status, 'completed');
+  assert.equal(invoke({ ...example, records: Array.from({ length: 127 }, (_, index) => claim(index + 1)) }).exitCode, 0);
+  assert.equal(invoke({ ...example, records: [claim(128)] }).exitCode, 0);
+  const seeded = new DatabaseSync(databasePath);
+  const priorHighWater = (seeded.prepare('SELECT MAX(ordinal) AS ordinal FROM logical_annotation_evidence WHERE session_id = ?')
+    .get('ati-session') as { ordinal: number }).ordinal;
+  seeded.prepare("DELETE FROM operational_analysis_jobs WHERE session_id = ? AND state = 'pending'").run('ati-session');
+  seeded.prepare('UPDATE operational_analysis_streams SET processed_high_water = committed_high_water WHERE session_id = ?')
+    .run('ati-session');
+  seeded.close();
+  assert.equal(invoke({ ...example, records: [claim(129)] }).exitCode, 0);
+  const first = runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']);
+  assert.equal(JSON.parse(first.stdout).status, 'completed', first.stdout);
+  const interim = new DatabaseSync(databasePath, { readOnly: true });
+  const stream = interim.prepare('SELECT processed_high_water, checkpoint_json FROM operational_analysis_streams WHERE session_id = ?')
+    .get('ati-session') as { processed_high_water: number; checkpoint_json: string };
+  const checkpoint = JSON.parse(stream.checkpoint_json) as { relationCursor?: number; claimCursor?: number };
+  assert.equal(stream.processed_high_water, priorHighWater);
+  assert.equal(checkpoint.relationCursor, 0);
+  assert.equal(typeof checkpoint.claimCursor, 'number');
+  interim.close();
+  const second = runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']);
+  assert.equal(JSON.parse(second.stdout).status, 'completed', second.stdout);
+  const finalDb = new DatabaseSync(databasePath, { readOnly: true });
+  const finalStream = finalDb.prepare('SELECT processed_high_water, committed_high_water, checkpoint_json FROM operational_analysis_streams WHERE session_id = ?')
+    .get('ati-session') as { processed_high_water: number; committed_high_water: number; checkpoint_json: string };
+  assert.equal(finalStream.processed_high_water, finalStream.committed_high_water);
+  assert.equal(JSON.parse(finalStream.checkpoint_json).claimCursor, undefined);
+  assert.equal((finalDb.prepare("SELECT COUNT(*) AS count FROM operational_episodes WHERE json_extract(payload_json, '$.kind') = 'repeated-acceptance'")
+    .get() as { count: number }).count, 129);
+  finalDb.close();
+});
+
 test('ATI-A4 migration 21 backfills indexed decision scope for retained version 20 annotations', () => {
   const { databasePath, invoke } = fixture();
   const claim = { ...example.records[0], id: 'upgrade-claim', origin: 'agent-claimed',
@@ -461,9 +522,9 @@ test('ATI-A4 migration 21 backfills indexed decision scope for retained version 
   old.prepare('DELETE FROM schema_migrations WHERE version = ?').run(21);
   old.close();
   const reopened = new ExperienceStore(databasePath);
-  const found = reopened.loadPriorScopedClaim('ati-repo', 'ati-session' as SessionId, 'controlled-test',
-    'rev-1', 'decision-1', 'task-1', 100);
-  assert.equal(found?.evidenceId, 'upgrade-claim');
+  const found = reopened.loadPriorScopedClaimsPage('ati-repo', 'ati-session' as SessionId, 'controlled-test',
+    'rev-1', 'decision-1', 'task-1', 0, 100, 128);
+  assert.equal(found.annotations[0]?.evidenceId, 'upgrade-claim');
   reopened.close();
   const db = new DatabaseSync(databasePath, { readOnly: true });
   assert.equal((db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number }).version, 21);
