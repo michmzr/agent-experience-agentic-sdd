@@ -16,3 +16,9 @@ This slice covers ATI-A1 and ATI-A2. The imported table is not yet part of the A
 | `rtk git diff --check` | Exit 0. |
 
 The full repository check is deferred for the serial integration run while ASC and ARC test their separate worktrees.
+
+## ATI-A5 capability check
+
+Codex, Claude Code and Cursor expose `taskVerification: unsupported` in the native source capability record because no qualified structured task-verification envelope is available. The local annotation producer is separately declared as `user-declared` and never claims native telemetry. The public `evidence session` command returns the unsupported native capability; the public `evidence import` command persists a resolved user-declared task-verification row with its origin intact. An auditable derived episode requires the later ATI-A6 worker integration.
+
+`rtk pnpm build` exited 0. `rtk proxy node --test --test-name-pattern=ATI-A5 dist/test/ael-typed-evidence-ingestion.test.js` was RED at 0/1 because the previous native capability was `structured-only`. After the capability change, `rtk proxy node --test dist/test/ael-typed-evidence-ingestion.test.js` passed 5/5 with no failures.

@@ -8,6 +8,7 @@ import test from 'node:test';
 import { runCli } from '../src/cli.js';
 import { normalizeMappedCapture } from '../src/capture/normalization.js';
 import type { RepositoryId, SessionId } from '../src/domain/types.js';
+import { localAnnotationEvidenceCapability, sourceEvidenceCapabilities } from '../src/evidence/capabilities.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 
 const example = JSON.parse(readFileSync(new URL('../../test/fixtures/ael-typed-evidence-ingestion/cases.json', import.meta.url), 'utf8'));
@@ -113,4 +114,27 @@ test('ATI-A2 does not treat an unindexed source result as an operation request',
   interrupted.close();
   assert.equal(invoke({ ...example, records: [{ ...example.records[0], id: 'result-reference',
     operation: { source: 'codex', sourceEventId: 'ati-result' } }] }).exitCode, 1);
+});
+
+test('ATI-A5 native verification stays unsupported while public annotation import remains auditable', () => {
+  assert.equal(sourceEvidenceCapabilities.codex.taskVerification, 'unsupported');
+  assert.equal(sourceEvidenceCapabilities.cursor.taskVerification, 'unsupported');
+  assert.equal(sourceEvidenceCapabilities['claude-code'].taskVerification, 'unsupported');
+  assert.deepEqual(localAnnotationEvidenceCapability, {
+    producer: 'local-annotation', taskVerification: 'user-declared', nativeSourceTelemetry: false
+  });
+  const { dataDir, databasePath, invoke } = fixture();
+  const imported = invoke(example);
+  assert.equal(imported.exitCode, 0);
+  assert.equal(JSON.parse(imported.stdout).retained, 1);
+  const session = runCli(['evidence', 'session', 'ati-session', '--data-dir', dataDir, '--json']);
+  assert.equal(session.exitCode, 0);
+  assert.equal(JSON.parse(session.stdout).capabilities.taskVerification, 'unsupported');
+  const db = new DatabaseSync(databasePath, { readOnly: true });
+  const row = db.prepare('SELECT origin, kind, resolution FROM imported_typed_evidence WHERE evidence_id = ?')
+    .get('verified-criterion') as { origin: string; kind: string; resolution: string };
+  assert.equal(row.origin, 'user-declared');
+  assert.equal(row.kind, 'task-verification');
+  assert.equal(row.resolution, 'resolved');
+  db.close();
 });
