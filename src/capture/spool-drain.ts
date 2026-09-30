@@ -48,6 +48,11 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
             spool.waitForDependency(claimed.deliveryId, dependency.reason, dependency.source, dependency.id, input.now());
             continue;
           }
+          const conflict = captureConflict(store, claimed.record);
+          if (conflict !== undefined) {
+            spool.quarantine(claimed.deliveryId, 'CORRUPT', input.now(), conflict);
+            continue;
+          }
           persistPassiveCapture(store, claimed.record);
           const analysisAdmission = admitCommittedSession(store, claimed.record, input.learningAdmission);
           if (analysisAdmission.admitted) unacknowledgedAnalysisAdmissions.add(claimed.deliveryId);
@@ -57,7 +62,7 @@ export function drainCaptureSpool(input: DrainCaptureSpoolInput): CaptureSpoolSt
           captureAcknowledged = true;
           analysisWorkAdded ||= analysisAdmission.workAdded;
         } catch (error) {
-          if (error instanceof TypeError) spool.quarantine(claimed.deliveryId, 'CORRUPT', input.now());
+          if (error instanceof TypeError) spool.quarantine(claimed.deliveryId, 'CORRUPT', input.now(), 'unknown-legacy');
           else spool.retry(claimed.deliveryId, input.now(), 'storage-unavailable');
         }
       }
@@ -145,10 +150,25 @@ function missingDependency(store: ExperienceStore, databasePath: string, record:
   if (record.event.phase !== 'post-result' || record.event.relatedEventId === undefined) return undefined;
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
-    const related = database.prepare("SELECT 1 FROM capture_events WHERE source = ? AND source_event_id = ? AND phase = 'pre-action' LIMIT 1")
-      .get(record.event.source, record.event.relatedEventId);
+    const related = database.prepare(`SELECT 1 FROM capture_events WHERE source = ? AND source_event_id = ? AND phase = 'pre-action'
+      UNION ALL SELECT 1 FROM capture_run_events WHERE source = ? AND source_event_id = ? AND phase = 'pre-action' LIMIT 1`)
+      .get(record.event.source, record.event.relatedEventId, record.event.source, record.event.relatedEventId);
     return related === undefined ? { reason: 'missing-request', source, id: record.event.relatedEventId } : undefined;
   } finally { database.close(); }
+}
+
+function captureConflict(store: ExperienceStore, record: PassiveCaptureRecord): 'conflicting-identity' | 'lifecycle-conflict' | undefined {
+  if (record.kind === 'session-start' && record.lifecycle?.startOrigin !== 'resume') {
+    const current = store.loadSession(record.session.id);
+    if (current !== undefined && (current.source !== record.session.source || current.startedAt !== record.session.startedAt
+      || current.repositoryId !== record.session.repositoryId || current.workspaceId !== record.session.workspaceId
+      || current.userId !== record.session.userId)) return 'conflicting-identity';
+  }
+  if (record.kind === 'session-end') {
+    const current = store.loadSession(record.sessionId);
+    if (current !== undefined && current.source !== record.source) return 'lifecycle-conflict';
+  }
+  return undefined;
 }
 
 function releaseSatisfiedDependency(spool: CaptureSpool, record: PassiveCaptureRecord, now: string): void {

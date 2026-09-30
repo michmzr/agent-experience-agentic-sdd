@@ -1,5 +1,5 @@
 import { assertWriterCompatible } from '../installation/writer-contract.js';
-import { runningBuild } from '../installation/build-manifest.js';
+import { runningBuild, type BuildManifest } from '../installation/build-manifest.js';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -151,7 +151,8 @@ export class CaptureSpool {
     if (this.#database.prepare(`SELECT 1 FROM records WHERE NOT EXISTS
       (SELECT 1 FROM capture_recovery_state WHERE capture_recovery_state.delivery_id = records.delivery_id) LIMIT 1`).get() !== undefined) {
       this.#database.prepare(`INSERT OR IGNORE INTO capture_recovery_state (delivery_id, state, reason, generation, attempts, updated_at)
-        SELECT delivery_id, 'eligible', 'unknown-legacy', 1, 0, admitted_at FROM records`).run();
+        SELECT delivery_id, CASE WHEN attempts > 0 THEN 'held' ELSE 'eligible' END,
+          'unknown-legacy', 1, attempts, admitted_at FROM records`).run();
     }
     const writerFloor = (this.#database.prepare('SELECT minimum_writer FROM ael_writer_contract WHERE id = 1').get() as { minimum_writer: number }).minimum_writer;
     if (writerFloor < 2) this.#database.prepare('UPDATE ael_writer_contract SET minimum_writer = 2 WHERE id = 1 AND minimum_writer < 2').run();
@@ -197,10 +198,11 @@ export class CaptureSpool {
   }
 
   admitWithReceipt(record: PassiveCaptureRecord, receipt: Omit<CaptureReceiptInput, 'disposition'>): SpoolAdmission {
+    const verifiedBuild = runningBuild();
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       const admission = this.#admit(record, receipt.receivedAt, false);
-      this.#writeReceipt({ ...receipt, disposition: admission.status === 'admitted' ? 'accepted' : 'duplicate' }, admission.deliveryId);
+      this.#writeReceipt({ ...receipt, disposition: admission.status === 'admitted' ? 'accepted' : 'duplicate' }, admission.deliveryId, verifiedBuild);
       this.#database.exec('COMMIT');
       return admission;
     } catch (error) {
@@ -240,7 +242,7 @@ export class CaptureSpool {
     }
   }
 
-  #writeReceipt(input: CaptureReceiptInput, operationId?: string): CaptureReceipt {
+  #writeReceipt(input: CaptureReceiptInput, operationId?: string, verifiedBuild?: BuildManifest): CaptureReceipt {
     if (this.#failReceiptPersistence) throw new TypeError('Injected capture receipt persistence failure.');
     let row = this.#database.prepare('SELECT secret FROM receipt_secret WHERE id = 1').get() as { secret?: Uint8Array } | undefined;
     if (row === undefined) {
@@ -252,7 +254,7 @@ export class CaptureSpool {
     const correlationKey = createHmac('sha256', secret).update(input.source).update('\0').update(input.correlationInput ?? '').digest('hex');
     const operationKey = operationId === undefined ? undefined : createHmac('sha256', secret).update('operation\0').update(operationId).digest('hex');
     const role = operationKey === undefined ? 'unknown' : input.disposition === 'accepted' ? 'capture' : input.disposition === 'delivery-retry' ? 'writer' : 'unknown';
-    const build = role === 'unknown' ? undefined : runningBuild();
+    const build = role === 'unknown' ? undefined : verifiedBuild;
     const buildRole = build === undefined ? 'unknown' : role;
     this.#database.prepare('INSERT INTO capture_receipts (correlation_key, operation_key, disposition, received_at, build_role, build_id, writer) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(correlationKey, operationKey ?? null, input.disposition, input.receivedAt, buildRole, build?.buildId ?? null, build?.capabilities.writer ?? null);
@@ -349,7 +351,8 @@ export class CaptureSpool {
       if (result.changes === 1) {
         this.#database.prepare('UPDATE counters SET committed = committed + 1, latest_committed_at = CASE WHEN latest_delivery_id = ? THEN ? ELSE latest_committed_at END WHERE id = 1').run(deliveryId, committedAt);
         this.#database.prepare("UPDATE capture_recovery_state SET state = 'committed', updated_at = ? WHERE delivery_id = ?").run(committedAt, deliveryId);
-        pruneRecoveryHistory(this.#database);
+        const committed = (this.#database.prepare('SELECT committed FROM counters WHERE id = 1').get() as { committed: number }).committed;
+        if (committed % 256 === 0) pruneRecoveryHistory(this.#database);
       }
       this.#database.exec('COMMIT');
     } catch (error) {
@@ -375,6 +378,7 @@ export class CaptureSpool {
   retry(deliveryId: string, now: string, reason: CaptureRecoveryReason = 'storage-unavailable'): void {
     const row = this.#database.prepare('SELECT attempts, payload FROM records WHERE delivery_id = ? AND state = \'claimed\'').get(deliveryId) as { attempts?: number; payload?: string } | undefined;
     if (row?.attempts === undefined) return;
+    const verifiedBuild = runningBuild();
     const delay = Math.min(30_000, 100 * 2 ** Math.max(0, row.attempts - 1));
     const nextRetryAt = new Date(Date.parse(now) + delay).toISOString();
     this.#database.exec('BEGIN IMMEDIATE');
@@ -387,7 +391,7 @@ export class CaptureSpool {
         this.#database.prepare(`UPDATE capture_recovery_state SET
           state = CASE WHEN attempts >= ? THEN 'held' ELSE 'eligible' END,
           reason = ?, updated_at = ? WHERE delivery_id = ?`).run(MAX_AUTOMATIC_ATTEMPTS, reason, now, deliveryId);
-        this.#writeReceipt({ source: sourceForPayload(row.payload) ?? 'codex', receivedAt: now, disposition: 'delivery-retry', correlationInput: deliveryId }, deliveryId);
+        this.#writeReceipt({ source: sourceForPayload(row.payload) ?? 'codex', receivedAt: now, disposition: 'delivery-retry', correlationInput: deliveryId }, deliveryId, verifiedBuild);
       }
       this.#database.exec('COMMIT');
     } catch (error) {
@@ -446,7 +450,8 @@ export class CaptureSpool {
         quarantineRow(this.#database, deliveryId, row.payload, code, now);
         this.#database.prepare("UPDATE capture_recovery_state SET state = 'quarantined', reason = ?, updated_at = ? WHERE delivery_id = ?").run(reason, now, deliveryId);
         this.#writeReceipt({ source: sourceForPayload(row.payload) ?? 'codex', receivedAt: now, disposition: 'quarantine', correlationInput: deliveryId });
-        pruneRecoveryHistory(this.#database);
+        const quarantined = (this.#database.prepare('SELECT quarantined FROM counters WHERE id = 1').get() as { quarantined: number }).quarantined;
+        if (quarantined % 256 === 0) pruneRecoveryHistory(this.#database);
       }
       this.#database.exec('COMMIT');
     } catch (error) {
@@ -522,13 +527,16 @@ function ensureDiagnosticColumns(database: DatabaseSync): void {
 }
 
 function ensureReceiptColumns(database: DatabaseSync): void {
+  const definitions = [
+    ['operation_key', 'TEXT'], ['build_role', "TEXT CHECK (build_role IN ('capture', 'writer', 'unknown'))"],
+    ['build_id', 'TEXT'], ['writer', 'INTEGER']
+  ] as const;
+  const existing = new Set((database.prepare("PRAGMA table_info('capture_receipts')").all() as Array<{ name: string }>).map(({ name }) => name));
+  if (definitions.every(([name]) => existing.has(name))) return;
   database.exec('BEGIN IMMEDIATE');
   try {
     const columns = new Set((database.prepare("PRAGMA table_info('capture_receipts')").all() as Array<{ name: string }>).map(({ name }) => name));
-    for (const [name, definition] of [
-      ['operation_key', 'TEXT'], ['build_role', "TEXT CHECK (build_role IN ('capture', 'writer', 'unknown'))"],
-      ['build_id', 'TEXT'], ['writer', 'INTEGER']
-    ] as const) if (!columns.has(name)) database.exec(`ALTER TABLE capture_receipts ADD COLUMN ${name} ${definition}`);
+    for (const [name, definition] of definitions) if (!columns.has(name)) database.exec(`ALTER TABLE capture_receipts ADD COLUMN ${name} ${definition}`);
     database.exec('COMMIT');
   } catch (error) { rollback(database); throw error; }
 }

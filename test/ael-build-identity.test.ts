@@ -217,6 +217,20 @@ test("ABI-A5 two installed builds retain per-operation capture and retry attribu
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(installedA, { recursive: true, force: true }); rmSync(installedB, { recursive: true, force: true }); }
 });
 
+test("ABI-A5 rejects a modified installed artifact before receipt admission mutates the store", () => {
+  const root = fixture(); const installed = fixture();
+  try {
+    cpSync(join(process.cwd(), "dist/src"), join(installed, "dist/src"), { recursive: true });
+    cpSync(join(process.cwd(), "skills"), join(installed, "skills"), { recursive: true });
+    cpSync(join(process.cwd(), "package.json"), join(installed, "package.json"));
+    writeFileSync(join(installed, "build-manifest.json"), JSON.stringify(createBuildManifest(installed)));
+    writeFileSync(join(installed, "skills/ael/SKILL.md"), readFileSync(join(installed, "skills/ael/SKILL.md"), "utf8") + "\nmodified after verification\n");
+    const script = `import {pathToFileURL} from 'node:url'; import {readFileSync} from 'node:fs'; const {CaptureSpool} = await import(pathToFileURL(process.argv[1]).href); const spool = new CaptureSpool(process.argv[2]); const before = readFileSync(process.argv[2]); let rejected = false; try { spool.admitWithReceipt({kind:'session-start',session:{id:'tampered',source:'codex',startedAt:'2026-09-29T10:00:00.000Z'}},{source:'codex',receivedAt:'2026-09-29T10:00:00.000Z'}); } catch { rejected = true; } const after = readFileSync(process.argv[2]); console.log(JSON.stringify({rejected,unchanged:before.equals(after),admitted:spool.status().admitted,receipts:spool.receiptReport().receipts.length})); spool.close();`;
+    const result = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script, join(installed, "dist/src/capture/spool.js"), join(root, "capture-spool.sqlite")], { encoding: "utf8" }));
+    assert.deepEqual(result, { rejected: true, unchanged: true, admitted: 0, receipts: 0 });
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(installed, { recursive: true, force: true }); }
+});
+
 test("ABI-A3 interrupted publication recovers the previous generation before replay", () => {
   const root = fixture();
   try {
