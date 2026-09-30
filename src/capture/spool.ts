@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import type { PassiveCaptureRecord } from './passive-service.js';
 import type { CaptureRecoveryReason } from './contracts.js';
+import type { AgentSource } from '../domain/types.js';
 
 const SPOOL_VERSION = 1;
 const ADMISSION_BUSY_TIMEOUT_MS = 100;
@@ -28,10 +29,13 @@ export interface CaptureSpoolOptions {
 }
 
 export type CaptureDisposition = 'accepted' | 'duplicate' | 'unsupported-tool' | 'privacy-redaction' | 'unsafe-normalization' | 'malformed-envelope' | 'admission-failure' | 'delivery-retry' | 'quarantine' | 'legacy-unknown';
-export interface CaptureReceiptInput { readonly source: 'codex' | 'cursor'; readonly receivedAt: string; readonly disposition: CaptureDisposition; readonly correlationInput?: string; }
+export interface CaptureReceiptInput { readonly source: 'codex' | 'cursor'; readonly receivedAt: string; readonly disposition: CaptureDisposition; readonly correlationInput?: string; readonly repositoryId?: string; }
 export interface CaptureReceipt {
   readonly correlationKey: string;
   readonly operationKey?: string;
+  readonly repositoryId?: string;
+  readonly source?: AgentSource;
+  readonly eventClass?: PassiveCaptureRecord['kind'];
   readonly disposition: CaptureDisposition;
   readonly receivedAt: string;
   readonly buildRole: 'capture' | 'writer' | 'unknown';
@@ -148,6 +152,7 @@ export class CaptureSpool {
     `);
     ensureDiagnosticColumns(this.#database);
     ensureReceiptColumns(this.#database);
+    ensureRecoveryScopeColumns(this.#database);
     if (this.#database.prepare(`SELECT 1 FROM records WHERE NOT EXISTS
       (SELECT 1 FROM capture_recovery_state WHERE capture_recovery_state.delivery_id = records.delivery_id) LIMIT 1`).get() !== undefined) {
       this.#database.prepare(`INSERT OR IGNORE INTO capture_recovery_state (delivery_id, state, reason, generation, attempts, updated_at)
@@ -161,6 +166,7 @@ export class CaptureSpool {
   recordReceipt(input: CaptureReceiptInput): CaptureReceipt {
     if (!['codex', 'cursor'].includes(input.source) || !dispositions.includes(input.disposition) || Number.isNaN(Date.parse(input.receivedAt)) || new Date(input.receivedAt).toISOString() !== input.receivedAt) throw new TypeError('Capture receipt is invalid.');
     if (input.correlationInput !== undefined && (typeof input.correlationInput !== 'string' || Buffer.byteLength(input.correlationInput, 'utf8') > 2 * 1024 * 1024)) throw new TypeError('Capture receipt correlation input is invalid.');
+    assertRepositoryId(input.repositoryId);
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       const receipt = this.#writeReceipt(input);
@@ -170,7 +176,7 @@ export class CaptureSpool {
   }
 
   receiptReport(): CaptureReceiptReport {
-    const rows = this.#database.prepare('SELECT sequence, correlation_key, operation_key, disposition, received_at, build_role, build_id, writer FROM capture_receipts ORDER BY sequence').all() as Array<{ sequence: number; correlation_key: string; operation_key: string | null; disposition: CaptureDisposition; received_at: string; build_role: 'capture' | 'writer' | null; build_id: string | null; writer: number | null }>;
+    const rows = this.#database.prepare('SELECT sequence, correlation_key, operation_key, disposition, received_at, build_role, build_id, writer, repository_id, source, event_class FROM capture_receipts ORDER BY sequence').all() as Array<{ sequence: number; correlation_key: string; operation_key: string | null; disposition: CaptureDisposition; received_at: string; build_role: 'capture' | 'writer' | null; build_id: string | null; writer: number | null; repository_id: string | null; source: AgentSource | null; event_class: PassiveCaptureRecord['kind'] | null }>;
     const byDisposition = Object.fromEntries(dispositions.map((value) => [value, 0])) as Record<CaptureDisposition, number>;
     for (const row of rows) byDisposition[row.disposition] += 1;
     const accounting = (this.#database.prepare('SELECT state FROM receipt_accounting WHERE id = 1').get() as { state: 'available' | 'unavailable' }).state;
@@ -179,6 +185,9 @@ export class CaptureSpool {
       receipts: Object.freeze(rows.map((row) => Object.freeze({
         correlationKey: row.correlation_key,
         ...(row.operation_key === null ? {} : { operationKey: row.operation_key }),
+        ...(row.repository_id === null ? {} : { repositoryId: row.repository_id }),
+        ...(row.source === null ? {} : { source: row.source }),
+        ...(row.event_class === null ? {} : { eventClass: row.event_class }),
         disposition: row.disposition,
         receivedAt: row.received_at,
         buildRole: row.build_role ?? 'unknown',
@@ -198,10 +207,11 @@ export class CaptureSpool {
   }
 
   admitWithReceipt(record: PassiveCaptureRecord, receipt: Omit<CaptureReceiptInput, 'disposition'>): SpoolAdmission {
+    assertRepositoryId(receipt.repositoryId);
     const verifiedBuild = runningBuild();
     this.#database.exec('BEGIN IMMEDIATE');
     try {
-      const admission = this.#admit(record, receipt.receivedAt, false);
+      const admission = this.#admit(record, receipt.receivedAt, false, receipt.repositoryId);
       this.#writeReceipt({ ...receipt, disposition: admission.status === 'admitted' ? 'accepted' : 'duplicate' }, admission.deliveryId, verifiedBuild);
       this.#database.exec('COMMIT');
       return admission;
@@ -212,7 +222,7 @@ export class CaptureSpool {
     }
   }
 
-  #admit(record: PassiveCaptureRecord, admittedAt: string, transaction = true): SpoolAdmission {
+  #admit(record: PassiveCaptureRecord, admittedAt: string, transaction = true, repositoryId?: string): SpoolAdmission {
     const payload = JSON.stringify(record);
     const { buildProvenance: _buildProvenance, instructionContext: _instructionContext, ...operation } = record as PassiveCaptureRecord & { readonly buildProvenance?: unknown; readonly instructionContext?: unknown };
     const operationPayload = JSON.stringify(operation);
@@ -245,7 +255,11 @@ export class CaptureSpool {
         VALUES (?, ?, ?, ?, 'pending', ?, ?)
       `).run(deliveryId, SPOOL_VERSION, payload, payloadBytes, admittedAt, admittedAt);
       this.#database.prepare('UPDATE counters SET admitted = admitted + 1 WHERE id = 1').run();
-      this.#database.prepare("INSERT INTO capture_recovery_state (delivery_id, state, reason, generation, attempts, updated_at) VALUES (?, 'eligible', 'unknown-legacy', 1, 0, ?)").run(deliveryId, admittedAt);
+      const source = record.kind === 'session-start' ? record.session.source : record.kind === 'session-end' ? record.source : record.event.source;
+      const canonicalRepositoryId = record.kind === 'session-start' && record.session.repositoryId !== undefined
+        && record.session.repositoryId !== repositoryId ? undefined : repositoryId;
+      this.#database.prepare("INSERT INTO capture_recovery_state (delivery_id, state, reason, generation, attempts, updated_at, repository_id, source, event_class) VALUES (?, 'eligible', 'unknown-legacy', 1, 0, ?, ?, ?, ?)")
+        .run(deliveryId, admittedAt, canonicalRepositoryId ?? null, source, record.kind);
       if (transaction) this.#database.exec('COMMIT');
       return Object.freeze({ status: 'admitted', deliveryId });
     } catch (error) {
@@ -271,10 +285,15 @@ export class CaptureSpool {
     const role = operationKey === undefined ? 'unknown' : input.disposition === 'accepted' ? 'capture' : input.disposition === 'delivery-retry' ? 'writer' : 'unknown';
     const build = role === 'unknown' ? undefined : verifiedBuild;
     const buildRole = build === undefined ? 'unknown' : role;
-    this.#database.prepare('INSERT INTO capture_receipts (correlation_key, operation_key, disposition, received_at, build_role, build_id, writer) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(correlationKey, operationKey ?? null, input.disposition, input.receivedAt, buildRole, build?.buildId ?? null, build?.capabilities.writer ?? null);
+    const operationScope = operationId === undefined ? undefined : this.#database.prepare('SELECT repository_id, source, event_class FROM capture_recovery_state WHERE delivery_id = ?')
+      .get(operationId) as { repository_id: string | null; source: AgentSource | null; event_class: PassiveCaptureRecord['kind'] | null } | undefined;
+    const repositoryId = operationId === undefined ? input.repositoryId : operationScope?.repository_id ?? undefined;
+    const source = operationId === undefined ? input.source : operationScope?.source ?? undefined;
+    const eventClass = operationScope?.event_class ?? undefined;
+    this.#database.prepare('INSERT INTO capture_receipts (correlation_key, operation_key, disposition, received_at, build_role, build_id, writer, repository_id, source, event_class) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(correlationKey, operationKey ?? null, input.disposition, input.receivedAt, buildRole, build?.buildId ?? null, build?.capabilities.writer ?? null, repositoryId ?? null, source ?? null, eventClass ?? null);
     this.#database.prepare('DELETE FROM capture_receipts WHERE sequence NOT IN (SELECT sequence FROM capture_receipts ORDER BY sequence DESC LIMIT ?)').run(this.#maxReceipts);
-    return Object.freeze({ correlationKey, ...(operationKey === undefined ? {} : { operationKey }), disposition: input.disposition, receivedAt: input.receivedAt, buildRole, ...(build === undefined ? {} : { buildId: build.buildId, writer: build.capabilities.writer }) });
+    return Object.freeze({ correlationKey, ...(operationKey === undefined ? {} : { operationKey }), ...(repositoryId === undefined ? {} : { repositoryId }), ...(source === undefined ? {} : { source }), ...(eventClass === undefined ? {} : { eventClass }), disposition: input.disposition, receivedAt: input.receivedAt, buildRole, ...(build === undefined ? {} : { buildId: build.buildId, writer: build.capabilities.writer }) });
   }
 
   #appendReceiptOrMarkUnavailable(input: CaptureReceiptInput): void {
@@ -530,6 +549,12 @@ function boundedPositiveInteger(value: number | undefined, fallback: number, nam
   return result;
 }
 
+function assertRepositoryId(value: string | undefined): void {
+  if (value !== undefined && (value.length > 64 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value))) {
+    throw new TypeError('Capture receipt repository ID is invalid.');
+  }
+}
+
 function ensureDiagnosticColumns(database: DatabaseSync): void {
   const recordColumns = new Set((database.prepare("PRAGMA table_info('records')").all() as Array<{ name: string }>).map(({ name }) => name));
   if (!recordColumns.has('delayed_at')) database.exec('ALTER TABLE records ADD COLUMN delayed_at TEXT');
@@ -544,7 +569,9 @@ function ensureDiagnosticColumns(database: DatabaseSync): void {
 function ensureReceiptColumns(database: DatabaseSync): void {
   const definitions = [
     ['operation_key', 'TEXT'], ['build_role', "TEXT CHECK (build_role IN ('capture', 'writer', 'unknown'))"],
-    ['build_id', 'TEXT'], ['writer', 'INTEGER']
+    ['build_id', 'TEXT'], ['writer', 'INTEGER'], ['repository_id', 'TEXT'],
+    ['source', "TEXT CHECK (source IN ('codex', 'claude-code', 'cursor'))"],
+    ['event_class', "TEXT CHECK (event_class IN ('session-start', 'session-end', 'technical'))"]
   ] as const;
   const existing = new Set((database.prepare("PRAGMA table_info('capture_receipts')").all() as Array<{ name: string }>).map(({ name }) => name));
   if (definitions.every(([name]) => existing.has(name))) return;
@@ -552,6 +579,21 @@ function ensureReceiptColumns(database: DatabaseSync): void {
   try {
     const columns = new Set((database.prepare("PRAGMA table_info('capture_receipts')").all() as Array<{ name: string }>).map(({ name }) => name));
     for (const [name, definition] of definitions) if (!columns.has(name)) database.exec(`ALTER TABLE capture_receipts ADD COLUMN ${name} ${definition}`);
+    database.exec('COMMIT');
+  } catch (error) { rollback(database); throw error; }
+}
+
+function ensureRecoveryScopeColumns(database: DatabaseSync): void {
+  const definitions = [
+    ['repository_id', 'TEXT'], ['source', "TEXT CHECK (source IN ('codex', 'claude-code', 'cursor'))"],
+    ['event_class', "TEXT CHECK (event_class IN ('session-start', 'session-end', 'technical'))"]
+  ] as const;
+  const existing = new Set((database.prepare("PRAGMA table_info('capture_recovery_state')").all() as Array<{ name: string }>).map(({ name }) => name));
+  if (definitions.every(([name]) => existing.has(name))) return;
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const columns = new Set((database.prepare("PRAGMA table_info('capture_recovery_state')").all() as Array<{ name: string }>).map(({ name }) => name));
+    for (const [name, definition] of definitions) if (!columns.has(name)) database.exec(`ALTER TABLE capture_recovery_state ADD COLUMN ${name} ${definition}`);
     database.exec('COMMIT');
   } catch (error) { rollback(database); throw error; }
 }

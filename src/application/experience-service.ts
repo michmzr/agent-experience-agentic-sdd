@@ -7,6 +7,7 @@ import { resolveRepositoryRoot } from '../repository/local-repository.js';
 import { ingestPassiveHook, type HookIngressResult } from '../capture/hook-ingress.js';
 import { drainCaptureSpool } from '../capture/spool-drain.js';
 import { CaptureSpool } from '../capture/spool.js';
+import { scopedReceiptHealth } from './health-v3.js';
 import type { PassiveHookSource } from '../capture/hook-adapters/contracts.js';
 import { initializeDiagnosticWorkspace, resolveConfiguredWorkspaceRoot, resolveDiagnosticScope, type DiagnosticScope } from '../capture/diagnostic-scope.js';
 import { CaptureDiagnosticStore, type CursorDiagnosticCounts } from '../storage/capture-diagnostic-store.js';
@@ -183,6 +184,57 @@ export class ExperienceService {
       installation: Object.freeze({ state: legacy.status === 'ready' ? 'ready' as const : 'not-ready' as const }),
       repositories: Object.freeze(repositories)
     });
+  }
+
+  statusV3(input: { id: string; root?: string }) {
+    const legacy = this.status(input);
+    const capture = this.captureHealthV3(input.id);
+    const evidence = this.evidenceQuality(input.id);
+    return Object.freeze({
+      version: 3 as const, schemaVersion: 3 as const,
+      repository: Object.freeze({ id: input.id }),
+      installation: Object.freeze({ state: legacy.status === 'ready' ? 'ready' as const : 'not-ready' as const }),
+      transport: capture.transport,
+      receipts: capture.receipts,
+      operationEvidence: Object.freeze({ state: existsSync(this.databasePath) ? 'available' as const : 'unavailable' as const,
+        committedOperations: evidence.operations, linkedResults: evidence.linked, unknownResults: evidence.unknownTotal }),
+      analysis: Object.freeze({ state: 'unavailable' as const })
+    });
+  }
+
+  statusGlobalV3(repositoryId?: string) {
+    const legacy = this.statusGlobal(repositoryId);
+    const transport = this.captureHealthV3('').transport;
+    return Object.freeze({
+      version: 3 as const, schemaVersion: 3 as const,
+      installation: Object.freeze({ state: legacy.status === 'ready' ? 'ready' as const : 'not-ready' as const }),
+      transport,
+      repositories: Object.freeze(legacy.repositories.map(repository => this.statusV3({ id: repository.repository.id, root: repository.repository.root })))
+    });
+  }
+
+  operationalAnalysisReportV3(repositoryId: string) {
+    const { result: _legacyResult, ...analysis } = this.analysisQuality(repositoryId);
+    return Object.freeze({ version: 3 as const, schemaVersion: 3 as const,
+      repository: Object.freeze({ id: repositoryId }), analysis: Object.freeze({ ...analysis, result: 'unavailable' as const }),
+      detectorEvaluation: Object.freeze({ state: 'unavailable' as const }) });
+  }
+
+  private captureHealthV3(repositoryId: string) {
+    const path = join(this.dataDirectory, 'capture-spool.sqlite');
+    if (!existsSync(path)) return Object.freeze({ transport: Object.freeze({ scope: 'global' as const, state: 'unavailable' as const }),
+      receipts: scopedReceiptHealth([], repositoryId, 'unavailable') });
+    const spool = new CaptureSpool(path);
+    try {
+      const report = spool.receiptReport();
+      return Object.freeze({
+        transport: Object.freeze({ scope: 'global' as const, state: 'available' as const, ...spool.status(),
+          retainedDeliveries: report.receipts.length,
+          unattributedDeliveries: report.receipts.filter(receipt => receipt.repositoryId === undefined).length,
+          ...(report.retention === undefined ? {} : { receiptRetention: report.retention }) }),
+        receipts: scopedReceiptHealth(report.receipts, repositoryId, report.accounting, report.retention)
+      });
+    } finally { spool.close(); }
   }
 
   operationalAnalysisReportV2(repositoryId: string) {

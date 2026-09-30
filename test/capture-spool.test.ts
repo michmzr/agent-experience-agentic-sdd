@@ -176,8 +176,12 @@ test('ABI-A5 migrated historical receipts stay unknown and retention never recon
     assert.equal(historical.buildRole, 'unknown');
     assert.equal(historical.buildId, undefined);
     assert.equal(historical.operationKey, undefined);
+    assert.equal(historical.repositoryId, undefined);
+    assert.equal(historical.source, undefined);
+    assert.equal(historical.eventClass, undefined);
     const columns = new DatabaseSync(path);
-    assert.deepEqual((columns.prepare("PRAGMA table_info('capture_receipts')").all() as Array<{ name: string }>).slice(-4).map(row => row.name), ['operation_key', 'build_role', 'build_id', 'writer']);
+    assert.deepEqual((columns.prepare("PRAGMA table_info('capture_receipts')").all() as Array<{ name: string }>).slice(-7).map(row => row.name),
+      ['operation_key', 'build_role', 'build_id', 'writer', 'repository_id', 'source', 'event_class']);
     columns.close();
     const first = spool.admitWithReceipt(sessionStart(), { source: 'codex', receivedAt: '2026-09-12T08:00:00.000Z' });
     spool.claim('2026-09-12T08:00:00.000Z', 1);

@@ -356,9 +356,11 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   if (command === 'analysis' && subcommand === 'report' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'session', 'schema-version']);
     const schemaVersion = optionalSchemaVersion(parsed.options);
-    return schemaVersion === 2
-      ? service.operationalAnalysisReportV2(contextualRepositoryId(parsed.options, options.workingDirectory))
-      : service.operationalAnalysisReport(contextualRepositoryId(parsed.options, options.workingDirectory), optionalString(parsed.options, 'session'));
+    return schemaVersion === 3
+      ? service.operationalAnalysisReportV3(contextualRepositoryId(parsed.options, options.workingDirectory))
+      : schemaVersion === 2
+        ? service.operationalAnalysisReportV2(contextualRepositoryId(parsed.options, options.workingDirectory))
+        : service.operationalAnalysisReport(contextualRepositoryId(parsed.options, options.workingDirectory), optionalString(parsed.options, 'session'));
   }
   if (command === 'analysis' && subcommand === 'status' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'session']);
@@ -411,12 +413,14 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   if (command === 'status-global' && subcommand === undefined && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository', 'schema-version']);
     const schemaVersion = optionalSchemaVersion(parsed.options); const repository = optionalRepositoryId(parsed.options);
-    return schemaVersion === 2 ? service.statusGlobalV2(repository?.id) : service.statusGlobal(repository?.id);
+    return schemaVersion === 3 ? service.statusGlobalV3(repository?.id)
+      : schemaVersion === 2 ? service.statusGlobalV2(repository?.id) : service.statusGlobal(repository?.id);
   }
   if (command === 'status' && subcommand === undefined && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository', 'schema-version']);
     const schemaVersion = optionalSchemaVersion(parsed.options); const repository = repositorySelection(parsed.options, options.workingDirectory);
-    return schemaVersion === 2 ? service.statusV2(repository) : service.status(repository);
+    return schemaVersion === 3 ? service.statusV3(repository)
+      : schemaVersion === 2 ? service.statusV2(repository) : service.status(repository);
   }
   if (command === 'runtime' && subcommand === 'evaluate' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'input', 'json', 'profile', 'refresh']);
@@ -545,11 +549,11 @@ function assertNoUnknownOptions(options: Map<string, string | true>, allowed: re
 function optionalString(options: Map<string, string | true>, name: string): string | undefined {
   const value = options.get(name); if (value === undefined) return undefined; if (value === true) throw new SyntaxError(`Option requires a value: --${name}.`); return value;
 }
-function optionalSchemaVersion(options: Map<string, string | true>): 2 | undefined {
+function optionalSchemaVersion(options: Map<string, string | true>): 2 | 3 | undefined {
   const version = optionalString(options, 'schema-version');
   if (version === undefined) return undefined;
-  if (version !== '2') throw new SyntaxError('Schema version must be 2.');
-  return 2;
+  if (version !== '2' && version !== '3') throw new SyntaxError('Schema version must be 2 or 3.');
+  return version === '2' ? 2 : 3;
 }
 function requiredString(options: Map<string, string | true>, name: string): string {
   const value = optionalString(options, name); if (value === undefined) throw new SyntaxError(`Option is required: --${name}.`); return value;
@@ -638,7 +642,7 @@ function requiredContext(kind: string, option: string): never {
 function success(value: unknown, json: boolean, positionals: readonly string[], humanOutput?: HumanRenderOptions, context?: CommandPresentationContext): CliResult {
   const version2 = value as { schemaVersion?: number; installation?: { state?: string } };
   const exitCode = (positionals[0] === 'runtime' && positionals[1] === 'evaluate' && (value as { outcome?: string }).outcome === 'BLOCK')
-    || (positionals[0] === 'status' && (version2.schemaVersion === 2 ? version2.installation?.state !== 'ready' : (value as { status?: string }).status !== 'ready'))
+    || (positionals[0] === 'status' && (version2.schemaVersion === 2 || version2.schemaVersion === 3 ? version2.installation?.state !== 'ready' : (value as { status?: string }).status !== 'ready'))
     || (positionals[0] === 'hooks' && positionals[1] === 'verify' && (value as { status?: string }).status !== 'ready') ? 1 : 0;
   return json ? { exitCode, stdout: `${JSON.stringify(value)}\n`, stderr: '' } : { exitCode, stdout: `${renderCommandResult(value, positionals, humanOutput, context)}\n`, stderr: '' };
 }
@@ -681,8 +685,8 @@ function usage(): string {
     '  benchmark run --manifest <run.json> --output <report.json>',
     '  benchmark compare --baseline <report.json> --candidate <report.json> --output <comparison.json>',
     '  unregister [--repository-id <id>]',
-    '  status [--repository <path>|--repository-id <id>] [--schema-version 2]',
-    '  status-global [--repository <path>|--repository-id <id>] [--schema-version 2]',
+    '  status [--repository <path>|--repository-id <id>] [--schema-version <2|3>]',
+    '  status-global [--repository <path>|--repository-id <id>] [--schema-version <2|3>]',
     '  hooks verify --worktree <path>',
     '  hooks diagnostics [--repository <path>]',
     '',
@@ -701,7 +705,7 @@ function usage(): string {
     '  capture recovery apply --input <plan.json> --json',
     '  analysis run [--repository-id <id>]',
     '  analysis reconcile --repository-id <id> [--apply] [--after-session <id>] --json',
-    '  analysis report [--repository-id <id>] [--session <id>] [--schema-version 2]',
+    '  analysis report [--repository-id <id>] [--session <id>] [--schema-version <2|3>]',
     '  analysis status [--repository-id <id>] [--session <id>]',
     '  analysis worker',
     '',

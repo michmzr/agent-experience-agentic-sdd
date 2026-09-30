@@ -8,6 +8,7 @@ test('ARC-A4 scoped receipt accounting separates deliveries from unique operatio
     { repositoryId: 'repo-a', source: 'codex', eventClass: 'technical', operationKey: 'operation-a', disposition: 'accepted' },
     { repositoryId: 'repo-a', source: 'codex', eventClass: 'technical', operationKey: 'operation-a', disposition: 'duplicate' },
     { repositoryId: 'repo-b', source: 'cursor', eventClass: 'technical', operationKey: 'operation-b', disposition: 'accepted' },
+    { repositoryId: 'repo-b', source: 'codex', eventClass: 'technical', operationKey: 'operation-a', disposition: 'duplicate' },
     { source: 'codex', disposition: 'malformed-envelope' }
   ] as const;
   const a = scopedReceiptHealth(reports, 'repo-a', 'available');
@@ -16,6 +17,6 @@ test('ARC-A4 scoped receipt accounting separates deliveries from unique operatio
   assert.equal(a.uniqueOperations, 1);
   assert.deepEqual(a.sourceDenominator, { state: 'unavailable' });
   const b = scopedReceiptHealth(reports, 'repo-b', 'available');
-  assert.equal(b.deliveries, 1);
+  assert.equal(b.deliveries, 2);
   assert.equal(b.uniqueOperations, 1);
 });

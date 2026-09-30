@@ -3,7 +3,7 @@ import { assertWriterCompatible, IncompatibleWriterError } from '../installation
 import { adaptCursorPassiveHook, adaptPassiveHook } from './hook-adapters/index.js';
 import { MAX_HOOK_INPUT_BYTES, type PassiveHookSource } from './hook-adapters/contracts.js';
 import { TechnicalSignatureRejection } from './hook-adapters/technical-signature.js';
-import { type DiagnosticScope, resolveDiagnosticScope } from './diagnostic-scope.js';
+import { type DiagnosticScope, findConfiguredWorkspaceRoot, resolveDiagnosticScope } from './diagnostic-scope.js';
 import type { CursorCaptureDiagnosticCategory } from './hook-diagnostics.js';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -60,12 +60,15 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
       ? resolveDiagnosticScope(workingDirectory, { dataDirectory: dirname(options.databasePath) })
       : undefined;
     const repository = resolveRepository(workingDirectory);
-    const repositoryId = options.repositoryId ?? repository?.id as RepositoryId | undefined;
+    const recognizedId = repository?.id ?? findConfiguredWorkspaceRoot(workingDirectory)?.id;
+    const scopeConflict = recognizedId !== undefined && options.repositoryId !== undefined && options.repositoryId !== recognizedId;
+    const repositoryId = scopeConflict ? undefined : (options.repositoryId ?? recognizedId) as RepositoryId | undefined;
+    const receiptRepositoryId = recognizedId !== undefined && !scopeConflict ? recognizedId : undefined;
     const record = options.source === 'cursor'
       ? cursorRecord(options, payload, repositoryId, scope!)
       : adaptPassiveHook(options.source, payload, options.now(), repositoryId);
     if (record === undefined) {
-      spool.recordReceipt({ source: options.source, receivedAt: options.now(), disposition: 'unsupported-tool', correlationInput: options.input });
+      spool.recordReceipt({ source: options.source, receivedAt: options.now(), disposition: 'unsupported-tool', correlationInput: options.input, repositoryId: receiptRepositoryId });
       return { status: 'ignored' };
     }
 
@@ -81,7 +84,8 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
     const result = spool.admitWithReceipt(admittedRecord, {
       source: options.source,
       receivedAt: options.now(),
-      correlationInput: options.input
+      correlationInput: options.input,
+      repositoryId: receiptRepositoryId
     });
     if (result.status === 'admitted') {
       try { (options.scheduleDrain ?? startDrain)(dirname(options.databasePath)); }
