@@ -148,6 +148,13 @@ for (const scenario of ['instruction-context convention', 'Git-tracked packageMa
           operation: { source: 'codex', sourceEventId: operationB.sourceEventId } }] }));
       importTypedEvidence(databasePath, repositoryId, annotationPath);
       const verificationId = annotationEvidenceId('aap-controlled', repositoryId, sessionB, 'verification-b');
+      if (fact) {
+        const packagePath = join(repositoryRoot, 'mobile', 'package.json');
+        writeFileSync(packagePath, JSON.stringify({ name: 'mobile-app', packageManager: 'npm@11.0.0' }));
+        assert.equal(record('outcome-observed', 'verification-evidence', verificationId).exitCode, 1);
+        assert.equal(usage.facts(bundle.bundleId).some(item => item.kind === 'outcome-observed'), false);
+        writeFileSync(packagePath, JSON.stringify({ name: 'mobile-app', packageManager: 'pnpm@10.0.0' }));
+      }
       const outcome = record('outcome-observed', 'verification-evidence', verificationId);
       assert.equal(outcome.exitCode, 0, outcome.stdout);
       assert.deepEqual(usage.facts(bundle.bundleId).map(f => f.kind),
