@@ -1,0 +1,16 @@
+PRAGMA quick_check;
+PRAGMA foreign_key_check;
+SELECT COUNT(*) AS repositories FROM repositories;
+SELECT COUNT(*) AS sessions FROM sessions;
+SELECT COUNT(*) AS events FROM events;
+SELECT MIN(occurred_at) AS first_event, MAX(occurred_at) AS last_event FROM events;
+SELECT r.repository_root, COUNT(DISTINCT s.id) AS sessions, COUNT(e.id) AS events FROM repositories r LEFT JOIN sessions s ON s.repository_id=r.repository_id LEFT JOIN events e ON e.session_id=s.id GROUP BY r.repository_id;
+SELECT state, COUNT(*) AS count FROM knowledge GROUP BY state;
+SELECT k.id, k.state, m.scope, m.approval_kind, m.created_at FROM knowledge k JOIN knowledge_metadata m ON m.knowledge_id=k.id;
+SELECT (SELECT COUNT(*) FROM operational_episodes) AS episodes, (SELECT COUNT(*) FROM operational_findings) AS findings, (SELECT COUNT(*) FROM operational_candidates) AS candidates, (SELECT COUNT(*) FROM operational_insufficient_findings) AS insufficient_findings;
+SELECT source, phase, capture_outcome, COUNT(*) AS count FROM capture_events GROUP BY source,phase,capture_outcome;
+SELECT COUNT(*) AS results, SUM(e.exit_status IS NOT NULL) AS exit_status_present, SUM(p.event_id IS NOT NULL) AS linked_results FROM capture_events c JOIN events e ON e.id=c.event_id LEFT JOIN capture_events p ON p.source=c.source AND p.source_event_id=c.related_event_id WHERE c.phase='post-result';
+SELECT repository_id, state, COUNT(*) AS count FROM operational_analysis_jobs GROUP BY repository_id,state;
+SELECT detector,status,COUNT(*) AS count,SUM(examined_events) AS examined_events,SUM(findings) AS findings FROM operational_analysis_coverage GROUP BY detector,status;
+SELECT json_extract(payload_json,'$.kind') AS kind,json_extract(payload_json,'$.state') AS state,COUNT(*) AS count FROM operational_episode_evidence GROUP BY kind,state;
+SELECT s.repository_id,COUNT(*) AS events_without_stream FROM events e JOIN sessions s ON s.id=e.session_id WHERE NOT EXISTS(SELECT 1 FROM operational_analysis_streams a WHERE a.repository_id=s.repository_id AND a.session_id=s.id) GROUP BY s.repository_id;

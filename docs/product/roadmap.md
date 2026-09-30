@@ -1,5 +1,9 @@
 # Delivery roadmap
 
+## Proposed audit-driven delivery package
+
+The [2026-09-29 AEL value delivery package](ael-value-delivery.md) contains eight Draft specifications and proposed plans for installation identity, evidence continuity, recovery, scoped conventions, typed evidence, candidate lifecycle, a local advisory pilot and value measurement. It preserves the completion records below. The earlier local pilot is a proposed amendment to delivery order, not approval or completion of M7–M9.
+
 ## Milestone 1: session intelligence vertical slice
 
 Status: Complete on 2026-08-24. Final verification: 131 tests passed, 0 failed; two independent implementation reviews approved.
