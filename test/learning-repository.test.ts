@@ -1255,8 +1255,8 @@ test('keeps migrated m6 jobs separate from a completed typed-evidence stream', (
       processedHighWater: migrated.stream('repo-1', 'session-mixed', 'm6-deterministic@1')?.processedHighWater
     }, { committedHighWater: 9, processedHighWater: 0 });
     assert.deepEqual({
-      committedHighWater: migrated.stream('repo-1', 'session-mixed', DETECTOR_SET_VERSION)?.committedHighWater,
-      processedHighWater: migrated.stream('repo-1', 'session-mixed', DETECTOR_SET_VERSION)?.processedHighWater
+      committedHighWater: migrated.stream('repo-1', 'session-mixed', 'm9-typed-evidence@1')?.committedHighWater,
+      processedHighWater: migrated.stream('repo-1', 'session-mixed', 'm9-typed-evidence@1')?.processedHighWater
     }, { committedHighWater: 7, processedHighWater: 7 });
     assert.equal(migrated.jobById('legacy-covered-5')?.state, 'completed');
     assert.equal(migrated.jobById('legacy-new-9')?.state, 'retryable-failure');
@@ -1264,7 +1264,7 @@ test('keeps migrated m6 jobs separate from a completed typed-evidence stream', (
     assert.deepEqual(migrated.quality('repo-1').cost, { completedRuns: 1, total: 7 });
     assert.equal(migrated.report('repo-1').episodeEvidence.length, 1);
     assert.equal(migrated.report('repo-1').episodes.some((episode) => 'kind' in episode && episode.kind === 'verification-gap'), true);
-    assert.equal(migrated.report('repo-1').coverage.some((item) => item.detector === DETECTOR_SET_VERSION && item.examinedEvents === 7), true);
+    assert.equal(migrated.report('repo-1').coverage.some((item) => item.detector === 'm9-typed-evidence@1' && item.examinedEvents === 7), true);
     assert.equal(migrated.contextSnapshotFor('repo-1', 'session-mixed')?.repositoryFamilyKey, 'family-1');
     assert.equal(Buffer.from(migrated.contextSecret()).equals(Buffer.alloc(32)), true);
     const claimed = claimFor(migrated, 'legacy-m6');
@@ -1277,6 +1277,31 @@ test('keeps migrated m6 jobs separate from a completed typed-evidence stream', (
     assert.equal(reopened.report('repo-1').episodeEvidence.length, 1);
     assert.equal(reopened.contextSnapshotFor('repo-1', 'session-mixed')?.worktreeKey, 'worktree-1');
   } finally { reopened.close(); }
+});
+
+test('repairs an orphaned committed stream once and signals the worker without duplicating active work', () => {
+  const databasePath = path();
+  const initial = new OperationalLearningRepository(databasePath);
+  let removedId: string;
+  try {
+    const job = initial.enqueue({ repositoryId: 'repo-1', sessionId: 'orphan', inputHighWater: 5 });
+    assert.ok(job);
+    removedId = job.id;
+  } finally { initial.close(); }
+  const database = new DatabaseSync(databasePath);
+  try { database.prepare('DELETE FROM operational_analysis_jobs WHERE id = ?').run(removedId!); }
+  finally { database.close(); }
+  const recovered = new OperationalLearningRepository(databasePath);
+  try {
+    const first = recovered.enqueueWithOutcome({ repositoryId: 'repo-1', sessionId: 'orphan', inputHighWater: 5 });
+    assert.equal(first.workAdded, true);
+    assert.equal(first.job?.state, 'pending');
+    assert.notEqual(first.job?.id, removedId!);
+    const repeated = recovered.enqueueWithOutcome({ repositoryId: 'repo-1', sessionId: 'orphan', inputHighWater: 5 });
+    assert.equal(repeated.workAdded, false);
+    assert.equal(repeated.job?.id, first.job?.id);
+    assert.equal(recovered.jobsForStream('repo-1', 'orphan').filter(({ state }) => state === 'pending').length, 1);
+  } finally { recovered.close(); }
 });
 
 test('fences a stale worker after its lease is reclaimed', () => {

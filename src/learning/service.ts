@@ -5,7 +5,8 @@ import { validateNormalizedCaptureEvent } from '../capture/normalization.js';
 import { loadProjectSettings } from '../config/project-settings.js';
 import type { SessionId } from '../domain/types.js';
 import { resolveRepository } from '../repository/local-repository.js';
-import { ExperienceStore } from '../storage/experience-store.js';
+import { annotationEvidenceId, readIndexedAnnotation } from '../evidence/import.js';
+import { ExperienceStore, type IndexedAnnotationEvidence } from '../storage/experience-store.js';
 import {
   createEpisodeEvidence,
   validateDetectorCheckpoint,
@@ -15,9 +16,10 @@ import {
   type EpisodeEvidenceState
 } from './contracts.js';
 import { detectOperationalEpisodes } from './detectors.js';
-import { readProjectInstructionContext, readProjectToolConventions, type ProjectToolConvention } from './project-conventions.js';
+import { readProjectInstructionContext, type ProjectToolConvention } from './project-conventions.js';
 import {
   DETECTOR_SET_VERSION,
+  PREVIOUS_DETECTOR_SET_VERSION,
   OperationalLearningRepository,
   type AnalysisFailureReason,
   type AnalysisJob,
@@ -29,6 +31,7 @@ import {
 const DEFAULT_MAX_EVENTS = 1_024;
 const DEFAULT_DEADLINE_MS = 250;
 const JOB_LEASE_MS = 30_000;
+const RELATION_LOOKBACK_PAGE = 128;
 
 interface OperationalLearningDependencies {
   readonly monotonicNow?: () => number;
@@ -57,14 +60,14 @@ export class OperationalLearningService {
   private readonly monotonicNow: () => number;
   private readonly detect: typeof detectOperationalEpisodes;
   private readonly openStore: (databasePath: string) => ExperienceStore;
-  private readonly readConventions: (repositoryRoot: string) => readonly ProjectToolConvention[];
+  private readonly readConventions?: (repositoryRoot: string) => readonly ProjectToolConvention[];
   private readonly readContext: typeof readProjectInstructionContext;
 
   constructor(private readonly databasePath: string, dependencies: OperationalLearningDependencies = {}) {
     this.monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
     this.detect = dependencies.detect ?? detectOperationalEpisodes;
     this.openStore = dependencies.openStore ?? ((path) => new ExperienceStore(path));
-    this.readConventions = dependencies.readConventions ?? readProjectToolConventions;
+    this.readConventions = dependencies.readConventions;
     this.readContext = dependencies.readContext ?? readProjectInstructionContext;
   }
 
@@ -78,15 +81,16 @@ export class OperationalLearningService {
       const repository = new OperationalLearningRepository(this.databasePath);
       try {
         const local = resolveRepository(registration.root);
-        if (local) {
+        if (local && repository.contextSnapshotFor(repositoryId, sessionId) === undefined) {
           const settings = loadProjectSettings(local.root);
           const context = this.readContext(local.root, settings);
           repository.preserveContextSnapshot({ repositoryId, sessionId,
             repositoryFamilyKey: local.repositoryFamilyKey, worktreeKey: local.worktreeKey,
-            instructions: context.instructions, conventions: context.conventions,
+            instructions: context.instructions, conventions: context.conventions, scopedConventions: context.scopedConventions,
             ...lifecycleContext(store, sessionId, repository.contextSecret()) });
         }
-        return repository.enqueueWithOutcome({ repositoryId, sessionId, inputHighWater: record.events.length }).workAdded;
+        return repository.enqueueWithOutcome({ repositoryId, sessionId,
+          inputHighWater: store.logicalEvidenceHighWater(sessionId as SessionId) }).workAdded;
       } finally { repository.close(); }
     } finally { store.close(); }
   }
@@ -119,7 +123,8 @@ export class OperationalLearningService {
         } catch {
           return this.fail(repository, job, ownerId, 'execution-failure');
         }
-        if (!session || session.repositoryId !== job.repositoryId || !registration || !stream || job.detectorSetVersion !== DETECTOR_SET_VERSION) {
+        if (!session || session.repositoryId !== job.repositoryId || !registration || !stream
+          || ![DETECTOR_SET_VERSION, PREVIOUS_DETECTOR_SET_VERSION].includes(job.detectorSetVersion)) {
           return this.fail(repository, job, ownerId, 'invalid-input');
         }
         try { checkpoint = validateDetectorCheckpoint(stream.checkpoint, job.sessionId); }
@@ -127,7 +132,7 @@ export class OperationalLearningService {
         repositoryRoot = registration.root;
         try {
           const snapshot = repository.contextSnapshotFor(job.repositoryId, job.sessionId);
-          conventions = snapshot?.conventions ?? this.readConventions(repositoryRoot);
+          conventions = snapshot?.conventions ?? this.readConventions?.(repositoryRoot) ?? [];
         } catch {
           return this.fail(repository, job, ownerId, 'execution-failure');
         }
@@ -146,10 +151,10 @@ export class OperationalLearningService {
             { eventsLoaded: 0, findings: 0, elapsedMs });
         }
         const metrics = (findings: number, elapsedMs: number): AnalysisMetrics =>
-          ({ eventsLoaded: range.events.length, findings, elapsedMs });
+          ({ eventsLoaded: range.events.length + range.annotations.length, findings, elapsedMs });
         if (range.availableHighWater < job.inputHighWater) {
           const elapsedMs = this.monotonicNow() - startedAt;
-          return this.fail(repository, job, ownerId, 'invalid-input', range.actualHighWater, metrics(0, elapsedMs));
+          return this.fail(repository, job, ownerId, 'invalid-input', Math.min(range.actualHighWater, range.availableHighWater), metrics(0, elapsedMs));
         }
         try {
           const identities = new Set(checkpoint.pendingEvents.map(({ id }) => id));
@@ -165,16 +170,26 @@ export class OperationalLearningService {
 
         let result;
         let episodeEvidence: readonly EpisodeEvidence[];
+        let relationCursor: number | undefined;
+        let claimCursor: number | undefined;
         try {
+          const relationPage = loadRelatedAnnotationPage(store, job.repositoryId, job.sessionId as SessionId,
+            job.inputLowWater, range.annotations, checkpoint.relationCursor ?? 0, checkpoint.claimCursor ?? 0);
+          relationCursor = relationPage.nextCursor;
+          claimCursor = relationPage.nextClaimCursor;
           episodeEvidence = mergeEpisodeEvidence(
-            episodeEvidenceFromCapture([...checkpoint.pendingEvents, ...range.events]), suppliedEvidence);
+            [...(checkpoint.typedEvidence ?? []), ...episodeEvidenceFromCapture([...checkpoint.pendingEvents, ...range.events]),
+              ...range.annotations.map(annotationEvidenceFromIndexed),
+              ...relationPage.evidence], suppliedEvidence);
           result = this.detect({
             repositoryId: job.repositoryId,
             sessionId: job.sessionId,
             events: range.events,
             conventions,
             checkpoint,
-            episodeEvidence
+            episodeEvidence,
+            currentTypedEvidenceIds: range.annotations.map((indexed) =>
+              annotationEvidenceFromIndexed(indexed).id)
           });
         } catch {
           const elapsedMs = this.monotonicNow() - startedAt;
@@ -185,11 +200,17 @@ export class OperationalLearningService {
         if (elapsedMs > deadlineMs) {
           return this.fail(repository, job, ownerId, 'timeout', range.actualHighWater, metrics(result.findings.length, elapsedMs));
         }
-        const coverage = Object.freeze([coverageFor(job, range.actualHighWater, range.events.length, result.findings.length)]);
+        const processedHighWater = relationCursor === undefined ? range.actualHighWater : job.inputLowWater;
+        const coverage = Object.freeze([coverageFor(job, processedHighWater,
+          range.events.length + range.annotations.length, result.findings.length)]);
         try {
           repository.acknowledge(job.id, {
-            ownerId, attempt: job.attempts, processedHighWater: range.actualHighWater, checkpoint: result.checkpoint,
-            metrics: { eventsLoaded: range.events.length, findings: result.findings.length, elapsedMs },
+            ownerId, attempt: job.attempts, processedHighWater,
+            checkpoint: validateDetectorCheckpoint({ ...result.checkpoint,
+              ...(relationCursor === undefined ? {} : { pendingEvents: checkpoint.pendingEvents }),
+              ...(relationCursor === undefined ? {} : { relationCursor }),
+              ...(claimCursor === undefined ? {} : { claimCursor }) }, job.sessionId),
+            metrics: { eventsLoaded: range.events.length + range.annotations.length, findings: result.findings.length, elapsedMs },
             result: { ...result, episodeEvidence, coverage }
           });
           return Object.freeze({ status: 'completed', jobId: job.id });
@@ -243,17 +264,80 @@ function episodeEvidenceFromCapture(events: readonly CapturedEventRecord[]): rea
   return Object.freeze(events.flatMap((event) => {
     if (event.phase === 'pre-action') {
       const id = captureEvidenceId(event.source, event.sourceEventId);
-      return [createEpisodeEvidence({ id, kind: 'tool-request', state: 'observed',
+      return [createEpisodeEvidence({ id, kind: 'tool-request', state: 'observed', origin: 'source-observed',
         decisionKey: captureDecisionKey(event), scopeKey: 'repository', evidenceIds: [id] })];
     }
     if (event.phase !== 'post-result') return [];
     const request = event.relatedEventId === undefined ? undefined : requests.get(event.relatedEventId);
     const id = captureEvidenceId(event.source, event.sourceEventId);
     const relatedId = event.relatedEventId === undefined ? id : captureEvidenceId(event.source, event.relatedEventId);
-    return [createEpisodeEvidence({ id, kind: 'tool-result', state: captureEvidenceState(event.outcome),
+    return [createEpisodeEvidence({ id, kind: 'tool-result', state: captureEvidenceState(event.outcome), origin: 'source-observed',
       ...(request === undefined ? {} : { decisionKey: captureDecisionKey(request), scopeKey: 'repository' }),
       evidenceIds: [relatedId] })];
   }));
+}
+
+function annotationEvidenceFromIndexed(indexed: IndexedAnnotationEvidence): EpisodeEvidence {
+  const { record, contextRevision } = readIndexedAnnotation(indexed);
+  const id = annotationEvidenceId(indexed.producerNamespace, indexed.repositoryId, indexed.sessionId, indexed.evidenceId);
+  const decisionKey = `decision-${createHash('sha256').update(record.decisionKey).digest('hex')}`;
+  const scopeKey = `scope-${createHash('sha256').update(JSON.stringify([
+    indexed.repositoryId, contextRevision, record.scopeKey
+  ])).digest('hex')}`;
+  return createEpisodeEvidence({ id, kind: record.kind, state: record.state, origin: record.origin,
+    decisionKey, scopeKey, reasonClass: record.reasonClass,
+    evidenceIds: [captureEvidenceId(record.operation.source, record.operation.sourceEventId),
+      ...(record.relatedEvidenceIds ?? []).map((related) => annotationEvidenceId(indexed.producerNamespace,
+        indexed.repositoryId, indexed.sessionId, related))] });
+}
+
+function loadRelatedAnnotationPage(store: ExperienceStore, repositoryId: string, sessionId: SessionId,
+  beforeOrdinal: number, current: readonly IndexedAnnotationEvidence[], after: number, claimAfterOrdinal: number): {
+    readonly evidence: readonly EpisodeEvidence[]; readonly nextCursor?: number; readonly nextClaimCursor?: number;
+  } {
+  type Lookup = { readonly kind: 'identity'; readonly namespace: string; readonly evidenceId: string } |
+    { readonly kind: 'claim'; readonly namespace: string; readonly contextRevision: string;
+      readonly decisionKey: string; readonly scopeKey: string };
+  const keys = new Map<string, Lookup>();
+  for (const indexed of current) {
+    const { record, contextRevision } = readIndexedAnnotation(indexed);
+    for (const evidenceId of record.relatedEvidenceIds ?? []) {
+      const key = JSON.stringify(['identity', indexed.producerNamespace, evidenceId]);
+      keys.set(key, { kind: 'identity', namespace: indexed.producerNamespace, evidenceId });
+    }
+    if (record.kind === 'agent-claim' && record.state === 'succeeded') {
+      const key = JSON.stringify(['claim', indexed.producerNamespace, contextRevision, record.decisionKey, record.scopeKey]);
+      keys.set(key, { kind: 'claim', namespace: indexed.producerNamespace, contextRevision,
+        decisionKey: record.decisionKey, scopeKey: record.scopeKey });
+    }
+  }
+  const ordered = [...keys.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, value]) => value);
+  if (after > ordered.length) throw new TypeError('Annotation relation continuation cursor is invalid.');
+  let index = after;
+  let remaining = RELATION_LOOKBACK_PAGE;
+  const evidence: EpisodeEvidence[] = [];
+  while (index < ordered.length && remaining > 0) {
+    const lookup = ordered[index]!;
+    if (lookup.kind === 'identity') {
+      const indexed = store.loadIndexedAnnotationByIdentity(repositoryId, sessionId,
+        lookup.namespace, lookup.evidenceId, beforeOrdinal);
+      if (indexed) evidence.push(annotationEvidenceFromIndexed(indexed));
+      remaining--;
+      index++;
+      claimAfterOrdinal = 0;
+      continue;
+    }
+    const page = store.loadPriorScopedClaimsPage(repositoryId, sessionId, lookup.namespace,
+      lookup.contextRevision, lookup.decisionKey, lookup.scopeKey, claimAfterOrdinal, beforeOrdinal, remaining);
+    evidence.push(...page.annotations.map(annotationEvidenceFromIndexed));
+    remaining -= Math.max(1, page.annotations.length);
+    if (page.nextCursor !== undefined) {
+      return Object.freeze({ evidence: Object.freeze(evidence), nextCursor: index, nextClaimCursor: page.nextCursor });
+    }
+    index++;
+    claimAfterOrdinal = 0;
+  }
+  return Object.freeze({ evidence: Object.freeze(evidence), ...(index < ordered.length ? { nextCursor: index } : {}) });
 }
 
 function validateSuppliedEpisodeEvidence(supplied: readonly EpisodeEvidence[] | undefined): readonly EpisodeEvidence[] {
@@ -269,13 +353,19 @@ function validateSuppliedEpisodeEvidence(supplied: readonly EpisodeEvidence[] | 
 }
 
 function mergeEpisodeEvidence(captured: readonly EpisodeEvidence[], supplied: readonly EpisodeEvidence[]): readonly EpisodeEvidence[] {
-  const merged = [...captured, ...supplied];
-  const ids = new Set<string>();
-  for (const evidence of merged) {
-    if (ids.has(evidence.id)) throw new TypeError('Supplied episode evidence contains duplicate identity.');
-    ids.add(evidence.id);
+  const internal = new Map<string, EpisodeEvidence>();
+  for (const evidence of captured) {
+    const previous = internal.get(evidence.id);
+    if (previous && JSON.stringify(previous) !== JSON.stringify(evidence)) {
+      throw new TypeError('Indexed episode evidence identity conflicts with retained content.');
+    }
+    internal.set(evidence.id, evidence);
   }
-  return Object.freeze(merged);
+  for (const evidence of supplied) {
+    if (internal.has(evidence.id)) throw new TypeError('Supplied episode evidence contains duplicate identity.');
+    internal.set(evidence.id, evidence);
+  }
+  return Object.freeze([...internal.values()]);
 }
 
 function captureEvidenceId(source: string, sourceEventId: string): string {

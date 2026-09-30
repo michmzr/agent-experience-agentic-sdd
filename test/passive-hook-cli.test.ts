@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
+import { removeTemporaryDirectory } from '../src/cli/temporary-directory.js';
 import { runCliAsync } from '../src/cli.js';
 import { loadProjectSettings } from '../src/config/project-settings.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
@@ -75,7 +76,7 @@ test('captures a Codex hook with empty stdout and exit zero', async () => {
     assert.equal(session.source, 'codex');
     assert.equal(session.repositoryId, resolveRepository(process.cwd())?.id);
   } finally {
-    rmSync(dataDir, { recursive: true, force: true });
+    await removeTemporaryDirectory(dataDir);
   }
 });
 
@@ -96,7 +97,7 @@ test('keeps the passive hook protocol when options precede the command', async (
     const session = await waitFor(dataDir, () => readSession(dataDir, 'option-first-session'));
     assert.equal(session.source, 'codex');
   } finally {
-    rmSync(dataDir, { recursive: true, force: true });
+    await removeTemporaryDirectory(dataDir);
   }
 });
 
@@ -120,7 +121,7 @@ test('attributes a non-Git workspace hook to the identifier supplied by its wrap
     assert.equal(session.repositoryId, 'secondbrain');
   } finally {
     rmSync(workspace, { recursive: true, force: true });
-    rmSync(dataDir, { recursive: true, force: true });
+    await removeTemporaryDirectory(dataDir);
   }
 });
 
@@ -140,7 +141,7 @@ test('dispatches Cursor hooks and ignores nontechnical events', async () => {
     assert.deepEqual(captured, { exitCode: 0, stdout: '', stderr: '' });
     assert.equal(await waitFor(dataDir, () => storedSessionSource(dataDir)), 'cursor');
   } finally {
-    rmSync(dataDir, { recursive: true, force: true });
+    await removeTemporaryDirectory(dataDir);
   }
 });
 
@@ -158,7 +159,7 @@ test('keeps Cursor hooks fail-open when workspace scope resolution fails', async
     assert.equal(result.stderr.includes(workspace), false);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
-    rmSync(dataDir, { recursive: true, force: true });
+    await removeTemporaryDirectory(dataDir);
   }
 });
 
@@ -191,7 +192,7 @@ test('fails open with bounded generic diagnostics for invalid and private input'
       } finally { spool.close(); }
     }
   } finally {
-    for (const dataDir of dataDirectories) rmSync(dataDir, { recursive: true, force: true });
+    for (const dataDir of dataDirectories) await removeTemporaryDirectory(dataDir);
   }
 });
 
@@ -231,7 +232,7 @@ test('retains generic private-error and persistence-error fallback classificatio
     });
   } finally {
     rmSync(workspace, { recursive: true, force: true });
-    rmSync(dataDir, { recursive: true, force: true });
+    await removeTemporaryDirectory(dataDir);
   }
 });
 
@@ -248,7 +249,7 @@ test('fails open for missing or unsupported sources while preserving ordinary sy
       assert.match(result.stderr, /^AEL_CAPTURE_INVALID_INPUT: Passive capture skipped\.\n$/);
     }
   } finally {
-    for (const dataDir of dataDirectories) rmSync(dataDir, { recursive: true, force: true });
+    for (const dataDir of dataDirectories) await removeTemporaryDirectory(dataDir);
   }
 
   const ordinary = await runCliAsync(['unknown'], { hookInput: '{not-json', now });
@@ -274,7 +275,7 @@ test('maps persistence failures to a generic fail-open diagnostic', async () => 
     stdout: '',
     stderr: 'AEL_CAPTURE_PERSISTENCE_FAILED: Passive capture skipped.\n'
   });
-  rmSync(dataDir, { recursive: true, force: true });
+  await removeTemporaryDirectory(dataDir);
 });
 
 test('fails open promptly when the hook database is busy', async () => {
@@ -300,7 +301,7 @@ test('fails open promptly when the hook database is busy', async () => {
   } finally {
     blocker.exec('ROLLBACK');
     blocker.close();
-    rmSync(dataDir, { recursive: true, force: true });
+    await removeTemporaryDirectory(dataDir);
   }
 });
 
@@ -329,6 +330,6 @@ test('closes failed hook store migrations instead of leaking database connection
   } finally {
     blocker.exec('ROLLBACK');
     blocker.close();
-    rmSync(dataDir, { recursive: true, force: true });
+    await removeTemporaryDirectory(dataDir);
   }
 });

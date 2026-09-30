@@ -3,10 +3,12 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { verifyInstalledHooks } from '../cli/hook-installation.js';
 import { resolveRepositoryRoot } from '../repository/local-repository.js';
+import { CandidateRepository, type CandidateRecord } from '../knowledge/candidate-repository.js';
 
 import { ingestPassiveHook, type HookIngressResult } from '../capture/hook-ingress.js';
 import { drainCaptureSpool } from '../capture/spool-drain.js';
 import { CaptureSpool } from '../capture/spool.js';
+import { detectorEvaluation, scopedReceiptHealth } from './health-v3.js';
 import type { PassiveHookSource } from '../capture/hook-adapters/contracts.js';
 import { initializeDiagnosticWorkspace, resolveConfiguredWorkspaceRoot, resolveDiagnosticScope, type DiagnosticScope } from '../capture/diagnostic-scope.js';
 import { CaptureDiagnosticStore, type CursorDiagnosticCounts } from '../storage/capture-diagnostic-store.js';
@@ -18,6 +20,7 @@ import { projectCapturedSessionEvidence } from '../evidence/capture-projection.j
 import { sourceEvidenceCapabilities } from '../evidence/capabilities.js';
 import { SessionEvidenceRepository } from '../evidence/repository.js';
 import { OperationalLearningService } from '../learning/service.js';
+import { reconcileAnalysis, type ReconciliationOptions } from '../learning/reconciliation.js';
 import {
   OperationalLearningRepository,
   type AnalysisFilters,
@@ -118,21 +121,60 @@ export class ExperienceService {
   }
 
   list(filter: LessonFilter = {}): RetrievedKnowledgeEntry[] {
-    return this.retrieve({
+    const retrieved = this.retrieve({
       ...(filter.scope ? { scope: filter.scope } : {}),
       ...(filter.repositoryId ? { repositoryId: filter.repositoryId } : {}),
       ...(filter.state ? { state: filter.state } : {}),
       ...(filter.tag ? { tags: [filter.tag] } : {})
     });
+    const additional = this.localCandidateKnowledge({
+      ...(filter.scope ? { scope: filter.scope } : {}),
+      ...(filter.repositoryId ? { repositoryId: filter.repositoryId } : {}),
+      ...(filter.state ? { state: filter.state } : {}),
+      ...(filter.tag ? { tags: [filter.tag] } : {})
+    }, true);
+    const byId = new Map([...retrieved, ...additional].map(entry => [entry.id, entry]));
+    return [...byId.values()];
   }
 
   retrieve(filter: RetrievalFilter): RetrievedKnowledgeEntry[] {
     const store = this.openStore();
     try {
-      return store.retrieve(filter);
+      return [...store.retrieve(filter), ...this.localCandidateKnowledge(filter, false)];
     } finally {
       store.close();
     }
+  }
+
+  private localCandidateKnowledge(filter: RetrievalFilter, allScopes: boolean): RetrievedKnowledgeEntry[] {
+    if (!filter.repositoryId || filter.scope === 'global') return [];
+    const repository = new CandidateRepository(this.databasePath);
+    try {
+      const records = allScopes
+        ? repository.list(filter.repositoryId).filter(candidate => ['observed', 'confirmed', 'verified'].includes(candidate.state))
+        : repository.listAcceptedLocalEntries(filter.repositoryId, filter.path
+          ? { scope: 'subproject', path: filter.path, conditions: filter.tags ?? [] }
+          : { scope: 'repository', conditions: filter.tags ?? [] });
+      const verifiedIds = new Set(repository.listVerifiedLocalEntries(filter.repositoryId).map(entry => entry.candidateId));
+      return records.filter(candidate => candidate.state !== 'verified' || verifiedIds.has(candidate.id))
+        .filter(candidate => filter.state === undefined || candidate.state === filter.state)
+        .map(candidate => this.publicLocalKnowledge(candidate, repository));
+    } finally { repository.close(); }
+  }
+
+  private publicLocalKnowledge(candidate: CandidateRecord, repository: CandidateRepository): RetrievedKnowledgeEntry {
+    const evidenceIds = repository.history(candidate.repositoryId, candidate.id).map(review => review.evidenceId);
+    return Object.freeze({
+      id: candidate.id as KnowledgeEntry['id'],
+      candidateId: candidate.id as KnowledgeEntry['candidateId'],
+      state: candidate.state as KnowledgeState,
+      statement: candidate.statement,
+      evidenceIds: Object.freeze(evidenceIds as unknown as KnowledgeEntry['evidenceIds']),
+      authoritative: false,
+      kind: candidate.kind,
+      applicability: candidate.applicability,
+      revision: candidate.revision
+    });
   }
 
   export(filter: LessonFilter = {}): { knowledge: RetrievedKnowledgeEntry[] } {
@@ -182,6 +224,64 @@ export class ExperienceService {
       installation: Object.freeze({ state: legacy.status === 'ready' ? 'ready' as const : 'not-ready' as const }),
       repositories: Object.freeze(repositories)
     });
+  }
+
+  statusV3(input: { id: string; root?: string }) {
+    const legacy = this.status(input);
+    const capture = this.captureHealthV3(input.id);
+    const evidence = this.evidenceQuality(input.id);
+    const analysis = this.analysisQuality(input.id);
+    const detectors = detectorEvaluation(this.databasePath, input.id, analysis.state);
+    return Object.freeze({
+      version: 3 as const, schemaVersion: 3 as const,
+      repository: Object.freeze({ id: input.id }),
+      installation: Object.freeze({ state: legacy.status === 'ready' ? 'ready' as const : 'not-ready' as const }),
+      transport: capture.transport,
+      receipts: capture.receipts,
+      operationEvidence: Object.freeze({ state: existsSync(this.databasePath) ? 'available' as const : 'unavailable' as const,
+        committedOperations: evidence.operations, linkedResults: evidence.linked, unknownResults: evidence.unknownTotal }),
+      analysis: Object.freeze({ ...analysis, state: detectors.state === 'unavailable' ? 'unavailable' as const : analysis.state,
+        result: detectors.detectors[0]?.status === 'insufficient-evidence' ? 'insufficient-evidence' as const
+        : analysis.result === 'findings' ? 'findings' as const : 'unavailable' as const, detectorEvaluation: detectors })
+    });
+  }
+
+  statusGlobalV3(repositoryId?: string) {
+    const legacy = this.statusGlobal(repositoryId);
+    const transport = this.captureHealthV3('').transport;
+    return Object.freeze({
+      version: 3 as const, schemaVersion: 3 as const,
+      installation: Object.freeze({ state: legacy.status === 'ready' ? 'ready' as const : 'not-ready' as const }),
+      transport,
+      repositories: Object.freeze(legacy.repositories.map(repository => this.statusV3({ id: repository.repository.id, root: repository.repository.root })))
+    });
+  }
+
+  operationalAnalysisReportV3(repositoryId: string) {
+    const { result: _legacyResult, ...analysis } = this.analysisQuality(repositoryId);
+    const detectors = detectorEvaluation(this.databasePath, repositoryId, analysis.state);
+    return Object.freeze({ version: 3 as const, schemaVersion: 3 as const,
+      repository: Object.freeze({ id: repositoryId }), analysis: Object.freeze({ ...analysis,
+        state: detectors.state === 'unavailable' ? 'unavailable' as const : analysis.state,
+        result: detectors.detectors[0]?.status === 'insufficient-evidence' ? 'insufficient-evidence' as const : 'unavailable' as const }),
+      detectorEvaluation: detectors });
+  }
+
+  private captureHealthV3(repositoryId: string) {
+    const path = join(this.dataDirectory, 'capture-spool.sqlite');
+    if (!existsSync(path)) return Object.freeze({ transport: Object.freeze({ scope: 'global' as const, state: 'unavailable' as const }),
+      receipts: scopedReceiptHealth([], repositoryId, 'unavailable') });
+    const spool = new CaptureSpool(path);
+    try {
+      const report = spool.receiptReport();
+      return Object.freeze({
+        transport: Object.freeze({ scope: 'global' as const, state: 'available' as const, ...spool.status(),
+          retainedDeliveries: report.receipts.length,
+          unattributedDeliveries: report.receipts.filter(receipt => receipt.repositoryId === undefined).length,
+          ...(report.retention === undefined ? {} : { receiptRetention: report.retention }) }),
+        receipts: scopedReceiptHealth(report.receipts, repositoryId, report.accounting, report.retention)
+      });
+    } finally { spool.close(); }
   }
 
   operationalAnalysisReportV2(repositoryId: string) {
@@ -249,6 +349,10 @@ export class ExperienceService {
   runOperationalAnalysis(repositoryId: string) {
     const service = new OperationalLearningService(this.databasePath);
     return service.runNext({ repositoryId });
+  }
+
+  reconcileOperationalAnalysis(repositoryId: string, options: ReconciliationOptions = {}) {
+    return reconcileAnalysis(this.databasePath, repositoryId, options);
   }
 
   runNextOperationalAnalysis(workerSlot: AnalysisWorkerSlotFence) {

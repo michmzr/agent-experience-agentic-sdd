@@ -1,7 +1,9 @@
+import { runningBuild } from '../installation/build-manifest.js';
+import { assertWriterCompatible, IncompatibleWriterError } from '../installation/writer-contract.js';
 import { adaptCursorPassiveHook, adaptPassiveHook } from './hook-adapters/index.js';
 import { MAX_HOOK_INPUT_BYTES, type PassiveHookSource } from './hook-adapters/contracts.js';
 import { TechnicalSignatureRejection } from './hook-adapters/technical-signature.js';
-import { type DiagnosticScope, resolveDiagnosticScope } from './diagnostic-scope.js';
+import { type DiagnosticScope, findConfiguredWorkspaceRoot, resolveDiagnosticScope } from './diagnostic-scope.js';
 import type { CursorCaptureDiagnosticCategory } from './hook-diagnostics.js';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -12,6 +14,8 @@ import { CaptureDiagnosticStore } from '../storage/capture-diagnostic-store.js';
 import { resolveRepository } from '../repository/local-repository.js';
 import { dirname, join } from 'node:path';
 import { CaptureSpool, CaptureSpoolCapacityError } from './spool.js';
+import { readProjectInstructionContext, validateProjectInstructionContext } from '../learning/project-conventions.js';
+import { loadProjectSettings } from '../config/project-settings.js';
 
 
 export interface HookIngressOptions {
@@ -27,13 +31,16 @@ export interface HookIngressOptions {
 
 export type HookIngressResult =
   | { readonly status: 'captured' | 'duplicate' | 'ignored' }
-  | { readonly status: 'degraded'; readonly code: 'INVALID_INPUT' | 'PRIVATE_INPUT' | 'PERSISTENCE_FAILED' };
+  | { readonly status: 'degraded'; readonly code: 'INVALID_INPUT' | 'PRIVATE_INPUT' | 'PERSISTENCE_FAILED' | 'INCOMPATIBLE_WRITER' };
 
 export function ingestPassiveHook(options: HookIngressOptions): HookIngressResult {
   let scope: DiagnosticScope | undefined;
   let spool: CaptureSpool | undefined;
   try {
     if (!isPassiveHookSource(options.source)) return degraded('INVALID_INPUT');
+    let build;
+    try { build = runningBuild(); } catch { throw new IncompatibleWriterError(); }
+    assertWriterCompatible([join(dirname(options.databasePath), 'capture-spool.sqlite')], build);
     spool = new CaptureSpool(join(dirname(options.databasePath), 'capture-spool.sqlite'));
     if (typeof options.input !== 'string' || Buffer.byteLength(options.input, 'utf8') > MAX_HOOK_INPUT_BYTES) {
       if (typeof options.input === 'string') spool.recordReceipt({ source: options.source, receivedAt: options.now(), disposition: 'malformed-envelope', correlationInput: options.input });
@@ -53,19 +60,32 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
       ? resolveDiagnosticScope(workingDirectory, { dataDirectory: dirname(options.databasePath) })
       : undefined;
     const repository = resolveRepository(workingDirectory);
-    const repositoryId = options.repositoryId ?? repository?.id as RepositoryId | undefined;
+    const recognizedId = repository?.id ?? findConfiguredWorkspaceRoot(workingDirectory)?.id;
+    const scopeConflict = recognizedId !== undefined && options.repositoryId !== undefined && options.repositoryId !== recognizedId;
+    const repositoryId = scopeConflict ? undefined : (options.repositoryId ?? recognizedId) as RepositoryId | undefined;
+    const receiptRepositoryId = recognizedId !== undefined && !scopeConflict ? recognizedId : undefined;
     const record = options.source === 'cursor'
       ? cursorRecord(options, payload, repositoryId, scope!)
       : adaptPassiveHook(options.source, payload, options.now(), repositoryId);
     if (record === undefined) {
-      spool.recordReceipt({ source: options.source, receivedAt: options.now(), disposition: 'unsupported-tool', correlationInput: options.input });
+      spool.recordReceipt({ source: options.source, receivedAt: options.now(), disposition: 'unsupported-tool', correlationInput: options.input, repositoryId: receiptRepositoryId });
       return { status: 'ignored' };
     }
 
-    const result = spool.admitWithReceipt(record, {
+    let instructionContext;
+    if (record.kind === 'technical' && record.event.phase === 'pre-action' && repository !== undefined) {
+      try {
+        const observed = readProjectInstructionContext(repository.root, loadProjectSettings(repository.root));
+        if (Buffer.byteLength(JSON.stringify(observed), 'utf8') <= 16 * 1024) instructionContext = validateProjectInstructionContext(observed);
+      } catch { /* Context acquisition cannot prevent passive capture. */ }
+    }
+    const contextualRecord = instructionContext === undefined ? record : { ...record, instructionContext };
+    const admittedRecord = build === undefined ? contextualRecord : { ...contextualRecord, buildProvenance: { buildId: build.buildId, writer: build.capabilities.writer, captureSchema: build.capabilities.captureSchema, resultSchema: build.capabilities.resultSchema } };
+    const result = spool.admitWithReceipt(admittedRecord, {
       source: options.source,
       receivedAt: options.now(),
-      correlationInput: options.input
+      correlationInput: options.input,
+      repositoryId: receiptRepositoryId
     });
     if (result.status === 'admitted') {
       try { (options.scheduleDrain ?? startDrain)(dirname(options.databasePath)); }
@@ -152,7 +172,8 @@ function isPassiveHookSource(value: unknown): value is PassiveHookSource {
   return value === 'codex' || value === 'cursor';
 }
 
-function inputErrorCode(error: unknown): 'INVALID_INPUT' | 'PRIVATE_INPUT' | 'PERSISTENCE_FAILED' {
+function inputErrorCode(error: unknown): 'INVALID_INPUT' | 'PRIVATE_INPUT' | 'PERSISTENCE_FAILED' | 'INCOMPATIBLE_WRITER' {
+  if (error instanceof IncompatibleWriterError) return 'INCOMPATIBLE_WRITER';
   if (error instanceof CaptureSpoolCapacityError) return 'PERSISTENCE_FAILED';
   if (error instanceof HookIngressDiagnosticError) return error.code;
   if (error instanceof TechnicalSignatureRejection) return error.code === 'PRIVATE_INPUT' ? 'PRIVATE_INPUT' : 'INVALID_INPUT';
@@ -169,7 +190,7 @@ class HookIngressDiagnosticError extends Error {
   }
 }
 
-function degraded(code: 'INVALID_INPUT' | 'PRIVATE_INPUT' | 'PERSISTENCE_FAILED'): HookIngressResult {
+function degraded(code: 'INVALID_INPUT' | 'PRIVATE_INPUT' | 'PERSISTENCE_FAILED' | 'INCOMPATIBLE_WRITER'): HookIngressResult {
   return { status: 'degraded', code };
 }
 

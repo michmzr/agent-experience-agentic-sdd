@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import type { CapturedEventRecord } from '../capture/contracts.js';
+import { interpretCapturedProcess } from '../evidence/capture-projection.js';
 import { validateNormalizedCaptureEvent } from '../capture/normalization.js';
 import {
   createEpisodeEvidence,
@@ -26,6 +27,7 @@ export interface DetectorInput {
   readonly events: readonly CapturedEventRecord[];
   readonly conventions: readonly ProjectToolConvention[];
   readonly episodeEvidence?: readonly EpisodeEvidence[];
+  readonly currentTypedEvidenceIds?: readonly string[];
   readonly checkpoint?: DetectorCheckpoint;
 }
 
@@ -76,7 +78,9 @@ export function detectOperationalEpisodes(input: DetectorInput): DetectorResult 
   const typed = typedEpisodes(input);
   const checkpoint = validateDetectorCheckpoint({
     version: 1,
-    pendingEvents: repairs.pendingEvents.slice(-128)
+    pendingEvents: repairs.pendingEvents.slice(-128),
+    typedEvidence: [...new Map([...(previous.typedEvidence ?? []), ...(input.episodeEvidence ?? [])]
+      .filter(({ id }) => id.startsWith('annotation-')).map((item) => [item.id, item])).values()].slice(-128)
   }, input.sessionId);
   return Object.freeze({
     episodes: Object.freeze([...convention.episodes, ...repairs.episodes, ...typed.episodes].sort(byId)),
@@ -146,8 +150,10 @@ function typedEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' | 
   }
 
   const acceptances = evidence.filter((item) => item.kind === 'agent-claim' && item.state === 'succeeded' && item.decisionKey !== undefined && item.scopeKey !== undefined);
+  const currentIds = input.currentTypedEvidenceIds === undefined ? undefined : new Set(input.currentTypedEvidenceIds);
   for (let index = 0; index < acceptances.length; index += 1) for (let next = index + 1; next < acceptances.length; next += 1) {
     const first = acceptances[index]!; const repeated = acceptances[next]!;
+    if (currentIds && !currentIds.has(first.id) && !currentIds.has(repeated.id)) continue;
     if (first.decisionKey !== repeated.decisionKey || first.scopeKey !== repeated.scopeKey || first.scopeKey === undefined) continue;
     const evidenceEventIds = [first.id, repeated.id];
     episodes.push(createTypedEpisode({
@@ -249,7 +255,8 @@ function repairEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' |
   const episodes: OperationalEpisode[] = [];
   const findings: OperationalFinding[] = [];
   const candidates: LearningCandidate[] = [];
-  for (const failed of operations.filter(({ result }) => result?.outcome === 'failed')) {
+  for (const failed of operations.filter(({ request, result }) => result !== undefined && result.outcome === 'failed'
+    && interpretCapturedProcess(request, result).kind === 'unclassified-nonzero')) {
     const replacement = replacementFor(failed, operations);
     if (replacement === undefined) continue;
     const evidenceEventIds = [failed.request.id, failed.result!.id, replacement.request.id, ...(replacement.result ? [replacement.result.id] : [])];
@@ -264,7 +271,8 @@ function repairEpisodes(input: DetectorInput): Pick<DetectorResult, 'episodes' |
   }
   const pendingEvents = operations.flatMap((operation) => {
     if (operation.result === undefined) return [operation.request];
-    if (operation.result.outcome === 'failed' && replacementFor(operation, operations) === undefined) return [operation.request, operation.result];
+    if (operation.result.outcome === 'failed' && interpretCapturedProcess(operation.request, operation.result).kind === 'unclassified-nonzero'
+      && replacementFor(operation, operations) === undefined) return [operation.request, operation.result];
     return [];
   }).sort(byEvent);
   return { episodes, findings, candidates, pendingEvents };

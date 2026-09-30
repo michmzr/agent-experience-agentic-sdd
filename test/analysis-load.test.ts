@@ -12,6 +12,7 @@ import { OperationalLearningRepository, type AnalysisWorkerSlot } from '../src/l
 import { OperationalLearningService } from '../src/learning/service.js';
 import { runAnalysisCoordinator, type AnalysisWorkerHost } from '../src/learning/worker.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
+import { initializeGitRepository } from './helpers/git-repository.js';
 
 const startedAt = '2026-09-13T10:00:00.000Z';
 const temporaryDirectories: string[] = [];
@@ -25,6 +26,7 @@ function fixture(prefix: string): { readonly dataDir: string; readonly databaseP
   temporaryDirectories.push(dataDir);
   const root = join(dataDir, 'repository');
   mkdirSync(root);
+  initializeGitRepository(root);
   writeFileSync(join(root, 'AGENTS.md'), 'Use pnpm instead of npm\n');
   return { dataDir, root, databasePath: join(dataDir, 'experience.sqlite') };
 }
@@ -124,6 +126,7 @@ test('coalesces 565 high-water admissions into one 559-event stream without meas
   const { dataDir, databasePath, root } = fixture('ael-analysis-load-');
   const store = new ExperienceStore(databasePath);
   register(store, root, ['session-load']);
+  new OperationalLearningService(databasePath).enqueueCommittedSession('repo-1', 'session-load');
   const repository = new OperationalLearningRepository(databasePath);
   for (let admission = 1; admission <= 565; admission += 1) {
     const highWater = Math.min(admission, 559);

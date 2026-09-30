@@ -1,5 +1,9 @@
 # Delivery roadmap
 
+## AEL value delivery package
+
+The [AEL value delivery index](ael-value-delivery.md) tracks eight specifications authorized for implementation on 2026-09-30. It records acceptance and unsupported host qualifications separately from implementation progress. ADR 002 permits a default-off local advisory pilot after its dependencies pass; full M7–M9 acceptance remains governed by their own specifications.
+
 ## Milestone 1: session intelligence vertical slice
 
 Status: Complete on 2026-08-24. Final verification: 131 tests passed, 0 failed; two independent implementation reviews approved.

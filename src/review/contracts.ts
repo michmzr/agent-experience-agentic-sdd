@@ -50,6 +50,13 @@ export interface NormalizedSession {
   readonly ingestionCoverage: SessionIngestionCoverage;
 }
 
+export interface ReviewRequiredFinding {
+  readonly state: 'review-required';
+  readonly rootCauseId: string;
+  readonly findingIds: readonly string[];
+  readonly recommendation: string;
+}
+
 export interface NormalizeSessionInput {
   readonly source: AgentSource;
   readonly artifact: SessionArtifact;

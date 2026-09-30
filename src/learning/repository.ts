@@ -16,9 +16,10 @@ import {
   type OperationalFinding
 } from './contracts.js';
 import { createTypedEpisode, createTypedFinding, type DerivedOperationalEpisode, type DerivedOperationalFinding } from './detectors.js';
-import type { InstructionContext, ProjectToolConvention } from './project-conventions.js';
+import { CONVENTION_PARSER_VERSION, type InstructionContext, type ProjectInstructionContext, type ProjectToolConvention, type ScopedToolConvention } from './project-conventions.js';
 
-export const DETECTOR_SET_VERSION = 'm9-typed-evidence@1';
+export const DETECTOR_SET_VERSION = `m9-typed-evidence@1/asc-parser@${CONVENTION_PARSER_VERSION}`;
+export const PREVIOUS_DETECTOR_SET_VERSION = 'm9-typed-evidence@1';
 // Legacy jobs were produced exclusively by this detector set, regardless of future defaults.
 const LEGACY_DETECTOR_SET_VERSION = 'm6-deterministic@1';
 const emptyCheckpointJson = '{"version":1,"pendingEvents":[]}';
@@ -117,6 +118,12 @@ const contextSchema = `
   CREATE TABLE IF NOT EXISTS operational_context_secret (
     id INTEGER PRIMARY KEY CHECK (id = 1), secret BLOB NOT NULL
   ) STRICT;
+  CREATE TABLE IF NOT EXISTS capture_instruction_contexts (
+    source TEXT NOT NULL, source_event_id TEXT NOT NULL, session_id TEXT NOT NULL, repository_id TEXT,
+    payload_json TEXT, PRIMARY KEY(source, source_event_id)
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS capture_instruction_contexts_session
+    ON capture_instruction_contexts(session_id, source, source_event_id);
 `;
 
 export interface AnalysisAdmission { readonly repositoryId: string; readonly sessionId: string; readonly inputHighWater: number; readonly detectorSetVersion?: string; }
@@ -124,7 +131,8 @@ export interface AnalysisAdmissionOutcome { readonly job: AnalysisJob | undefine
 export interface AnalysisStream {
   readonly repositoryId: string; readonly sessionId: string; readonly detectorSetVersion: string;
   readonly committedHighWater: number; readonly processedHighWater: number;
-  readonly checkpoint: { readonly version: number; readonly pendingEvents: readonly unknown[] };
+  readonly checkpoint: { readonly version: number; readonly pendingEvents: readonly unknown[];
+    readonly typedEvidence?: readonly unknown[]; readonly relationCursor?: number; readonly claimCursor?: number };
 }
 export interface AnalysisJob {
   readonly id: string; readonly repositoryId: string; readonly sessionId: string; readonly detectorSetVersion: string;
@@ -186,12 +194,15 @@ export type OperationalAnalysisStatus = AnalysisStatus;
 export interface OperationalContextSnapshot {
   readonly repositoryId: string; readonly sessionId: string; readonly repositoryFamilyKey: string; readonly worktreeKey: string;
   readonly instructions: readonly InstructionContext[]; readonly conventions: readonly ProjectToolConvention[];
+  readonly scopedConventions?: readonly ScopedToolConvention[];
   readonly sourceAgentKey?: string; readonly runKey?: string; readonly conversationKey?: string;
 }
 export interface OperationalLearningReport {
   readonly candidates: readonly (Omit<LearningCandidate, 'state'> & { readonly state: 'candidate' | 'disputed' })[];
   readonly findings: readonly DerivedOperationalFinding[]; readonly episodes: readonly DerivedOperationalEpisode[];
   readonly episodeEvidence: readonly EpisodeEvidence[]; readonly coverage: readonly AnalysisCoverage[];
+  readonly historicalInstructionGaps: number;
+  readonly operationInstructionRevisions: readonly { readonly operationKey: string; readonly context?: ProjectInstructionContext }[];
   readonly cost: { readonly completedRuns: number; readonly total: number };
 }
 export interface OperationalAnalysisQuality {
@@ -267,6 +278,7 @@ export class OperationalLearningRepository {
       const pending = this.database.prepare(`SELECT id FROM operational_analysis_jobs WHERE repository_id = ? AND session_id = ?
         AND detector_set_version = ? AND state IN ('pending', 'retryable-failure')`).get(input.repositoryId, input.sessionId, version) as { id: string } | undefined;
       let job: AnalysisJob | undefined;
+      let insertedJob = false;
       if (pending) {
         this.database.prepare('UPDATE operational_analysis_jobs SET input_high_water = MAX(input_high_water, ?), updated_at = ? WHERE id = ?')
           .run(stream.committed_high_water, timestamp, pending.id);
@@ -277,10 +289,12 @@ export class OperationalLearningRepository {
         // Repository conventions also need one initial analysis when the stream contains no events.
         if (isNewStream || stream.committed_high_water > Math.max(stream.processed_high_water, running?.input_high_water ?? 0)) {
           job = this.insertPendingJob(stream, timestamp);
+          insertedJob = true;
         }
       }
       this.database.exec('COMMIT');
-      const workAdded = job !== undefined && (isNewStream || input.inputHighWater > previousStream.committed_high_water);
+      const workAdded = job !== undefined && (insertedJob
+        || (previousStream !== undefined && input.inputHighWater > previousStream.committed_high_water));
       return Object.freeze({ job, workAdded });
     } catch (error) { this.database.exec('ROLLBACK'); throw error; }
   }
@@ -512,8 +526,18 @@ export class OperationalLearningRepository {
     const coverage = (this.database.prepare(`SELECT c.* FROM operational_analysis_coverage c JOIN operational_analysis_jobs j ON j.id = c.job_id WHERE j.repository_id = ? ORDER BY c.detector, j.id`).all(repositoryId) as Array<{ detector: string; status: AnalysisCoverage['status']; examined_events: number; findings: number; detector_set_version: string; input_low_water: number; requested_high_water: number; processed_high_water: number }>).map((row) => Object.freeze({ detector: row.detector, status: row.status, examinedEvents: row.examined_events, findings: row.findings, detectorSetVersion: row.detector_set_version, inputLowWater: row.input_low_water, requestedHighWater: row.requested_high_water, processedHighWater: row.processed_high_water }));
     const cost = this.database.prepare(`SELECT COUNT(*) AS completed_runs, COALESCE(SUM(events_loaded), 0) AS total
       FROM operational_analysis_attempts WHERE repository_id = ? AND outcome = 'completed'`).get(repositoryId) as { completed_runs: number; total: number };
+    const gaps = this.database.prepare(`SELECT COUNT(DISTINCT j.session_id) AS count FROM operational_analysis_jobs j
+      WHERE j.repository_id = ? AND j.state = 'completed' AND NOT EXISTS
+      (SELECT 1 FROM operational_context_snapshots s WHERE s.repository_id = j.repository_id AND s.session_id = j.session_id)`)
+      .get(repositoryId) as { count: number };
+    const operationInstructionRevisions = (this.database.prepare(`SELECT c.source, c.source_event_id, c.payload_json
+      FROM capture_instruction_contexts c WHERE c.repository_id = ? ORDER BY c.session_id, c.source, c.source_event_id`).all(repositoryId) as Array<{
+        source: string; source_event_id: string; payload_json: string | null;
+      }>).map((row) => Object.freeze({ operationKey: `${row.source}:${row.source_event_id}`,
+        ...(row.payload_json === null ? {} : { context: JSON.parse(row.payload_json) as ProjectInstructionContext }) }));
     return publicReport(Object.freeze({ episodes: Object.freeze(episodes), findings: Object.freeze(findings),
       candidates: Object.freeze(candidates), episodeEvidence: Object.freeze(episodeEvidence), coverage: Object.freeze(coverage),
+      historicalInstructionGaps: gaps.count, operationInstructionRevisions: Object.freeze(operationInstructionRevisions),
       cost: Object.freeze({ completedRuns: cost.completed_runs, total: cost.total }) }), this.contextSecret());
   }
 
@@ -1077,7 +1101,8 @@ export class OperationalLearningRepository {
     for (const rawEpisode of result.episodes) {
       const episode = isTypedEpisode(rawEpisode) ? createTypedEpisode(rawEpisode) : createOperationalEpisode(rawEpisode);
       if (episode.repositoryId !== job.repositoryId || episode.sessionId !== job.sessionId ||
-        (episode.detector !== job.detectorSetVersion && episode.detector !== LEGACY_DETECTOR_SET_VERSION))
+        (episode.detector !== job.detectorSetVersion && episode.detector !== PREVIOUS_DETECTOR_SET_VERSION
+          && episode.detector !== LEGACY_DETECTOR_SET_VERSION))
         throw new TypeError('Episode scope or detector version conflicts with job.');
       if (isTypedEpisode(episode) && !this.referencesEvidenceInScope(typedEpisodeReferences(episode), job, stagedEvidence)) {
         throw new TypeError('Episode evidence is missing from the analysis job scope.');
@@ -1208,7 +1233,12 @@ function sqlFilters(filters: AnalysisFilters): { sql: string; values: string[] }
 
 function validateCheckpoint(checkpoint: AnalysisStream['checkpoint'], sessionId: string): string {
   if (!checkpoint || checkpoint.version !== 1 || !Array.isArray(checkpoint.pendingEvents) || checkpoint.pendingEvents.length > 128 ||
-    Object.keys(checkpoint).some((key) => key !== 'version' && key !== 'pendingEvents')) throw new TypeError('Detector checkpoint is invalid.');
+    (checkpoint.typedEvidence !== undefined && (!Array.isArray(checkpoint.typedEvidence) || checkpoint.typedEvidence.length > 128)) ||
+    (checkpoint.relationCursor !== undefined && (!Number.isSafeInteger(checkpoint.relationCursor) || checkpoint.relationCursor < 0)) ||
+    (checkpoint.claimCursor !== undefined && (!Number.isSafeInteger(checkpoint.claimCursor) || checkpoint.claimCursor < 0
+      || checkpoint.relationCursor === undefined)) ||
+    Object.keys(checkpoint).some((key) => key !== 'version' && key !== 'pendingEvents' && key !== 'typedEvidence'
+      && key !== 'relationCursor' && key !== 'claimCursor')) throw new TypeError('Detector checkpoint is invalid.');
   const identities = new Set<string>();
   const pendingEvents = checkpoint.pendingEvents.map((value) => {
     const event = validateNormalizedCaptureEvent(value as NormalizedCaptureEvent);
@@ -1216,7 +1246,10 @@ function validateCheckpoint(checkpoint: AnalysisStream['checkpoint'], sessionId:
     identities.add(event.id);
     return event;
   });
-  return JSON.stringify({ version: 1, pendingEvents });
+  const typedEvidence = checkpoint.typedEvidence?.map(createEpisodeEvidence);
+  return JSON.stringify({ version: 1, pendingEvents, ...(typedEvidence === undefined ? {} : { typedEvidence }),
+    ...(checkpoint.relationCursor === undefined ? {} : { relationCursor: checkpoint.relationCursor }),
+    ...(checkpoint.claimCursor === undefined ? {} : { claimCursor: checkpoint.claimCursor }) });
 }
 
 function freezeJson(value: unknown): unknown {
@@ -1261,7 +1294,9 @@ function publicReport(report: OperationalLearningReport, secret: Uint8Array): Op
         evidenceEventIds: Object.freeze(value.evidenceEventIds.map(evidenceId)) })
     : value);
   return Object.freeze({ ...report, episodes: Object.freeze(episodes), findings: Object.freeze(findings),
-    episodeEvidence: Object.freeze(episodeEvidence) });
+    episodeEvidence: Object.freeze(episodeEvidence), operationInstructionRevisions: Object.freeze(report.operationInstructionRevisions.map((value) => Object.freeze({
+      ...value, operationKey: recordId(value.operationKey)
+    }))) });
 }
 
 function publicTypedEpisode(value: TypedEpisode, evidenceId: (value: string) => string,
@@ -1289,5 +1324,6 @@ function reportPseudonym(secret: Uint8Array, category: 'evidence' | 'key' | 'rec
 function freezeContext(value: OperationalContextSnapshot): OperationalContextSnapshot {
   return Object.freeze({ ...value,
     instructions: Object.freeze(value.instructions.map((instruction) => Object.freeze({ ...instruction }))),
-    conventions: Object.freeze(value.conventions.map((convention) => Object.freeze({ ...convention }))) });
+    conventions: Object.freeze(value.conventions.map((convention) => Object.freeze({ ...convention }))),
+    ...(value.scopedConventions === undefined ? {} : { scopedConventions: Object.freeze(value.scopedConventions.map((convention) => Object.freeze({ ...convention }))) }) });
 }

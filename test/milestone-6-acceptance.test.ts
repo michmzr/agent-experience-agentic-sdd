@@ -9,11 +9,13 @@ import { runCli } from '../src/cli.js';
 import { DETECTOR_SET_VERSION, OperationalLearningRepository } from '../src/learning/repository.js';
 import { OperationalLearningService } from '../src/learning/service.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
+import { initializeGitRepository } from './helpers/git-repository.js';
 
 test('reports scoped convention candidates and a privacy-bounded analysis shape', () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-m6-acceptance-'));
   const root = mkdtempSync(join(tmpdir(), 'ael-m6-repository-'));
   try {
+    initializeGitRepository(root);
     writeFileSync(join(root, 'AGENTS.md'), 'Use pnpm instead of npm\ncredential-like-marker=never-persist\n');
     const application = new ExperienceService({ dataDir });
     application.initRepository({ id: 'repo-1', root, sources: ['codex'], observedAt: '2026-09-08T10:00:00.000Z' });

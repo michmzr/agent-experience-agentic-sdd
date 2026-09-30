@@ -1,7 +1,22 @@
 #!/usr/bin/env node
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, isAbsolute, join } from 'node:path';
+import { compareBaseline, currentBuildIdentity, runBaseline } from './benchmark/runner.js';
+import { AdvisoryConfigurationStore } from './advice/configuration.js';
+import { retrieveLocalAdvice, type AdviceRequest } from './advice/service.js';
+import { recordLocalAdviceUsage, type AdviceUsageRequest } from './advice/record.js';
+import { CandidateRepository, type CandidateRecord } from './knowledge/candidate-repository.js';
+import { CandidateService } from './knowledge/candidate-service.js';
+import { SqliteCandidateEvidenceResolver } from './knowledge/evidence-resolver.js';
 
+import { defaultDatabasePath } from './storage/database.js';
+import { importTypedEvidence } from './evidence/import.js';
+import { applyRecoveryPlan, createRecoveryPlan, type RecoveryPlan } from './capture/recovery.js';
+import { closeSync, existsSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
+import { createAlignmentPlan, applyAlignmentPlan } from './installation/alignment.js';
+import { qualifyInstallation } from './installation/qualification.js';
+import { inspectInstallation, registeredInstallationRoots } from './installation/inspection.js';
 import { DomainError, errorMessage, ExperienceService } from './application/experience-service.js';
 import { MAX_HOOK_INPUT_BYTES, type PassiveHookSource } from './capture/hook-adapters/contracts.js';
 import type { HookIngressResult } from './capture/hook-ingress.js';
@@ -47,13 +62,17 @@ const scopes = new Set(['global', 'repo'] as const);
 const initScopes = new Set(['global', 'repo', 'workspace'] as const);
 const states = new Set<KnowledgeState>(['candidate', 'observed', 'confirmed', 'verified', 'disputed', 'superseded', 'rejected', 'expired']);
 const reviewSources = new Set(['codex', 'claude-code', 'cursor'] as const);
-const knownCommands = new Set(['init', 'unregister', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence', 'capture', 'analysis']);
+const knownCommands = new Set(['init', 'unregister', 'experience', 'validate', 'inspect', 'lessons', 'retrieve', 'export', 'list', 'stats', 'status', 'status-global', 'review', 'runtime', 'knowledge', 'hooks', 'skill', 'evidence', 'capture', 'analysis', 'installation', 'benchmark', 'advice', 'candidates']);
 
 export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workingDirectory' | 'cliEntrypoint' | 'skillSourceDirectory' | 'homeDirectory' | 'humanOutput'> = {}): CliResult {
   if (args.length === 1 && args[0] === '--help') return { exitCode: 0, stdout: `${usage()}\n`, stderr: '' };
   try {
     const parsed = parseArguments(args);
     const json = parsed.options.has('json');
+    if (parsed.positionals[0] === 'installation') return { exitCode: 0, stdout: JSON.stringify(executeInstallation(parsed, options)) + '\n', stderr: '' };
+    if (parsed.positionals[0] === 'benchmark') return success(executeBenchmark(parsed), json, parsed.positionals, options.humanOutput);
+    if (parsed.positionals[0] === 'advice') return success(executeAdvice(parsed, options.workingDirectory), json, parsed.positionals, options.humanOutput);
+    if (parsed.positionals[0] === 'candidates') return success(executeCandidates(parsed, options.workingDirectory), json, parsed.positionals, options.humanOutput);
     const service = new ExperienceService({ dataDir: optionalString(parsed.options, 'data-dir') });
     const value = execute(service, parsed, options);
     return success(value, json, parsed.positionals, options.humanOutput,
@@ -65,6 +84,176 @@ export function runCli(args: string[], options: Pick<RunCliAsyncOptions, 'workin
       ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' }
       : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${renderHumanError(diagnostic, nextStep(diagnostic.code, args), options.humanOutput)}\n` };
   }
+}
+
+function executeAdvice(parsed: ParsedArguments, workingDirectory?: string): unknown {
+  const [command, subcommand, ...rest] = parsed.positionals;
+  if (command !== 'advice' || rest.length !== 0) throw invalidCommand(command);
+  const dataDir = optionalString(parsed.options, 'data-dir') ?? dirname(defaultDatabasePath());
+  const store = new AdvisoryConfigurationStore(join(dataDir, 'advice.sqlite'));
+  if (subcommand === 'status') {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id']);
+    return store.status(requiredString(parsed.options, 'repository-id'));
+  }
+  if (subcommand === 'configure') {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'enabled']);
+    const enabled = requiredString(parsed.options, 'enabled');
+    if (enabled !== 'true' && enabled !== 'false') throw new SyntaxError('--enabled must be true or false.');
+    return store.setEnabled(requiredString(parsed.options, 'repository-id'), enabled === 'true');
+  }
+  if (subcommand === 'retrieve') {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'input']);
+    const context = readAdviceContext(requiredString(parsed.options, 'input'));
+    return retrieveLocalAdvice(dataDir, workingDirectory ?? process.cwd(), context);
+  }
+  if (subcommand === 'record') {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'input']);
+    return recordLocalAdviceUsage(dataDir, workingDirectory ?? process.cwd(),
+      readAdviceUsageInput(requiredString(parsed.options, 'input')));
+  }
+  throw invalidCommand(command);
+}
+
+function readAdviceContext(path: string): AdviceRequest {
+  const value = JSON.parse(readBoundedAdviceInput(path)) as Record<string, unknown>;
+  const required = ['repositoryId', 'sessionId', 'operationSignature', 'contextRevision', 'conditions', 'retrievalRef'];
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).some(key => ![...required, 'subproject'].includes(key))
+    || required.some(key => !(key in value))
+    || ['repositoryId', 'sessionId', 'operationSignature', 'contextRevision', 'retrievalRef'].some(key =>
+      typeof value[key] !== 'string' || !/^[A-Za-z0-9._:/-]{1,160}$/.test(value[key] as string))
+    || value.subproject !== undefined && (typeof value.subproject !== 'string'
+      || !/^[A-Za-z0-9._/-]{1,160}$/.test(value.subproject))
+    || !Array.isArray(value.conditions) || value.conditions.length > 32
+    || value.conditions.some(condition => typeof condition !== 'string' || !/^[A-Za-z0-9._:/-]{1,160}$/.test(condition))) {
+    throw new SyntaxError('Advice context is invalid.');
+  }
+  return value as unknown as AdviceRequest;
+}
+
+function readAdviceUsageInput(path: string): AdviceUsageRequest {
+  const value = JSON.parse(readBoundedAdviceInput(path)) as Record<string, unknown>;
+  const fields = ['repositoryId', 'lessonId', 'lessonRevision', 'sessionId', 'contextRevision',
+    'bundleId', 'kind', 'origin', 'witnessRef'];
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).length !== fields.length || fields.some(field =>
+      typeof value[field] !== 'string' || !/^[A-Za-z0-9._:/-]{1,160}$/.test(value[field] as string))) {
+    throw new SyntaxError('Advice usage input is invalid.');
+  }
+  return value as unknown as AdviceUsageRequest;
+}
+
+function readBoundedAdviceInput(path: string): string {
+  const maximumBytes = 16 * 1024;
+  const descriptor = openSync(path, 'r');
+  try {
+    const bytes = Buffer.alloc(maximumBytes + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = readSync(descriptor, bytes, length, bytes.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    if (length > maximumBytes) throw new SyntaxError('Advice context exceeds 16 KiB.');
+    return bytes.toString('utf8', 0, length);
+  } finally { closeSync(descriptor); }
+}
+
+function executeCandidates(parsed: ParsedArguments, workingDirectory?: string): unknown {
+  const [, subcommand, ...rest] = parsed.positionals;
+  const repositoryId = requiredString(parsed.options, 'repository-id');
+  const dataDir = optionalString(parsed.options, 'data-dir') ?? dirname(defaultDatabasePath());
+  const databasePath = join(dataDir, 'experience.sqlite');
+  if (subcommand === 'list' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'state']);
+    if (!existsSync(databasePath)) return Object.freeze([]);
+    const repository = new CandidateRepository(databasePath);
+    try {
+      const state = optionalString(parsed.options, 'state');
+      if (state !== undefined && !states.has(state as KnowledgeState)) throw new SyntaxError('Knowledge state is unsupported.');
+      return Object.freeze(repository.list(repositoryId).filter(candidate => state === undefined || candidate.state === state)
+        .map(candidate => publicCandidate(candidate)));
+    } finally { repository.close(); }
+  }
+  if (subcommand === 'inspect' && rest.length === 1) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id']);
+    if (!existsSync(databasePath)) throw new DomainError('NOT_FOUND', 'Candidate was not found.');
+    const repository = new CandidateRepository(databasePath);
+    try {
+      const candidate = repository.inspect(repositoryId, rest[0]!);
+      if (!candidate) throw new DomainError('NOT_FOUND', 'Candidate was not found.');
+      const history = repository.history(repositoryId, candidate.id).map(review => Object.freeze({
+        from: review.from, to: review.to, evidenceKey: opaquePublicKey(review.evidenceId),
+        actorKey: opaquePublicKey(review.actorId), reviewedAt: review.reviewedAt
+      }));
+      return Object.freeze({ ...publicCandidate(candidate), history: Object.freeze(history) });
+    } finally { repository.close(); }
+  }
+  if (subcommand === 'review' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'input']);
+    if (resolveCliContext(workingDirectory ?? process.cwd())?.id !== repositoryId) {
+      throw new DomainError('INVALID_SCOPE', 'Candidate review repository scope is invalid.');
+    }
+    if (!existsSync(databasePath)) throw new DomainError('NOT_FOUND', 'Candidate evidence was not found.');
+    const input = readCandidateReviewInput(requiredString(parsed.options, 'input'));
+    const repository = new CandidateRepository(databasePath);
+    let resolver: SqliteCandidateEvidenceResolver | undefined;
+    try {
+      resolver = new SqliteCandidateEvidenceResolver(databasePath, input.sessionId);
+      const candidate = new CandidateService(repository, resolver).review({
+        repositoryId, candidateId: input.candidateId, target: input.target,
+        actorId: input.actorId, evidenceId: input.evidenceId, reviewedAt: input.reviewedAt
+      });
+      return publicCandidate(candidate);
+    } finally { resolver?.close(); repository.close(); }
+  }
+  if (subcommand === 'backfill' && (rest[0] === 'preview' || rest[0] === 'apply') && rest.length === 1) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id']);
+    if (resolveCliContext(workingDirectory ?? process.cwd())?.id !== repositoryId) {
+      throw new DomainError('INVALID_SCOPE', 'Candidate backfill repository scope is invalid.');
+    }
+    if (!existsSync(databasePath)) return Object.freeze({ processed: 0, pendingCount: 0, nextCursor: null });
+    const repository = new CandidateRepository(databasePath);
+    try {
+      const service = new CandidateService(repository);
+      const processed = rest[0] === 'apply' ? service.backfillOperational(repositoryId) : 0;
+      return Object.freeze({ processed, ...service.previewOperationalBackfill(repositoryId) });
+    } finally { repository.close(); }
+  }
+  throw invalidCommand('candidates');
+}
+
+function readCandidateReviewInput(path: string): {
+  readonly candidateId: string; readonly sessionId: string; readonly target: CandidateRecord['state'];
+  readonly actorId: string; readonly evidenceId: string; readonly reviewedAt: string
+} {
+  const value = JSON.parse(readBoundedAdviceInput(path)) as Record<string, unknown>;
+  const fields = ['candidateId', 'sessionId', 'target', 'actorId', 'evidenceId', 'reviewedAt'];
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).length !== fields.length
+    || fields.some(field => typeof value[field] !== 'string')
+    || ['candidateId', 'sessionId', 'actorId', 'evidenceId'].some(field =>
+      !/^[A-Za-z0-9._:@/-]{1,512}$/.test(value[field] as string))
+    || !states.has(value.target as KnowledgeState)
+    || !Number.isFinite(Date.parse(value.reviewedAt as string))) {
+    throw new SyntaxError('Candidate review input is invalid.');
+  }
+  return value as unknown as ReturnType<typeof readCandidateReviewInput>;
+}
+
+function publicCandidate(candidate: CandidateRecord) {
+  return Object.freeze({
+    id: candidate.id, repositoryId: candidate.repositoryId, state: candidate.state, kind: candidate.kind,
+    statement: candidate.statement, applicability: candidate.applicability, revision: candidate.revision,
+    contradictionState: candidate.contradictionState,
+    origins: Object.freeze(candidate.origins.map(origin => Object.freeze({
+      source: origin.source, originKey: opaquePublicKey(origin.originId), evidenceCount: origin.evidenceEventIds.length
+    })))
+  });
+}
+
+function opaquePublicKey(value: string): string {
+  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
 }
 
 export async function runCliAsync(args: string[], options: RunCliAsyncOptions = {}): Promise<CliResult> {
@@ -312,16 +501,45 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   if (command === 'capture' && subcommand === 'status' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json']); return service.captureStatus();
   }
+  if (command === 'capture' && subcommand === 'recovery' && rest.length === 1 && rest[0] === 'plan') {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'output', 'limit', 'cursor']);
+    const dataDir = optionalString(parsed.options, 'data-dir') ?? dirname(defaultDatabasePath());
+    const limitInput = optionalString(parsed.options, 'limit');
+    const limit = limitInput === undefined ? undefined : Number(limitInput);
+    const plan = createRecoveryPlan({ spoolPath: join(dataDir, 'capture-spool.sqlite'),
+      experiencePath: join(dataDir, 'experience.sqlite'), repositoryId: requiredString(parsed.options, 'repository-id'),
+      now: new Date().toISOString(), ...(limit === undefined ? {} : { limit }),
+      ...(optionalString(parsed.options, 'cursor') === undefined ? {} : { cursor: optionalString(parsed.options, 'cursor') }) });
+    writeFileSync(requiredString(parsed.options, 'output'), JSON.stringify(plan, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+    return { schemaVersion: 1, planHash: plan.planHash, selected: plan.selections.length, ineligible: plan.ineligible.length,
+      ...(plan.nextCursor === undefined ? {} : { nextCursor: plan.nextCursor }) };
+  }
+  if (command === 'capture' && subcommand === 'recovery' && rest.length === 1 && rest[0] === 'apply') {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'input']);
+    const dataDir = optionalString(parsed.options, 'data-dir') ?? dirname(defaultDatabasePath());
+    const plan = JSON.parse(readBoundedRecoveryPlan(requiredString(parsed.options, 'input'))) as RecoveryPlan;
+    return applyRecoveryPlan({ spoolPath: join(dataDir, 'capture-spool.sqlite'), experiencePath: join(dataDir, 'experience.sqlite'),
+      plan, now: new Date().toISOString() });
+  }
   if (command === 'analysis' && subcommand === 'run' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id']);
     return service.runOperationalAnalysis(contextualRepositoryId(parsed.options, options.workingDirectory));
   }
+  if (command === 'analysis' && subcommand === 'reconcile' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'apply', 'after-session']);
+    return service.reconcileOperationalAnalysis(requiredString(parsed.options, 'repository-id'), {
+      ...(parsed.options.has('apply') ? { apply: true } : {}),
+      ...(optionalString(parsed.options, 'after-session') === undefined ? {} : { afterSession: optionalString(parsed.options, 'after-session') })
+    });
+  }
   if (command === 'analysis' && subcommand === 'report' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'session', 'schema-version']);
     const schemaVersion = optionalSchemaVersion(parsed.options);
-    return schemaVersion === 2
-      ? service.operationalAnalysisReportV2(contextualRepositoryId(parsed.options, options.workingDirectory))
-      : service.operationalAnalysisReport(contextualRepositoryId(parsed.options, options.workingDirectory), optionalString(parsed.options, 'session'));
+    return schemaVersion === 3
+      ? service.operationalAnalysisReportV3(contextualRepositoryId(parsed.options, options.workingDirectory))
+      : schemaVersion === 2
+        ? service.operationalAnalysisReportV2(contextualRepositoryId(parsed.options, options.workingDirectory))
+        : service.operationalAnalysisReport(contextualRepositoryId(parsed.options, options.workingDirectory), optionalString(parsed.options, 'session'));
   }
   if (command === 'analysis' && subcommand === 'status' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'session']);
@@ -365,15 +583,23 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json']);
     return service.sessionEvidence(rest[0]);
   }
+  if (command === 'evidence' && subcommand === 'import' && rest.length === 0) {
+    assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'input']);
+    const databasePath = parsed.options.has('data-dir')
+      ? join(requiredString(parsed.options, 'data-dir'), 'experience.sqlite') : defaultDatabasePath();
+    return importTypedEvidence(databasePath, requiredString(parsed.options, 'repository-id'), requiredString(parsed.options, 'input'));
+  }
   if (command === 'status-global' && subcommand === undefined && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository', 'schema-version']);
     const schemaVersion = optionalSchemaVersion(parsed.options); const repository = optionalRepositoryId(parsed.options);
-    return schemaVersion === 2 ? service.statusGlobalV2(repository?.id) : service.statusGlobal(repository?.id);
+    return schemaVersion === 3 ? service.statusGlobalV3(repository?.id)
+      : schemaVersion === 2 ? service.statusGlobalV2(repository?.id) : service.statusGlobal(repository?.id);
   }
   if (command === 'status' && subcommand === undefined && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'json', 'repository-id', 'repository', 'schema-version']);
     const schemaVersion = optionalSchemaVersion(parsed.options); const repository = repositorySelection(parsed.options, options.workingDirectory);
-    return schemaVersion === 2 ? service.statusV2(repository) : service.status(repository);
+    return schemaVersion === 3 ? service.statusV3(repository)
+      : schemaVersion === 2 ? service.statusV2(repository) : service.status(repository);
   }
   if (command === 'runtime' && subcommand === 'evaluate' && rest.length === 0) {
     assertNoUnknownOptions(parsed.options, ['data-dir', 'input', 'json', 'profile', 'refresh']);
@@ -414,6 +640,22 @@ function execute(service: ExperienceService, parsed: ParsedArguments, options: P
   }
   if (command === 'skill') return executeSkill(parsed, options);
   throw invalidCommand(command);
+}
+
+function readBoundedRecoveryPlan(path: string): string {
+  const maximumBytes = 256 * 1024;
+  const descriptor = openSync(path, 'r');
+  try {
+    const bytes = Buffer.alloc(maximumBytes + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = readSync(descriptor, bytes, length, bytes.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    if (length > maximumBytes) throw new RangeError('Recovery plan exceeds 256 KiB.');
+    return bytes.toString('utf8', 0, length);
+  } finally { closeSync(descriptor); }
 }
 
 function diagnosticDirectory(options: Map<string, string | true>, workingDirectory?: string): string {
@@ -486,11 +728,11 @@ function assertNoUnknownOptions(options: Map<string, string | true>, allowed: re
 function optionalString(options: Map<string, string | true>, name: string): string | undefined {
   const value = options.get(name); if (value === undefined) return undefined; if (value === true) throw new SyntaxError(`Option requires a value: --${name}.`); return value;
 }
-function optionalSchemaVersion(options: Map<string, string | true>): 2 | undefined {
+function optionalSchemaVersion(options: Map<string, string | true>): 2 | 3 | undefined {
   const version = optionalString(options, 'schema-version');
   if (version === undefined) return undefined;
-  if (version !== '2') throw new SyntaxError('Schema version must be 2.');
-  return 2;
+  if (version !== '2' && version !== '3') throw new SyntaxError('Schema version must be 2 or 3.');
+  return version === '2' ? 2 : 3;
 }
 function requiredString(options: Map<string, string | true>, name: string): string {
   const value = optionalString(options, name); if (value === undefined) throw new SyntaxError(`Option is required: --${name}.`); return value;
@@ -579,7 +821,7 @@ function requiredContext(kind: string, option: string): never {
 function success(value: unknown, json: boolean, positionals: readonly string[], humanOutput?: HumanRenderOptions, context?: CommandPresentationContext): CliResult {
   const version2 = value as { schemaVersion?: number; installation?: { state?: string } };
   const exitCode = (positionals[0] === 'runtime' && positionals[1] === 'evaluate' && (value as { outcome?: string }).outcome === 'BLOCK')
-    || (positionals[0] === 'status' && (version2.schemaVersion === 2 ? version2.installation?.state !== 'ready' : (value as { status?: string }).status !== 'ready'))
+    || (positionals[0] === 'status' && (version2.schemaVersion === 2 || version2.schemaVersion === 3 ? version2.installation?.state !== 'ready' : (value as { status?: string }).status !== 'ready'))
     || (positionals[0] === 'hooks' && positionals[1] === 'verify' && (value as { status?: string }).status !== 'ready') ? 1 : 0;
   return json ? { exitCode, stdout: `${JSON.stringify(value)}\n`, stderr: '' } : { exitCode, stdout: `${renderCommandResult(value, positionals, humanOutput, context)}\n`, stderr: '' };
 }
@@ -613,9 +855,25 @@ function usage(): string {
     '  init --scope global',
     '  init --scope repo --hooks <codex,cursor>',
     '  init --scope workspace --hooks <codex,cursor> [--workspace-id <slug>]',
+    '  installation qualify --repository <path> [--json]',
+    '  installation plan --repository <path> --manifest <build-manifest.json> --output <plan.json>',
+    '  installation apply --input <plan.json> [--json]',
+    '  installation rollback --input <plan.json> [--json]',
+    '  installation inspect [--repository <path>|--repository-id <id>] [--json]',
+    '  benchmark identity [--json]',
+    '  benchmark run --manifest <run.json> --output <report.json>',
+    '  benchmark compare --baseline <report.json> --candidate <report.json> --output <comparison.json>',
+    '  advice configure --repository-id <id> --enabled true|false --json',
+    '  advice status --repository-id <id> --json',
+    '  advice retrieve --input <context.json> --json',
+    '  advice record --input <usage.json> --json',
+    '  candidates list --repository-id <id> [--state <state>] --json',
+    '  candidates inspect <id> --repository-id <id> --json',
+    '  candidates review --repository-id <id> --input <review.json> --json',
+    '  candidates backfill preview|apply --repository-id <id> --json',
     '  unregister [--repository-id <id>]',
-    '  status [--repository <path>|--repository-id <id>] [--schema-version 2]',
-    '  status-global [--repository <path>|--repository-id <id>] [--schema-version 2]',
+    '  status [--repository <path>|--repository-id <id>] [--schema-version <2|3>]',
+    '  status-global [--repository <path>|--repository-id <id>] [--schema-version <2|3>]',
     '  hooks verify --worktree <path>',
     '  hooks diagnostics [--repository <path>]',
     '',
@@ -627,10 +885,14 @@ function usage(): string {
     '  list records [--repository <path>|--repository-id <id>]',
     '  stats [--repository <path>|--repository-id <id>]',
     '  evidence session <session-id>',
+    '  evidence import --repository-id <id> --input <artifact.json> --json',
     '  capture drain',
     '  capture status',
+    '  capture recovery plan --repository-id <id> --output <plan.json> [--limit <1..100>] [--cursor <id>]',
+    '  capture recovery apply --input <plan.json> --json',
     '  analysis run [--repository-id <id>]',
-    '  analysis report [--repository-id <id>] [--session <id>] [--schema-version 2]',
+    '  analysis reconcile --repository-id <id> [--apply] [--after-session <id>] --json',
+    '  analysis report [--repository-id <id>] [--session <id>] [--schema-version <2|3>]',
     '  analysis status [--repository-id <id>] [--session <id>]',
     '  analysis worker',
     '',
@@ -712,4 +974,57 @@ function writeProcessStderr(line: string): Promise<void> {
       reject(error);
     }
   });
+}
+
+function executeInstallation(parsed: ParsedArguments, options: Pick<RunCliAsyncOptions, 'workingDirectory'>): unknown {
+  if (parsed.positionals.length !== 2) throw new SyntaxError('Unknown installation command.');
+  const command = parsed.positionals[1];
+  if (command === 'inspect') {
+    assertNoUnknownOptions(parsed.options, ['repository', 'repository-id', 'json', 'data-dir']);
+    const selection = optionalRepositoryId(parsed.options);
+    if (selection && !selection.root) {
+      const dataDir = optionalString(parsed.options, 'data-dir');
+      const registrations = registeredInstallationRoots(dataDir === undefined ? defaultDatabasePath() : join(dataDir, 'experience.sqlite'), selection.id);
+      if (!registrations.length) throw new SyntaxError('Repository ID is not registered.');
+      return inspectInstallation(registrations[0].root, registrations[0].id);
+    }
+    const repository = selection ?? resolveRepository(options.workingDirectory ?? process.cwd());
+    if (!repository?.root) throw new SyntaxError('Repository root required.');
+    return inspectInstallation(repository.root, repository.id);
+  }
+  if (command === 'qualify') {
+    assertNoUnknownOptions(parsed.options, ['repository', 'json']);
+    const root = resolveRepositoryRoot(requiredString(parsed.options, 'repository'));
+    if (!root) throw new SyntaxError('Repository root required.');
+    return qualifyInstallation(root.root);
+  }
+  if (command === 'plan') {
+    assertNoUnknownOptions(parsed.options, ['repository', 'manifest', 'output', 'json']);
+    const plan = createAlignmentPlan(requiredString(parsed.options, 'repository'), requiredString(parsed.options, 'manifest'));
+    writeFileSync(requiredString(parsed.options, 'output'), JSON.stringify(plan, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    return { status: 'planned', planId: plan.planId, buildId: plan.buildId };
+  }
+  if (command === 'apply' || command === 'rollback') {
+    assertNoUnknownOptions(parsed.options, ['input', 'json']);
+    return applyAlignmentPlan(JSON.parse(readFileSync(requiredString(parsed.options, 'input'), 'utf8')), { rollback: command === 'rollback' });
+  }
+  throw new SyntaxError('Unknown installation command.');
+}
+
+function executeBenchmark(parsed: ParsedArguments): unknown {
+  if (parsed.positionals.length !== 2) throw new SyntaxError('Unknown benchmark command.');
+  const command = parsed.positionals[1];
+  if (command === 'identity') {
+    assertNoUnknownOptions(parsed.options, ['json']);
+    return currentBuildIdentity();
+  }
+  if (command === 'run') {
+    assertNoUnknownOptions(parsed.options, ['manifest', 'output', 'json']);
+    return runBaseline(requiredString(parsed.options, 'manifest'), requiredString(parsed.options, 'output'));
+  }
+  if (command === 'compare') {
+    assertNoUnknownOptions(parsed.options, ['baseline', 'candidate', 'output', 'json']);
+    return compareBaseline(requiredString(parsed.options, 'baseline'), requiredString(parsed.options, 'candidate'), requiredString(parsed.options, 'output'));
+  }
+  throw new SyntaxError('Unknown benchmark command.');
 }

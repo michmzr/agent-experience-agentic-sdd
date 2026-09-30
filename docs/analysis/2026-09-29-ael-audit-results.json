@@ -1,0 +1,329 @@
+[
+  {
+    "query": "PRAGMA quick_check",
+    "rows": [
+      {
+        "quick_check": "ok"
+      }
+    ]
+  },
+  {
+    "query": "PRAGMA foreign_key_check",
+    "rows": []
+  },
+  {
+    "query": "SELECT COUNT(*) AS repositories FROM repositories",
+    "rows": [
+      {
+        "repositories": 5
+      }
+    ]
+  },
+  {
+    "query": "SELECT COUNT(*) AS sessions FROM sessions",
+    "rows": [
+      {
+        "sessions": 76
+      }
+    ]
+  },
+  {
+    "query": "SELECT COUNT(*) AS events FROM events",
+    "rows": [
+      {
+        "events": 5084
+      }
+    ]
+  },
+  {
+    "query": "SELECT MIN(occurred_at) AS first_event, MAX(occurred_at) AS last_event FROM events",
+    "rows": [
+      {
+        "first_event": "2026-09-07T09:03:24.000Z",
+        "last_event": "2026-09-29T14:51:39.154Z"
+      }
+    ]
+  },
+  {
+    "query": "SELECT r.repository_root, COUNT(DISTINCT s.id) AS sessions, COUNT(e.id) AS events FROM repositories r LEFT JOIN sessions s ON s.repository_id=r.repository_id LEFT JOIN events e ON e.session_id=s.id GROUP BY r.repository_id",
+    "rows": [
+      {
+        "repository_root": "/Users/michmzr/projects/vimeo-downloader",
+        "sessions": 1,
+        "events": 0
+      },
+      {
+        "repository_root": "/Users/michmzr/projects/agent-experience-agentic-sdd",
+        "sessions": 9,
+        "events": 1680
+      },
+      {
+        "repository_root": "/Users/michmzr/1.Projects/sisterhood",
+        "sessions": 12,
+        "events": 2291
+      },
+      {
+        "repository_root": "/Users/michmzr/projects/wkregukobiet",
+        "sessions": 15,
+        "events": 477
+      },
+      {
+        "repository_root": "/Users/michmzr/SecondBrain",
+        "sessions": 37,
+        "events": 635
+      }
+    ]
+  },
+  {
+    "query": "SELECT state, COUNT(*) AS count FROM knowledge GROUP BY state",
+    "rows": [
+      {
+        "state": "verified",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "query": "SELECT k.id, k.state, m.scope, m.approval_kind, m.created_at FROM knowledge k JOIN knowledge_metadata m ON m.knowledge_id=k.id",
+    "rows": [
+      {
+        "id": "knowledge-linkedin-posts-path-20260907",
+        "state": "verified",
+        "scope": "global",
+        "approval_kind": "user",
+        "created_at": "2026-09-07T09:03:24.000Z"
+      }
+    ]
+  },
+  {
+    "query": "SELECT (SELECT COUNT(*) FROM operational_episodes) AS episodes, (SELECT COUNT(*) FROM operational_findings) AS findings, (SELECT COUNT(*) FROM operational_candidates) AS candidates, (SELECT COUNT(*) FROM operational_insufficient_findings) AS insufficient_findings",
+    "rows": [
+      {
+        "episodes": 0,
+        "findings": 0,
+        "candidates": 0,
+        "insufficient_findings": 0
+      }
+    ]
+  },
+  {
+    "query": "SELECT source, phase, capture_outcome, COUNT(*) AS count FROM capture_events GROUP BY source,phase,capture_outcome",
+    "rows": [
+      {
+        "source": "codex",
+        "phase": "post-result",
+        "capture_outcome": "unknown",
+        "count": 2503
+      },
+      {
+        "source": "codex",
+        "phase": "pre-action",
+        "capture_outcome": null,
+        "count": 2580
+      }
+    ]
+  },
+  {
+    "query": "SELECT COUNT(*) AS results, SUM(e.exit_status IS NOT NULL) AS exit_status_present, SUM(p.event_id IS NOT NULL) AS linked_results FROM capture_events c JOIN events e ON e.id=c.event_id LEFT JOIN capture_events p ON p.source=c.source AND p.source_event_id=c.related_event_id WHERE c.phase='post-result'",
+    "rows": [
+      {
+        "results": 2503,
+        "exit_status_present": 0,
+        "linked_results": 2503
+      }
+    ]
+  },
+  {
+    "query": "SELECT repository_id, state, COUNT(*) AS count FROM operational_analysis_jobs GROUP BY repository_id,state",
+    "rows": [
+      {
+        "repository_id": "220ce154c82b7b38a2c38078ca640f0e4a9df4a3462f7ac9acb24ba785040ed1",
+        "state": "completed",
+        "count": 1573
+      },
+      {
+        "repository_id": "220ce154c82b7b38a2c38078ca640f0e4a9df4a3462f7ac9acb24ba785040ed1",
+        "state": "quarantined-input",
+        "count": 1
+      },
+      {
+        "repository_id": "a629a037155303583b9ab54b6512e13ac15570866c71d63cc85ff5854ad6124f",
+        "state": "completed",
+        "count": 1092
+      },
+      {
+        "repository_id": "secondbrain",
+        "state": "completed",
+        "count": 92
+      }
+    ]
+  },
+  {
+    "query": "SELECT detector,status,COUNT(*) AS count,SUM(examined_events) AS examined_events,SUM(findings) AS findings FROM operational_analysis_coverage GROUP BY detector,status",
+    "rows": [
+      {
+        "detector": "m6-deterministic@1",
+        "status": "completed",
+        "count": 1163,
+        "examined_events": 109089,
+        "findings": 0
+      },
+      {
+        "detector": "m9-typed-evidence@1",
+        "status": "completed",
+        "count": 845,
+        "examined_events": 2045,
+        "findings": 0
+      },
+      {
+        "detector": "m9-typed-evidence@1",
+        "status": "incomplete",
+        "count": 2,
+        "examined_events": 1024,
+        "findings": 0
+      }
+    ]
+  },
+  {
+    "query": "SELECT json_extract(payload_json,'$.kind') AS kind,json_extract(payload_json,'$.state') AS state,COUNT(*) AS count FROM operational_episode_evidence GROUP BY kind,state",
+    "rows": [
+      {
+        "kind": "tool-request",
+        "state": "observed",
+        "count": 1553
+      },
+      {
+        "kind": "tool-result",
+        "state": "observed",
+        "count": 1516
+      }
+    ]
+  },
+  {
+    "query": "SELECT s.repository_id,COUNT(*) AS events_without_stream FROM events e JOIN sessions s ON s.id=e.session_id WHERE NOT EXISTS(SELECT 1 FROM operational_analysis_streams a WHERE a.repository_id=s.repository_id AND a.session_id=s.id) GROUP BY s.repository_id",
+    "rows": [
+      {
+        "repository_id": null,
+        "events_without_stream": 1
+      },
+      {
+        "repository_id": "db3f2e8c60ddadde09f72ceb5c73346185d7653a2c257640f837c4f88a1c34a0",
+        "events_without_stream": 477
+      },
+      {
+        "repository_id": "secondbrain",
+        "events_without_stream": 513
+      }
+    ]
+  },
+  {
+    "database": "capture-spool.sqlite",
+    "query": "PRAGMA quick_check",
+    "rows": [
+      {
+        "quick_check": "ok"
+      }
+    ]
+  },
+  {
+    "database": "capture-spool.sqlite",
+    "query": "SELECT state,COUNT(*) count,MIN(admitted_at) first,MAX(attempts) max_attempts FROM records GROUP BY state",
+    "rows": [
+      {
+        "state": "pending",
+        "count": 41,
+        "first": "2026-09-09T18:52:51.053Z",
+        "max_attempts": 1411
+      }
+    ]
+  },
+  {
+    "database": "capture-spool.sqlite",
+    "query": "SELECT admitted,committed,quarantined,failed_admission,delayed_delivery FROM counters",
+    "rows": [
+      {
+        "admitted": 6516,
+        "committed": 5487,
+        "quarantined": 988,
+        "failed_admission": 0,
+        "delayed_delivery": 41
+      }
+    ]
+  },
+  {
+    "database": "capture-spool.sqlite",
+    "query": "SELECT code,COUNT(*) count FROM quarantined_records GROUP BY code",
+    "rows": [
+      {
+        "code": "CORRUPT",
+        "count": 988
+      }
+    ]
+  },
+  {
+    "database": "capture-spool.sqlite",
+    "query": "SELECT disposition,COUNT(*) count FROM capture_receipts GROUP BY disposition",
+    "rows": [
+      {
+        "disposition": "accepted",
+        "count": 942
+      },
+      {
+        "disposition": "delivery-retry",
+        "count": 7282
+      },
+      {
+        "disposition": "privacy-redaction",
+        "count": 35
+      },
+      {
+        "disposition": "quarantine",
+        "count": 2
+      },
+      {
+        "disposition": "unsafe-normalization",
+        "count": 1692
+      },
+      {
+        "disposition": "unsupported-tool",
+        "count": 47
+      }
+    ]
+  },
+  {
+    "database": "capture-diagnostics.sqlite",
+    "query": "PRAGMA quick_check",
+    "rows": [
+      {
+        "quick_check": "ok"
+      }
+    ]
+  },
+  {
+    "database": "capture-diagnostics.sqlite",
+    "query": "SELECT * FROM capture_diagnostic_counts",
+    "rows": [
+      {
+        "source": "cursor",
+        "scope_kind": "repository",
+        "scope_id": "a271f384024841a3b8ff70b52a43893a19fdfd15e700f0e24d5d24974778a29a",
+        "category": "invalid-working-directory",
+        "count": 154
+      },
+      {
+        "source": "cursor",
+        "scope_kind": "repository",
+        "scope_id": "db3f2e8c60ddadde09f72ceb5c73346185d7653a2c257640f837c4f88a1c34a0",
+        "category": "invalid-working-directory",
+        "count": 227
+      },
+      {
+        "source": "cursor",
+        "scope_kind": "workspace",
+        "scope_id": "secondbrain",
+        "category": "invalid-working-directory",
+        "count": 1400
+      }
+    ]
+  }
+]

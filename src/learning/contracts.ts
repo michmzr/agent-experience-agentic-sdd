@@ -18,6 +18,7 @@ export interface EpisodeEvidence {
   readonly id: string;
   readonly kind: EpisodeEvidenceKind;
   readonly state: EpisodeEvidenceState;
+  readonly origin?: 'source-observed' | 'user-declared' | 'agent-claimed' | 'analyzer-inferred';
   readonly decisionKey?: string;
   readonly scopeKey?: string;
   readonly reasonClass?: EpisodeEvidenceReasonClass;
@@ -28,6 +29,9 @@ export interface EpisodeEvidence {
 export interface DetectorCheckpoint {
   readonly version: 1;
   readonly pendingEvents: readonly CapturedEventRecord[];
+  readonly typedEvidence?: readonly EpisodeEvidence[];
+  readonly relationCursor?: number;
+  readonly claimCursor?: number;
 }
 
 export function emptyDetectorCheckpoint(): DetectorCheckpoint {
@@ -38,7 +42,12 @@ export function validateDetectorCheckpoint(value: unknown, sessionId: string): D
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Detector checkpoint is invalid.');
   const record = value as Record<string, unknown>;
   if (record.version !== 1 || !Array.isArray(record.pendingEvents) || record.pendingEvents.length > 128 ||
-    Object.keys(record).some((key) => key !== 'version' && key !== 'pendingEvents')) {
+    (record.typedEvidence !== undefined && (!Array.isArray(record.typedEvidence) || record.typedEvidence.length > 128)) ||
+    (record.relationCursor !== undefined && (!Number.isSafeInteger(record.relationCursor) || (record.relationCursor as number) < 0)) ||
+    (record.claimCursor !== undefined && (!Number.isSafeInteger(record.claimCursor) || (record.claimCursor as number) < 0
+      || record.relationCursor === undefined)) ||
+    Object.keys(record).some((key) => key !== 'version' && key !== 'pendingEvents' && key !== 'typedEvidence'
+      && key !== 'relationCursor' && key !== 'claimCursor')) {
     throw new TypeError('Detector checkpoint is invalid.');
   }
   const identities = new Set<string>();
@@ -49,7 +58,14 @@ export function validateDetectorCheckpoint(value: unknown, sessionId: string): D
     identities.add(event.id);
     return event;
   });
-  return Object.freeze({ version: 1, pendingEvents: Object.freeze(pendingEvents) });
+  const typedEvidence = record.typedEvidence === undefined ? undefined : (record.typedEvidence as EpisodeEvidence[]).map(createEpisodeEvidence);
+  if (typedEvidence && new Set(typedEvidence.map(({ id }) => id)).size !== typedEvidence.length) {
+    throw new TypeError('Detector checkpoint contains duplicate typed evidence identity.');
+  }
+  return Object.freeze({ version: 1, pendingEvents: Object.freeze(pendingEvents),
+    ...(typedEvidence === undefined ? {} : { typedEvidence: Object.freeze(typedEvidence) }),
+    ...(record.relationCursor === undefined ? {} : { relationCursor: record.relationCursor as number }),
+    ...(record.claimCursor === undefined ? {} : { claimCursor: record.claimCursor as number }) });
 }
 
 export interface AnalysisCoverage {
@@ -104,6 +120,9 @@ export function createEpisodeEvidence(value: EpisodeEvidence): EpisodeEvidence {
   assertEvidenceIdentifier(value.id, 'Evidence identity');
   if (!episodeEvidenceKinds.has(value.kind)) throw new TypeError('Evidence kind is invalid.');
   if (!episodeEvidenceStates.has(value.state)) throw new TypeError('Evidence state is invalid.');
+  if (value.origin !== undefined && !['source-observed', 'user-declared', 'agent-claimed', 'analyzer-inferred'].includes(value.origin)) {
+    throw new TypeError('Evidence origin is invalid.');
+  }
   optionalEvidenceIdentifier(value.decisionKey, 'Evidence decision key');
   optionalEvidenceIdentifier(value.scopeKey, 'Evidence scope key');
   if (value.reasonClass !== undefined && !episodeEvidenceReasonClasses.has(value.reasonClass)) throw new TypeError('Evidence reason class is invalid.');
@@ -114,6 +133,7 @@ export function createEpisodeEvidence(value: EpisodeEvidence): EpisodeEvidence {
     id: value.id,
     kind: value.kind,
     state: value.state,
+    ...(value.origin === undefined ? {} : { origin: value.origin }),
     ...(value.decisionKey === undefined ? {} : { decisionKey: value.decisionKey }),
     ...(value.scopeKey === undefined ? {} : { scopeKey: value.scopeKey }),
     ...(value.reasonClass === undefined ? {} : { reasonClass: value.reasonClass }),
@@ -215,7 +235,7 @@ const episodeEvidenceStates = new Set<EpisodeEvidenceState>(['observed', 'succee
 
 const episodeEvidenceReasonClasses = new Set<EpisodeEvidenceReasonClass>(['failure', 'instruction', 'superseded', 'verification']);
 
-const episodeEvidenceFields = new Set<keyof EpisodeEvidence>(['id', 'kind', 'state', 'decisionKey', 'scopeKey', 'reasonClass', 'detectorVersion', 'evidenceIds']);
+const episodeEvidenceFields = new Set<keyof EpisodeEvidence>(['id', 'kind', 'state', 'origin', 'decisionKey', 'scopeKey', 'reasonClass', 'detectorVersion', 'evidenceIds']);
 
 function assertEpisodeEvidenceFields(value: EpisodeEvidence): void {
   for (const field of Reflect.ownKeys(value)) {

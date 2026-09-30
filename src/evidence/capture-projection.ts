@@ -1,6 +1,18 @@
 import type { CapturedEventRecord } from '../capture/contracts.js';
 import type { Session } from '../domain/types.js';
-import type { EvidenceObservation, SessionEvidenceInput } from './contracts.js';
+import type { EvidenceObservation, ResultInterpretation, SessionEvidenceInput } from './contracts.js';
+
+export function interpretCapturedProcess(request: CapturedEventRecord, result: CapturedEventRecord): ResultInterpretation {
+  if (request.phase !== 'pre-action' || result.phase !== 'post-result' || request.source !== result.source
+    || request.sessionId !== result.sessionId || result.relatedEventId !== request.sourceEventId) {
+    throw new TypeError('Process interpretation requires a linked request and result.');
+  }
+  if (result.exitStatus === 0) return Object.freeze({ version: 1, kind: 'unknown' });
+  if (result.exitStatus === 1 && request.signature.kind === 'action' && request.signature.action === 'rg') {
+    return Object.freeze({ version: 1, kind: 'no-match' });
+  }
+  return Object.freeze({ version: 1, kind: result.exitStatus === undefined ? 'unknown' : 'unclassified-nonzero' });
+}
 
 export function projectCapturedSessionEvidence(input: {
   readonly session: Session;
@@ -19,6 +31,8 @@ export function projectCapturedSessionEvidence(input: {
     observations.push(Object.freeze({
       id: event.id,
       sourceEventId: event.sourceEventId,
+      ...(event.phase === 'pre-action' ? { executionKey: event.sourceEventId }
+        : event.relatedEventId === undefined ? {} : { executionKey: event.relatedEventId }),
       kind: event.phase === 'pre-action' ? 'request' : 'result',
       occurredAt: event.occurredAt,
       ...(event.relatedEventId === undefined ? {} : { relatedEventId: event.relatedEventId }),

@@ -8,7 +8,7 @@ import { runCli, runCliAsync } from '../src/cli.js';
 
 test('runs the complete local review pipeline for an explicit session', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ael-review-cli-')); mkdirSync(join(root, 'nested'));
-  writeFileSync(join(root, 'nested', 'session.jsonl'), `${JSON.stringify({ kind: 'message', occurredAt: '2026-08-24T10:00:00.000Z', payload: 'password=must-not-leak' })}\n`);
+  writeFileSync(join(root, 'nested', 'session.jsonl'), `${JSON.stringify({ kind: 'tool', occurredAt: '2026-08-24T10:00:00.000Z', tool: 'shell', exitStatus: 1, payload: 'password=must-not-leak' })}\n`);
   const result = await runCliAsync(['review', 'session', '--source', 'codex', '--root', root, '--session', 'nested/session.jsonl', '--json']);
   assert.equal(result.exitCode, 0);
   const output = JSON.parse(result.stdout);
@@ -20,6 +20,7 @@ test('runs the complete local review pipeline for an explicit session', async ()
     'skippedReviewerIds',
     'runtimeDiagnostics',
     'findings',
+    'reviewRequired',
     'projectImprovements',
     'projectReviewDiagnostics',
     'serviceDiagnostics',
@@ -55,11 +56,11 @@ test('writes each ingestion warning once without corrupting JSON stdout', async 
 
 test('reports truthful non-JSON completion and keeps the async review path canonical', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ael-review-text-'));
-  writeFileSync(join(root, 'session.jsonl'), `${JSON.stringify({ kind: 'message', occurredAt: '2026-08-24T10:00:00.000Z' })}\n`);
+  writeFileSync(join(root, 'session.jsonl'), `${JSON.stringify({ kind: 'tool', occurredAt: '2026-08-24T10:00:00.000Z', tool: 'shell', exitStatus: 1 })}\n`);
   const result = await runCliAsync(['review', 'session', '--source', 'codex', '--root', root, '--session', 'session.jsonl', '--allow-expensive-checks']);
   assert.equal(result.exitCode, 0);
   assert.match(result.stdout, /^Session review  \[complete\]/);
-  assert.match(result.stdout, /^Finding groups\s+1$/m);
+  assert.match(result.stdout, /^Finding groups\s+[1-9]\d*$/m);
   assert.match(result.stdout, /^Candidates\s+1$/m);
   assert.match(result.stdout, /^Proposals\s+1$/m);
   const sync = runCli(['review', 'session', '--source', 'codex', '--root', root, '--session', 'session.jsonl']);

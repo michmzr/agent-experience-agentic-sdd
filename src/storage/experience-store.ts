@@ -39,6 +39,8 @@ import { validateNormalizedCaptureEvent } from '../capture/normalization.js';
 import { assertDurableTextSafe } from '../review/sanitizer.js';
 import { openExperienceDatabase, type ExperienceDatabaseOptions } from './database.js';
 import { ensureOverrideAuditUseMigration, ensureOverrideEvidenceMigration, overrideAuditMigration } from './override-store.js';
+import { validateProjectInstructionContext, type ProjectInstructionContext } from '../learning/project-conventions.js';
+import { annotationRelationScopeMigration, importedTypedEvidenceMigration, logicalAnnotationEvidenceMigration } from '../evidence/schema.js';
 
 export type ExperienceStoreInitializationStage = 'open' | 'migration';
 
@@ -193,9 +195,23 @@ export interface RepositoryRegistration {
 export interface RepositoryRecord { readonly session: Session; readonly events: readonly CapturedEventRecord[]; }
 export interface CapturedSessionRange {
   readonly events: readonly CapturedEventRecord[];
+  readonly annotations: readonly IndexedAnnotationEvidence[];
   readonly requestedHighWater: number;
   readonly actualHighWater: number;
   readonly availableHighWater: number;
+}
+export interface LogicalEvidencePage {
+  readonly events: readonly CapturedEventRecord[];
+  readonly annotations: readonly IndexedAnnotationEvidence[];
+  readonly highWater: number;
+  readonly nextCursor: number;
+}
+export interface IndexedAnnotationEvidence {
+  readonly producerNamespace: string;
+  readonly evidenceId: string;
+  readonly repositoryId: string;
+  readonly sessionId: string;
+  readonly payloadJson: string;
 }
 export interface LifecycleApplication {
   readonly lifecycle: LifecycleSignal;
@@ -422,6 +438,42 @@ const resumedTechnicalEventMigration = `
   ) STRICT;
 `;
 
+const logicalEvidenceMigration = `
+  CREATE TABLE IF NOT EXISTS logical_evidence (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    ordinal INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    source_event_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    path TEXT NOT NULL CHECK(path IN ('legacy', 'run')),
+    event_id TEXT NOT NULL,
+    UNIQUE(source, session_id, source_event_id),
+    UNIQUE(session_id, ordinal)
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS logical_evidence_session_sequence
+    ON logical_evidence(session_id, ordinal);
+  CREATE TABLE IF NOT EXISTS logical_evidence_conflicts (
+    source TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    source_event_id TEXT NOT NULL,
+    retained_path TEXT NOT NULL,
+    retained_event_id TEXT NOT NULL,
+    conflicting_path TEXT NOT NULL,
+    conflicting_event_id TEXT NOT NULL,
+    disposition TEXT NOT NULL CHECK(disposition IN ('equivalent', 'conflict')),
+    PRIMARY KEY(source, session_id, source_event_id, conflicting_path, conflicting_event_id)
+  ) STRICT;
+`;
+
+const operationInstructionContextMigration = `
+  CREATE TABLE IF NOT EXISTS capture_instruction_contexts (
+    source TEXT NOT NULL, source_event_id TEXT NOT NULL, session_id TEXT NOT NULL, repository_id TEXT,
+    payload_json TEXT, PRIMARY KEY(source, source_event_id)
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS capture_instruction_contexts_session
+    ON capture_instruction_contexts(session_id, source, source_event_id);
+`;
+
 export class ExperienceStore {
   private readonly database: DatabaseSync;
 
@@ -435,6 +487,7 @@ export class ExperienceStore {
     this.database = database;
     try {
       this.migrate();
+      this.backfillLogicalEvidence();
     } catch (error) {
       try {
         database.close();
@@ -486,8 +539,16 @@ export class ExperienceStore {
   listRepositoryRecords(repositoryId: string): readonly RepositoryRecord[] {
     const sessions = this.database.prepare(`SELECT id, source, started_at, ended_at, repository_id, workspace_id, user_id FROM sessions WHERE repository_id = ? ORDER BY started_at, id`).all(repositoryId) as unknown as SessionRow[];
     return sessions.map((row) => {
-      const events = this.database.prepare(`SELECT ce.rowid AS sequence, ce.event_id, ce.source, ce.source_event_id, ce.phase, ce.signature_json, ce.summary, ce.capture_outcome, ce.related_event_id, e.session_id, e.occurred_at, e.exit_status FROM capture_events ce JOIN events e ON e.id = ce.event_id WHERE e.session_id = ? ORDER BY e.occurred_at, ce.rowid`).all(row.id) as unknown as CaptureRow[];
-      return Object.freeze({ session: sessionFromRow(row), events: events.map(captureFromRow) });
+      const events: CapturedEventRecord[] = [];
+      const highWater = this.logicalEvidenceHighWater(row.id as SessionId);
+      let cursor = 0;
+      while (cursor < highWater) {
+        const page = this.loadLogicalEvidencePage(row.id as SessionId, { after: cursor, through: highWater, limit: 1024 });
+        events.push(...page.events);
+        if (page.nextCursor === cursor) break;
+        cursor = page.nextCursor;
+      }
+      return Object.freeze({ session: sessionFromRow(row), events: Object.freeze(events) });
     });
   }
 
@@ -505,24 +566,30 @@ export class ExperienceStore {
   }
 
   repositoryQuality(repositoryId: string): RepositoryQuality {
-    const row = this.database.prepare(`WITH requests AS (
-      SELECT ce.source, ce.source_event_id, e.occurred_at
-      FROM capture_events ce JOIN events e ON e.id = ce.event_id JOIN sessions s ON s.id = e.session_id
-      WHERE s.repository_id = ? AND ce.phase = 'pre-action'
-    ), matched AS (
-      SELECT r.source_event_id, p.exit_status, p.occurred_at
-      FROM requests r LEFT JOIN capture_events pc ON pc.source = r.source AND pc.related_event_id = r.source_event_id AND pc.phase = 'post-result'
-      LEFT JOIN events p ON p.id = pc.event_id
-    ) SELECT COUNT(*) AS operations,
-      SUM(CASE WHEN last_at IS NOT NULL THEN 1 ELSE 0 END) AS linked,
-      SUM(CASE WHEN last_at IS NULL THEN 1 ELSE 0 END) AS missing_results,
-      SUM(CASE WHEN last_at IS NOT NULL AND exit_status IS NULL THEN 1 ELSE 0 END) AS source_field_absent,
-      MIN(first_at) AS first_at, MAX(last_at) AS last_at
-      FROM (SELECT r.source_event_id, r.occurred_at AS first_at, m.occurred_at AS last_at, m.exit_status FROM requests r LEFT JOIN matched m ON m.source_event_id = r.source_event_id)`).get(repositoryId) as { operations: number; linked: number | null; missing_results: number | null; source_field_absent: number | null; first_at: string | null; last_at: string | null };
+    const records = this.listRepositoryRecords(repositoryId);
+    let operations = 0;
+    let linked = 0;
+    let missingResults = 0;
+    let sourceFieldAbsent = 0;
+    let firstAt: string | undefined;
+    let lastAt: string | undefined;
+    for (const { events } of records) {
+      const results = new Map(events.filter((event) => event.phase === 'post-result' && event.relatedEventId !== undefined)
+        .map((event) => [`${event.source}:${event.relatedEventId}`, event]));
+      for (const request of events.filter((event) => event.phase === 'pre-action')) {
+        operations++;
+        if (firstAt === undefined || request.occurredAt < firstAt) firstAt = request.occurredAt;
+        const result = results.get(`${request.source}:${request.sourceEventId}`);
+        if (!result) { missingResults++; continue; }
+        linked++;
+        if (result.exitStatus === undefined) sourceFieldAbsent++;
+        if (lastAt === undefined || result.occurredAt > lastAt) lastAt = result.occurredAt;
+      }
+    }
     const unknown: Record<string, number> = {};
-    if ((row.missing_results ?? 0) > 0) unknown['result-not-delivered'] = row.missing_results!;
-    if ((row.source_field_absent ?? 0) > 0) unknown['source-field-absent'] = row.source_field_absent!;
-    return Object.freeze({ operations: row.operations, linked: row.linked ?? 0, unknownTotal: Object.values(unknown).reduce((total, count) => total + count, 0), unknown: Object.freeze(unknown), ...(row.first_at === null ? {} : { firstObservedAt: row.first_at, lastObservedAt: row.last_at ?? row.first_at }) });
+    if (missingResults > 0) unknown['result-not-delivered'] = missingResults;
+    if (sourceFieldAbsent > 0) unknown['source-field-absent'] = sourceFieldAbsent;
+    return Object.freeze({ operations, linked, unknownTotal: Object.values(unknown).reduce((total, count) => total + count, 0), unknown: Object.freeze(unknown), ...(firstAt === undefined ? {} : { firstObservedAt: firstAt, lastObservedAt: lastAt ?? firstAt }) });
   }
 
   loadSession(id: SessionId): Session | undefined {
@@ -561,26 +628,196 @@ export class ExperienceStore {
     if (input.after > input.through) {
       throw new RangeError('Captured session range after cannot exceed through.');
     }
-
-    const availableHighWater = Number((this.database.prepare(`
-      SELECT COUNT(*) AS count
-      FROM capture_events ce JOIN events e ON e.id = ce.event_id
-      WHERE e.session_id = ?
-    `).get(id) as { count: number }).count);
-    const rows = this.database.prepare(`
-      SELECT ce.rowid AS sequence, ce.event_id, ce.source, ce.source_event_id, ce.phase, ce.signature_json, ce.summary,
-        ce.capture_outcome, ce.related_event_id, e.session_id, e.occurred_at, e.exit_status
-      FROM capture_events ce JOIN events e ON e.id = ce.event_id
-      WHERE e.session_id = ?
-      ORDER BY ce.rowid LIMIT ? OFFSET ?
-    `).all(id, Math.min(input.limit, input.through - input.after), input.after) as unknown as CaptureRow[];
-    const events = Object.freeze(rows.map(captureFromRow));
+    const page = this.loadLogicalEvidencePage(id, input);
+    const availableHighWater = this.logicalEvidenceHighWater(id);
     return Object.freeze({
-      events,
+      events: page.events,
+      annotations: page.annotations,
       requestedHighWater: input.through,
-      actualHighWater: input.after + events.length,
+      actualHighWater: page.events.length + page.annotations.length === 0 ? input.through : page.nextCursor,
       availableHighWater
     });
+  }
+
+  private indexedLogicalEvidenceHighWater(id: SessionId): number {
+    const row = this.database.prepare(`SELECT MAX(high_water) AS high_water FROM (
+      SELECT MAX(ordinal) AS high_water FROM logical_evidence WHERE session_id = ?
+      UNION ALL SELECT MAX(ordinal) AS high_water FROM logical_annotation_evidence WHERE session_id = ?
+    )`).get(id, id) as { high_water: number | null };
+    return row.high_water ?? 0;
+  }
+
+  loadIndexedAnnotationByIdentity(repositoryId: string, id: SessionId, producerNamespace: string,
+    evidenceId: string, beforeOrdinal: number): IndexedAnnotationEvidence | undefined {
+    if (!Number.isSafeInteger(beforeOrdinal) || beforeOrdinal < 0) throw new TypeError('Annotation lookback cursor is invalid.');
+    const row = this.database.prepare(`SELECT a.producer_namespace, a.evidence_id, a.repository_id,
+      a.session_id, i.payload_json, i.content_digest FROM logical_annotation_evidence a
+      JOIN imported_typed_evidence i ON i.producer_namespace = a.producer_namespace
+        AND i.repository_id = a.repository_id AND i.session_id = a.session_id AND i.evidence_id = a.evidence_id
+      WHERE a.repository_id = ? AND a.session_id = ? AND a.producer_namespace = ?
+        AND a.evidence_id = ? AND a.ordinal <= ? AND i.resolution = 'resolved'`)
+      .get(repositoryId, id, producerNamespace, evidenceId, beforeOrdinal) as {
+        producer_namespace: string; evidence_id: string; repository_id: string; session_id: string;
+        payload_json: string; content_digest: string;
+      } | undefined;
+    if (!row) return undefined;
+    if (createHash('sha256').update(row.payload_json).digest('hex') !== row.content_digest) {
+      throw new Error('Indexed annotation content is not immutable.');
+    }
+    return Object.freeze({ producerNamespace: row.producer_namespace, evidenceId: row.evidence_id,
+      repositoryId: row.repository_id, sessionId: row.session_id, payloadJson: row.payload_json });
+  }
+
+  loadPriorScopedClaimsPage(repositoryId: string, id: SessionId, producerNamespace: string,
+    contextRevision: string, decisionKey: string, scopeKey: string, afterOrdinal: number,
+    beforeOrdinal: number, limit: number): { readonly annotations: readonly IndexedAnnotationEvidence[];
+      readonly nextCursor?: number } {
+    if (!Number.isSafeInteger(afterOrdinal) || afterOrdinal < 0 || !Number.isSafeInteger(beforeOrdinal)
+      || beforeOrdinal < afterOrdinal || !Number.isSafeInteger(limit) || limit < 1 || limit > 128) {
+      throw new TypeError('Annotation lookback cursor or page limit is invalid.');
+    }
+    const rows = this.database.prepare(`SELECT a.ordinal, a.producer_namespace, a.evidence_id, a.repository_id,
+      a.session_id, i.payload_json, i.content_digest FROM logical_annotation_evidence a
+      INDEXED BY logical_annotation_relation_scope
+      JOIN imported_typed_evidence i ON i.producer_namespace = a.producer_namespace
+        AND i.repository_id = a.repository_id AND i.session_id = a.session_id AND i.evidence_id = a.evidence_id
+      WHERE a.repository_id = ? AND a.session_id = ? AND a.producer_namespace = ?
+        AND a.context_revision = ? AND a.kind = 'agent-claim' AND a.decision_key = ? AND a.scope_key = ?
+        AND a.ordinal > ? AND a.ordinal <= ? AND i.resolution = 'resolved'
+      ORDER BY a.ordinal LIMIT ?`)
+      .all(repositoryId, id, producerNamespace, contextRevision, decisionKey, scopeKey,
+        afterOrdinal, beforeOrdinal, limit) as Array<{ ordinal: number; producer_namespace: string; evidence_id: string;
+          repository_id: string; session_id: string; payload_json: string; content_digest: string }>;
+    for (const row of rows) {
+      if (createHash('sha256').update(row.payload_json).digest('hex') !== row.content_digest) {
+        throw new Error('Indexed annotation content is not immutable.');
+      }
+    }
+    return Object.freeze({ annotations: Object.freeze(rows.map((row) => Object.freeze({
+      producerNamespace: row.producer_namespace, evidenceId: row.evidence_id,
+      repositoryId: row.repository_id, sessionId: row.session_id, payloadJson: row.payload_json }))),
+    ...(rows.length === limit ? { nextCursor: rows.at(-1)!.ordinal } : {}) });
+  }
+
+  logicalEvidenceCoverage(id: SessionId): { readonly indexed: number; readonly unindexed: number; readonly conflicts: number } {
+    const indexed = Number((this.database.prepare(`SELECT
+      (SELECT COUNT(*) FROM logical_evidence WHERE session_id = ?) +
+      (SELECT COUNT(*) FROM logical_annotation_evidence WHERE session_id = ?) AS count`).get(id, id) as { count: number }).count);
+    const unindexed = Number((this.database.prepare(`SELECT
+      (SELECT COUNT(*) FROM capture_events ce JOIN events e ON e.id = ce.event_id WHERE e.session_id = ?
+        AND NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = ce.source AND l.session_id = e.session_id AND l.source_event_id = ce.source_event_id AND l.path = 'legacy' AND l.event_id = ce.event_id)
+        AND NOT EXISTS (SELECT 1 FROM logical_evidence_conflicts c WHERE c.source = ce.source AND c.session_id = e.session_id AND c.source_event_id = ce.source_event_id AND c.conflicting_path = 'legacy' AND c.conflicting_event_id = ce.event_id)) +
+      (SELECT COUNT(*) FROM capture_run_events re WHERE re.conversation_id = ?
+        AND NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = re.source AND l.session_id = re.conversation_id AND l.source_event_id = re.source_event_id AND l.path = 'run' AND l.event_id = re.event_id)
+        AND NOT EXISTS (SELECT 1 FROM logical_evidence_conflicts c WHERE c.source = re.source AND c.session_id = re.conversation_id AND c.source_event_id = re.source_event_id AND c.conflicting_path = 'run' AND c.conflicting_event_id = re.event_id)) AS count`).get(id, id) as { count: number }).count);
+    const conflicts = Number((this.database.prepare("SELECT COUNT(*) AS count FROM logical_evidence_conflicts WHERE session_id = ? AND disposition = 'conflict'").get(id) as { count: number }).count);
+    return Object.freeze({ indexed, unindexed, conflicts });
+  }
+
+  logicalEvidenceHighWater(id: SessionId): number {
+    if (this.logicalEvidenceCoverage(id).unindexed > 0) throw new Error('Logical evidence backfill is incomplete.');
+    return this.indexedLogicalEvidenceHighWater(id);
+  }
+
+  preserveOperationInstructionContext(event: NormalizedCaptureEvent, context: ProjectInstructionContext | undefined): void {
+    if (event.phase !== 'pre-action') throw new TypeError('Instruction context requires a pre-action event.');
+    if (context !== undefined) validateProjectInstructionContext(context);
+    const payload = context === undefined ? null : JSON.stringify(context);
+    if (context !== undefined && (Buffer.byteLength(payload!, 'utf8') > 16 * 1024 || !Array.isArray(context.instructions) || context.instructions.length > 16
+      || !Array.isArray(context.conventions) || context.conventions.length > 64
+      || !Array.isArray(context.scopedConventions) || context.scopedConventions.length > 64)) {
+      throw new TypeError('Instruction context is invalid or exceeds its bounds.');
+    }
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const source = this.database.prepare(`SELECT session_id FROM logical_evidence
+        WHERE source = ? AND source_event_id = ?`).get(event.source, event.sourceEventId) as { session_id: string } | undefined;
+      if (source?.session_id !== event.sessionId) throw new TypeError('Instruction context source event is unavailable.');
+      const repositoryId = this.loadSession(event.sessionId)?.repositoryId ?? null;
+      this.database.prepare(`INSERT OR IGNORE INTO capture_instruction_contexts
+        (source, source_event_id, session_id, repository_id, payload_json) VALUES (?, ?, ?, ?, ?)`)
+        .run(event.source, event.sourceEventId, event.sessionId, repositoryId, payload);
+      this.database.exec('COMMIT');
+    } catch (error) { this.database.exec('ROLLBACK'); throw error; }
+  }
+
+  backfillLogicalEvidence(limit = 1024): { readonly indexed: number; readonly remaining: number } {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1024) throw new RangeError('Logical evidence backfill limit must be 1–1024.');
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const rows = this.database.prepare(`
+        SELECT source, source_event_id, session_id, path, event_id FROM (
+          SELECT ce.source, ce.source_event_id, e.session_id, 'legacy' AS path, ce.event_id,
+            e.occurred_at AS occurred_at, ce.rowid AS source_order
+            FROM capture_events ce JOIN events e ON e.id = ce.event_id
+            WHERE NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = ce.source AND l.session_id = e.session_id AND l.source_event_id = ce.source_event_id AND l.path = 'legacy' AND l.event_id = ce.event_id)
+              AND NOT EXISTS (SELECT 1 FROM logical_evidence_conflicts c WHERE c.source = ce.source AND c.session_id = e.session_id AND c.source_event_id = ce.source_event_id AND c.conflicting_path = 'legacy' AND c.conflicting_event_id = ce.event_id)
+          UNION ALL
+          SELECT re.source, re.source_event_id, re.conversation_id AS session_id, 'run' AS path, re.event_id,
+            re.occurred_at AS occurred_at, re.rowid AS source_order
+            FROM capture_run_events re
+            WHERE NOT EXISTS (SELECT 1 FROM logical_evidence l WHERE l.source = re.source AND l.session_id = re.conversation_id AND l.source_event_id = re.source_event_id AND l.path = 'run' AND l.event_id = re.event_id)
+              AND NOT EXISTS (SELECT 1 FROM logical_evidence_conflicts c WHERE c.source = re.source AND c.session_id = re.conversation_id AND c.source_event_id = re.source_event_id AND c.conflicting_path = 'run' AND c.conflicting_event_id = re.event_id)
+        ) ORDER BY occurred_at, source_order, path LIMIT ?
+      `).all(limit) as Array<{ source: string; source_event_id: string; session_id: string; path: 'legacy' | 'run'; event_id: string }>;
+      for (const row of rows) this.indexLogicalEvent(row.source, row.source_event_id, row.session_id, row.path, row.event_id);
+      const remaining = this.database.prepare(`SELECT
+        (SELECT COUNT(*) FROM capture_events) + (SELECT COUNT(*) FROM capture_run_events)
+        - (SELECT COUNT(*) FROM logical_evidence) - (SELECT COUNT(*) FROM logical_evidence_conflicts) AS count`).get() as { count: number };
+      this.database.exec('COMMIT');
+      return Object.freeze({ indexed: rows.length, remaining: remaining.count });
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  loadLogicalEvidencePage(
+    id: SessionId,
+    input: { readonly after: number; readonly through: number; readonly limit: number }
+  ): LogicalEvidencePage {
+    if (!Number.isSafeInteger(input.after) || input.after < 0 || !Number.isSafeInteger(input.through)
+      || input.through < input.after || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 1024) {
+      throw new RangeError('Logical evidence page requires a valid cursor, watermark and limit at most 1024.');
+    }
+    if (this.logicalEvidenceCoverage(id).unindexed > 0) throw new Error('Logical evidence backfill is incomplete.');
+    const capturedRows = this.database.prepare(`
+      SELECT l.ordinal AS sequence, l.path, l.event_id, l.source, l.source_event_id,
+        COALESCE(ce.phase, re.phase) AS phase,
+        COALESCE(ce.signature_json, re.signature_json) AS signature_json,
+        COALESCE(ce.summary, re.summary) AS summary,
+        COALESCE(ce.capture_outcome, re.capture_outcome) AS capture_outcome,
+        COALESCE(ce.related_event_id, re.related_event_id) AS related_event_id,
+        COALESCE(e.session_id, re.conversation_id) AS session_id,
+        COALESCE(e.occurred_at, re.occurred_at) AS occurred_at,
+        COALESCE(e.exit_status, re.exit_status) AS exit_status
+      FROM logical_evidence l
+      LEFT JOIN capture_events ce ON l.path = 'legacy' AND ce.event_id = l.event_id
+      LEFT JOIN events e ON e.id = ce.event_id
+      LEFT JOIN capture_run_events re ON l.path = 'run' AND re.event_id = l.event_id
+      WHERE l.session_id = ? AND l.ordinal > ? AND l.ordinal <= ?
+      ORDER BY l.ordinal LIMIT ?
+    `).all(id, input.after, input.through, input.limit) as unknown as Array<CaptureRow & { path: string }>;
+    const annotationRows = this.database.prepare(`SELECT a.ordinal AS sequence, a.producer_namespace, a.evidence_id,
+      a.repository_id, a.session_id, i.payload_json, i.content_digest FROM logical_annotation_evidence a
+      LEFT JOIN imported_typed_evidence i ON i.producer_namespace = a.producer_namespace
+        AND i.repository_id = a.repository_id AND i.session_id = a.session_id AND i.evidence_id = a.evidence_id
+      WHERE a.session_id = ? AND a.ordinal > ? AND a.ordinal <= ? ORDER BY a.ordinal LIMIT ?`)
+      .all(id, input.after, input.through, input.limit) as Array<{ sequence: number; producer_namespace: string;
+        evidence_id: string; repository_id: string; session_id: string; payload_json: string | null; content_digest: string | null }>;
+    const selected = [...capturedRows.map((row) => ({ path: 'capture' as const, row })),
+      ...annotationRows.map((row) => ({ path: 'annotation' as const, row }))]
+      .sort((left, right) => left.row.sequence - right.row.sequence).slice(0, input.limit);
+    const captures = selected.filter((item): item is { path: 'capture'; row: CaptureRow & { path: string } } => item.path === 'capture');
+    const annotations = selected.filter((item): item is { path: 'annotation'; row: typeof annotationRows[number] } => item.path === 'annotation');
+    if (captures.some(({ row }) => row.phase === null) || annotations.some(({ row }) => row.payload_json === null
+      || createHash('sha256').update(row.payload_json).digest('hex') !== row.content_digest)) {
+      throw new Error('Logical evidence reference is missing its immutable source.');
+    }
+    return Object.freeze({ events: Object.freeze(captures.map(({ row }) => captureFromRow(row))),
+      annotations: Object.freeze(annotations.map(({ row }) => Object.freeze({ producerNamespace: row.producer_namespace,
+        evidenceId: row.evidence_id, repositoryId: row.repository_id, sessionId: row.session_id, payloadJson: row.payload_json! }))),
+      highWater: input.through, nextCursor: selected.at(-1)?.row.sequence ?? input.after });
   }
 
   endSession(source: Session['source'], id: SessionId, endedAt: string): IncrementalAppendResult {
@@ -746,6 +983,7 @@ export class ExperienceStore {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(normalized.id, normalized.source, normalized.sourceEventId, conversation.id, run.id, normalized.phase, normalized.occurredAt,
           JSON.stringify(normalized.signature), normalized.summary, normalized.outcome ?? null, normalized.exitStatus ?? null, normalized.relatedEventId ?? null);
+      this.indexLogicalEvent(normalized.source, normalized.sourceEventId, normalized.sessionId, 'run', normalized.id);
       this.database.exec('COMMIT');
       return Object.freeze({ inserted: true });
     } catch (error) {
@@ -848,6 +1086,7 @@ export class ExperienceStore {
           this.assertPostResultLink(event);
           this.insertCaptureEvent(event);
           this.linkCaptureEventToLifecycle(event);
+          this.indexLogicalEvent(event.source, event.sourceEventId, event.sessionId, 'legacy', event.id);
           inserted = true;
         }
         if (duplicate !== undefined) this.assertPostResultLink(event);
@@ -1136,11 +1375,61 @@ export class ExperienceStore {
       } else {
         ensureLifecycleStartOriginMigration(this.database);
       }
+      if (!applied.has(18)) {
+        this.database.exec(logicalEvidenceMigration);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(18, new Date().toISOString());
+      }
+      if (!applied.has(19)) {
+        this.database.exec(operationInstructionContextMigration);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(19, new Date().toISOString());
+      }
+      if (!applied.has(20)) {
+        this.database.exec(importedTypedEvidenceMigration);
+        this.database.exec(logicalAnnotationEvidenceMigration);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(20, new Date().toISOString());
+      }
+      if (!applied.has(21)) {
+        this.database.exec(annotationRelationScopeMigration);
+        const incomplete = this.database.prepare(`SELECT 1 FROM logical_annotation_evidence WHERE
+          context_revision IS NULL OR kind IS NULL OR decision_key IS NULL OR scope_key IS NULL LIMIT 1`).get();
+        if (incomplete) throw new TypeError('Annotation relation scope migration has unresolved source rows.');
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(21, new Date().toISOString());
+      }
       this.database.exec('COMMIT');
     } catch (error) {
       this.database.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  private indexLogicalEvent(source: string, sourceEventId: string, sessionId: string, path: 'legacy' | 'run', eventId: string): void {
+    const existing = this.database.prepare('SELECT path, event_id FROM logical_evidence WHERE source = ? AND session_id = ? AND source_event_id = ?')
+      .get(source, sessionId, sourceEventId) as { path: string; event_id: string } | undefined;
+    if (existing) {
+      if (existing.path !== path || existing.event_id !== eventId) {
+        const disposition = this.logicalSourceFacts(existing.path as 'legacy' | 'run', existing.event_id)
+          === this.logicalSourceFacts(path, eventId) ? 'equivalent' : 'conflict';
+        this.database.prepare(`INSERT OR IGNORE INTO logical_evidence_conflicts
+          (source, session_id, source_event_id, retained_path, retained_event_id, conflicting_path, conflicting_event_id, disposition)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(source, sessionId, sourceEventId, existing.path, existing.event_id, path, eventId, disposition);
+      }
+      return;
+    }
+    const ordinal = this.indexedLogicalEvidenceHighWater(sessionId as SessionId) + 1;
+    this.database.prepare('INSERT INTO logical_evidence (ordinal, source, source_event_id, session_id, path, event_id) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(ordinal, source, sourceEventId, sessionId, path, eventId);
+  }
+
+  private logicalSourceFacts(path: 'legacy' | 'run', eventId: string): string {
+    const row = path === 'legacy'
+      ? this.database.prepare(`SELECT ce.phase, e.occurred_at, ce.signature_json, ce.summary,
+          ce.capture_outcome, e.exit_status, ce.related_event_id
+          FROM capture_events ce JOIN events e ON e.id = ce.event_id WHERE ce.event_id = ?`).get(eventId)
+      : this.database.prepare(`SELECT phase, occurred_at, signature_json, summary,
+          capture_outcome, exit_status, related_event_id FROM capture_run_events WHERE event_id = ?`).get(eventId);
+    if (row === undefined) throw new Error('Logical evidence source is missing.');
+    return JSON.stringify(row);
   }
 
   private toKnowledgeEntry(row: KnowledgeRow): KnowledgeEntry {

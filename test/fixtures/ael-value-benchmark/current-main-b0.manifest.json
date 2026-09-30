@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "role": "baseline",
+  "label": "current-main-before-integration",
+  "buildId": "53cc322d91c58a73e6a30d12b71c78c54f7a5db738155a04c50d944773dd8e58",
+  "corpusVersion": "b0-1",
+  "environment": { "nodeMajor": 26, "platform": "darwin", "arch": "arm64" },
+  "budgets": { "runMilliseconds": 10000 },
+  "telemetry": { "tokens": "unavailable", "wallTime": "available" },
+  "scenarios": [{ "id": "codex-resume-matcher", "revision": 1, "kind": "synthetic" }]
+}

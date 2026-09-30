@@ -12,6 +12,11 @@ export const MAX_CAPTURE_IDENTIFIER_LENGTH = 512;
 export const MAX_CAPTURE_TEXT_LENGTH = 2_048;
 export const MAX_CAPTURE_ARGUMENTS = 64;
 
+export type CaptureRecoveryReason =
+  | 'malformed-record' | 'unsupported-schema' | 'missing-session' | 'missing-request'
+  | 'lifecycle-conflict' | 'conflicting-identity' | 'storage-unavailable' | 'unknown-legacy';
+export type CaptureRecoveryState = 'eligible' | 'waiting-dependency' | 'held' | 'committed' | 'quarantined';
+
 export type CapturePhase = 'pre-intent' | 'pre-action' | 'post-result';
 export type CaptureOutcome = 'succeeded' | 'failed' | 'unknown';
 

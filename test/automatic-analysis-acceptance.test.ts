@@ -9,11 +9,13 @@ import test from 'node:test';
 import { ExperienceService } from '../src/application/experience-service.js';
 import { CaptureSpool } from '../src/capture/spool.js';
 import { runCli } from '../src/cli.js';
+import { initializeGitRepository } from './helpers/git-repository.js';
 
 test('passive capture produces an analysis candidate without a manual analysis run', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'ael-automatic-analysis-'));
   const root = mkdtempSync(join(tmpdir(), 'ael-automatic-analysis-repository-'));
   try {
+    initializeGitRepository(root);
     writeFileSync(join(root, 'AGENTS.md'), 'Use pnpm instead of npm\n');
     const workerUrl = new URL('../src/learning/worker.js', import.meta.url).href;
     const repositoryUrl = new URL('../src/learning/repository.js', import.meta.url).href;
@@ -73,6 +75,7 @@ test('a relative CLI data directory completes automatic analysis with an absolut
   const root = mkdtempSync(join(tmpdir(), 'ael-relative-analysis-repository-'));
   const relativeDataDir = relative(process.cwd(), dataDir);
   try {
+    initializeGitRepository(root);
     writeFileSync(join(root, 'AGENTS.md'), 'Use pnpm instead of npm\n');
     writeFileSync(join(dataDir, 'analysis-worker.json'), JSON.stringify({ version: 1, maxProcesses: 1, idleTimeoutMs: 1_000 }));
     const application = new ExperienceService({ dataDir: relativeDataDir });

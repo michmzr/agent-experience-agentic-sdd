@@ -4,7 +4,7 @@ import type { AgentSource, LessonKind } from '../domain/types.js';
 import { CodexSessionAdapter } from './adapters/codex.js';
 import { discoverClaudeCodeArtifacts, normalizeClaudeCodeArtifact } from './adapters/claude-code.js';
 import { discoverCursorExports, readCursorMarkdownExport } from './adapters/cursor.js';
-import type { NormalizedSession } from './contracts.js';
+import type { NormalizedSession, NormalizedSessionEvent, ReviewRequiredFinding } from './contracts.js';
 import type { SessionIngestionCoverage, SessionIngestionDiagnosticSink } from './ingestion.js';
 import { createDefaultReviewRuntime, defaultReviewProfile } from './default-reviewers.js';
 import { groupReviewFindings, type ReviewFinding as OrchestratorFinding, type ReviewFindingGroup } from './orchestrator.js';
@@ -37,6 +37,7 @@ export interface ManualReviewDependencies {
   readonly prompt?: ReviewSelectionPrompt;
   readonly repositoryIdentityResolver?: RepositoryIdentityResolver;
   readonly ingestionDiagnosticSink?: SessionIngestionDiagnosticSink;
+  readonly candidateSink?: (candidate: CandidateLesson) => void;
 }
 
 export interface ReviewServiceDiagnostic {
@@ -46,7 +47,7 @@ export interface ReviewServiceDiagnostic {
 }
 
 export interface ManualReviewResult {
-  readonly source: AgentSource; readonly selectedSession: string; readonly ingestionCoverage: SessionIngestionCoverage; readonly profile: Pick<ReviewProfile, 'id' | 'version'>; readonly skippedReviewerIds: readonly string[]; readonly runtimeDiagnostics: readonly ReviewRuntimeDiagnostic[]; readonly findings: readonly ReviewFindingGroup[]; readonly projectImprovements: readonly ProjectImprovement[]; readonly projectReviewDiagnostics: readonly ProjectReviewDiagnostic[]; readonly serviceDiagnostics: readonly ReviewServiceDiagnostic[]; readonly candidates: readonly CandidateLesson[]; readonly proposals: readonly ImprovementProposal[];
+  readonly source: AgentSource; readonly selectedSession: string; readonly ingestionCoverage: SessionIngestionCoverage; readonly profile: Pick<ReviewProfile, 'id' | 'version'>; readonly skippedReviewerIds: readonly string[]; readonly runtimeDiagnostics: readonly ReviewRuntimeDiagnostic[]; readonly findings: readonly ReviewFindingGroup[]; readonly reviewRequired: readonly ReviewRequiredFinding[]; readonly projectImprovements: readonly ProjectImprovement[]; readonly projectReviewDiagnostics: readonly ProjectReviewDiagnostic[]; readonly serviceDiagnostics: readonly ReviewServiceDiagnostic[]; readonly candidates: readonly CandidateLesson[]; readonly proposals: readonly ImprovementProposal[];
 }
 export interface ManualReviewExecution { readonly result: ManualReviewResult; readonly debrief: SessionDebrief; }
 interface ManualReviewPipelineExecution { readonly result: ManualReviewResult; readonly artifact: SanitizedReviewArtifact; }
@@ -76,11 +77,12 @@ async function executeManualReviewPipeline(input: ManualReviewInput, dependencie
   const artifact = sanitizeForReview(normalized);
   const runtime = dependencies.runtime ?? createDefaultReviewRuntime();
   const run = await runtime.run({ artifact, profile: input.profile ?? defaultReviewProfile, allowExpensiveChecks: input.allowExpensiveChecks });
-  const knownEventIds = new Set(artifact.session.events.map((event) => event.id));
+  const eventsById = new Map(artifact.session.events.map((event) => [event.id, event]));
+  const knownEventIds = new Set(eventsById.keys());
   const duplicateReviewerIds = crossReviewerDuplicateReviewerIds(run.results);
   const reviewerReviews = run.results.map((result) => duplicateReviewerIds.has(result.reviewerId)
     ? invalidReviewerResult(result.reviewerId, 'DUPLICATE_REVIEWER_FINDING_ID')
-    : validateReviewerResult(result.reviewerId, result.findings, knownEventIds));
+    : validateReviewerResult(result.reviewerId, result.findings, knownEventIds, eventsById));
   const projectFindings = reviewerReviews.flatMap((review) => review.projectFindings);
   const projectReview = consolidateProjectReviewFindings(
     projectFindings,
@@ -88,10 +90,18 @@ async function executeManualReviewPipeline(input: ManualReviewInput, dependencie
   );
   const findings = reviewerReviews.flatMap((review) => review.legacyFindings);
   const groups = groupReviewFindings(findings);
-  const legacyProposalFindings: readonly ReviewFindingForProposal[] = groups.map((group) => ({
+  const kinds = new Map(reviewerReviews.flatMap((review) => [...review.kinds]));
+  const classifiedGroups = groups.map((group) => ({ group, kind: groupKind(group, kinds) }));
+  const reviewRequired: readonly ReviewRequiredFinding[] = classifiedGroups
+    .filter((entry) => entry.kind === undefined)
+    .map(({ group }) => ({ state: 'review-required', rootCauseId: group.rootCauseId,
+      findingIds: group.findings.map((finding) => finding.findingId), recommendation: recommendation(group.recommendation) }));
+  const legacyProposalFindings: readonly ReviewFindingForProposal[] = classifiedGroups
+    .filter((entry): entry is { group: ReviewFindingGroup; kind: LessonKind } => entry.kind !== undefined)
+    .map(({ group, kind }) => ({
     id: group.rootCauseId,
     statement: `Review finding ${group.rootCauseId}`,
-    lessonKind: 'successful-workflow' as LessonKind,
+    lessonKind: kind,
     proposal: { category: 'workflow' as const, title: recommendation(group.recommendation) }
   }));
   const projectProposalFindings: readonly ReviewFindingForProposal[] = projectReview.improvements.map((improvement) => ({
@@ -123,12 +133,14 @@ async function executeManualReviewPipeline(input: ManualReviewInput, dependencie
     skippedReviewerIds: run.skippedReviewerIds,
     runtimeDiagnostics: run.diagnostics,
     findings: groups,
+    reviewRequired,
     projectImprovements: projectReview.improvements,
     projectReviewDiagnostics: projectReview.diagnostics,
     serviceDiagnostics,
     candidates: intelligence.candidates,
     proposals: intelligence.proposals
   };
+  for (const candidate of result.candidates) dependencies.candidateSink?.(candidate);
   return { result, artifact };
 }
 
@@ -186,6 +198,7 @@ interface ValidatedReviewerResult {
   readonly reviewerId: string;
   readonly projectFindings: readonly ProjectReviewFinding[];
   readonly legacyFindings: readonly OrchestratorFinding[];
+  readonly kinds: ReadonlyMap<string, LessonKind>;
   readonly diagnostic?: ReviewServiceDiagnostic;
 }
 
@@ -194,7 +207,8 @@ type ReviewerResultDiagnosticCode = Exclude<ReviewServiceDiagnostic['code'], 'PR
 function validateReviewerResult(
   reviewerId: string,
   findings: readonly unknown[],
-  knownEventIds: ReadonlySet<string>
+  knownEventIds: ReadonlySet<string>,
+  eventsById: ReadonlyMap<string, NormalizedSessionEvent>
 ): ValidatedReviewerResult {
   const findingIds = new Set<string>();
 
@@ -221,14 +235,38 @@ function validateReviewerResult(
       recommendation: finding.recommendation
   }));
 
-  return { reviewerId, projectFindings, legacyFindings };
+  const kinds = new Map<string, LessonKind>();
+  for (const finding of findings) {
+    if (isProjectOutput(finding) || !isLegacyFinding(finding)) continue;
+    const kind = legacyKind(finding, eventsById);
+    if (kind) kinds.set(findingKey(reviewerId, finding.findingId), kind);
+  }
+  return { reviewerId, projectFindings, legacyFindings, kinds };
 }
 
 function invalidReviewerResult(
   reviewerId: string,
   code: ReviewerResultDiagnosticCode
 ): ValidatedReviewerResult {
-  return { reviewerId, projectFindings: [], legacyFindings: [], diagnostic: { code, reviewerId } };
+  return { reviewerId, projectFindings: [], legacyFindings: [], kinds: new Map(), diagnostic: { code, reviewerId } };
+}
+
+function findingKey(reviewerId: string, findingId: string): string {
+  return JSON.stringify([reviewerId, findingId]);
+}
+
+function legacyKind(finding: unknown, eventsById: ReadonlyMap<string, NormalizedSessionEvent>): LessonKind | undefined {
+  if (!isRecord(finding) || typeof finding.code !== 'string') return undefined;
+  const failureEventId = finding.code.startsWith('failure-learning:') ? finding.code.slice('failure-learning:'.length) : undefined;
+  if (failureEventId && eventsById.get(failureEventId)?.outcome === 'failed') return 'failure';
+  const factEventId = finding.code.startsWith('project-fact:') ? finding.code.slice('project-fact:'.length) : undefined;
+  if (factEventId && eventsById.has(factEventId)) return 'project-fact';
+  return undefined;
+}
+
+function groupKind(group: ReviewFindingGroup, kinds: ReadonlyMap<string, LessonKind>): LessonKind | undefined {
+  const found = new Set(group.findings.map((finding) => kinds.get(findingKey(finding.reviewerId, finding.findingId))));
+  return found.size === 1 ? [...found][0] : undefined;
 }
 
 function crossReviewerDuplicateReviewerIds(results: readonly { readonly reviewerId: string; readonly findings: readonly unknown[] }[]): ReadonlySet<string> {

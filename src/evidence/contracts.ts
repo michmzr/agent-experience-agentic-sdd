@@ -2,6 +2,33 @@ import type { AgentSource } from '../domain/types.js';
 
 export const SESSION_EVIDENCE_SCHEMA_VERSION = 1;
 export const MAX_SESSION_EVIDENCE_OBSERVATIONS = 10_000;
+export const MAX_TYPED_IMPORT_BYTES = 256 * 1024;
+export const MAX_TYPED_IMPORT_RECORDS = 128;
+
+export type AnnotationOrigin = 'user-declared' | 'agent-claimed';
+export type AnnotationKind = 'task-verification' | 'agent-claim' | 'user-instruction' | 'task-transition';
+export type AnnotationState = 'observed' | 'succeeded' | 'failed' | 'closed';
+
+export interface TypedAnnotationRecord {
+  readonly id: string;
+  readonly origin: AnnotationOrigin;
+  readonly kind: AnnotationKind;
+  readonly state: AnnotationState;
+  readonly decisionKey: string;
+  readonly scopeKey: string;
+  readonly reasonClass: 'failure' | 'instruction' | 'superseded' | 'verification';
+  readonly operation: { readonly source: AgentSource; readonly sourceEventId: string };
+  readonly relatedEvidenceIds?: readonly string[];
+}
+
+export interface TypedAnnotationArtifact {
+  readonly version: 1;
+  readonly producer: { readonly kind: 'local-annotation'; readonly version: string; readonly namespace: string };
+  readonly repositoryId: string;
+  readonly sessionId: string;
+  readonly contextRevision: string;
+  readonly records: readonly TypedAnnotationRecord[];
+}
 
 export type SessionLifecycleState = 'open' | 'source-ended' | 'reconciled-complete' | 'incomplete';
 export type OperationOutcome = 'process-succeeded' | 'command-failed' | 'task-verification-failed' | 'unknown';
@@ -25,6 +52,7 @@ export interface ResultFact {
 export interface EvidenceObservation {
   readonly id: string;
   readonly sourceEventId: string;
+  readonly executionKey?: string;
   readonly kind: EvidenceObservationKind;
   readonly occurredAt: string;
   readonly relatedEventId?: string;

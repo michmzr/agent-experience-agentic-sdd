@@ -10,6 +10,7 @@ import { runCli } from '../src/cli.js';
 import { ExperienceService } from '../src/application/experience-service.js';
 import type { SessionId } from '../src/domain/types.js';
 import { OperationalLearningRepository } from '../src/learning/repository.js';
+import { OperationalLearningService } from '../src/learning/service.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 import { initializeDiagnosticWorkspace, resolveDiagnosticScope } from '../src/capture/diagnostic-scope.js';
 import { CaptureDiagnosticStore } from '../src/storage/capture-diagnostic-store.js';
@@ -177,6 +178,7 @@ test('compiled watchdog isolates worker-child and completes a slot-linked analys
   const root = mkdtempSync(join(tmpdir(), 'ael-worker-repository-'));
   const databasePath = join(dataDir, 'experience.sqlite');
   try {
+    initializeGitRepository(root);
     writeFileSync(join(root, 'AGENTS.md'), 'Use pnpm instead of npm.\n');
     const store = new ExperienceStore(databasePath);
     store.registerRepository({ id: 'repo-1', root, observedAt: new Date().toISOString() });
@@ -185,9 +187,10 @@ test('compiled watchdog isolates worker-child and completes a slot-linked analys
     store.appendIncremental({ session: { id: 'session-2' as SessionId, source: 'codex',
       startedAt: new Date(Date.now() + 1).toISOString(), repositoryId: 'repo-1' as never } });
     store.close();
+    const learning = new OperationalLearningService(databasePath);
+    learning.enqueueCommittedSession('repo-1', 'session-1');
+    learning.enqueueCommittedSession('repo-1', 'session-2');
     const repository = new OperationalLearningRepository(databasePath);
-    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-1', inputHighWater: 0 });
-    repository.enqueue({ repositoryId: 'repo-1', sessionId: 'session-2', inputHighWater: 0 });
     const coordinator = repository.acquireCoordinatorLease({ ownerId: 'coordinator', leaseMs: 60_000 })!;
     const slot = repository.reserveWorkerSlot({ ...coordinator, leaseMs: 45_000, maxProcesses: 1 })!;
     assert.equal(repository.status().activeRunningCount, 1, 'unclaimed live slot is visible in status');

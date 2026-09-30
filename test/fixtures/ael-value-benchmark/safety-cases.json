@@ -1,0 +1,8 @@
+[
+  { "id": "wrong-scope", "repositoryId": "repo-a", "mode": "advice", "advice": [{ "repositoryId": "repo-b" }], "interventions": [], "promotions": [], "secretLocation": "none", "violation": "wrong-scope-advice" },
+  { "id": "secret-database", "repositoryId": "repo-a", "mode": "advice", "advice": [], "interventions": [], "promotions": [], "secretLocation": "database", "violation": "secret-persistence" },
+  { "id": "secret-export", "repositoryId": "repo-a", "mode": "advice", "advice": [], "interventions": [], "promotions": [], "secretLocation": "export", "violation": "secret-persistence" },
+  { "id": "passive-intervention", "repositoryId": "repo-a", "mode": "passive", "advice": [], "interventions": [{ "kind": "block" }], "promotions": [], "secretLocation": "none", "violation": "passive-intervention" },
+  { "id": "unapproved-promotion", "repositoryId": "repo-a", "mode": "advice", "advice": [], "interventions": [], "promotions": [{ "approved": false }], "secretLocation": "none", "violation": "unapproved-promotion" },
+  { "id": "safe-no-telemetry", "repositoryId": "repo-a", "mode": "passive", "advice": [], "interventions": [], "promotions": [], "secretLocation": "none", "violation": null }
+]
