@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft, 2026-09-06. This is the canonical delivery index for the operational-memory pivot. Milestone names and linked specifications are proposed, not approved or implemented. Existing milestone completion records are unchanged. This index replaces P0–P5 as the planning sequence.
+Original delivery proposal, 2026-09-06. This index preserves the operational-memory scope and dependency model that replaced P0–P5. M4–M6 have subsequent delivery and verification records; use the [roadmap](roadmap.md) and individual specification statuses for current delivery state. M7–M9 remain proposed. The [AEL value delivery package](ael-value-delivery.md) tracks authorized integration repairs and a limited local reuse pilot without declaring those milestones complete.
 
 ## Product contract
 
