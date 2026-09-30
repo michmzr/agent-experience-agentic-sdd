@@ -56,7 +56,8 @@ test('ACL evidence resolver uses persisted scoped capture and user-declared veri
     assert.match(witness?.operationSignature ?? '', /^operation:v1:[a-f0-9]{64}$/);
     assert.notEqual(witness?.contextRevision, 'declared-revision');
     assert.equal(resolver.resolve(repositoryId, annotationEvidenceId('user-notes', repositoryId, sessionId, 'claim-1')), undefined);
-    assert.equal(resolver.capabilities().projectFact, 'unsupported');
+    assert.equal(resolver.capabilities().projectFact, 'conditional');
+    assert.equal(resolver.listInstructionContextEvidence(repositoryId).length, 0);
     resolver.close();
 
     const database = new DatabaseSync(databasePath);

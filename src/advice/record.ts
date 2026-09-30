@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { resolveCliContext } from '../cli/context.js';
 import { operationSignatureFromStoredJson, SqliteCandidateEvidenceResolver } from '../knowledge/evidence-resolver.js';
 import { AdvisoryConfigurationStore } from './configuration.js';
-import { AdvisoryUsageStore, type AdviceScope, type UsageKind, type UsageOrigin } from './usage.js';
+import { AdvisoryUsageStore, type AdviceScope, type StoredAdviceBundle, type UsageKind, type UsageOrigin } from './usage.js';
 
 export interface AdviceUsageRequest extends AdviceScope {
   readonly bundleId: string;
@@ -36,7 +36,7 @@ export function recordLocalAdviceUsage(dataDir: string, workingDirectory: string
     try {
       if (input.kind === 'applied') verifyApplied(database, bundle.operationSignature,
         bundle.retrievedAt, usage.firstFactTime(input.bundleId, 'selected'), input);
-      else verifyOutcome(experiencePath, usage, bundle.operationSignature, input);
+      else verifyOutcome(database, experiencePath, usage, bundle, input);
     } finally { database.close(); }
   }
   usage.record(input);
@@ -62,7 +62,8 @@ function verifyApplied(database: DatabaseSync, expectedSignature: string, retrie
   }
 }
 
-function verifyOutcome(experiencePath: string, usage: AdvisoryUsageStore, expectedSignature: string, input: AdviceUsageRequest): void {
+function verifyOutcome(database: DatabaseSync, experiencePath: string, usage: AdvisoryUsageStore,
+  bundle: StoredAdviceBundle, input: AdviceUsageRequest): void {
   const applied = usage.facts(input.bundleId).filter(fact => fact.kind === 'applied').map(fact => fact.witnessRef);
   if (applied.length === 0) throw new Error('Outcome requires an applied operation witness.');
   const resolver = new SqliteCandidateEvidenceResolver(experiencePath, input.sessionId);
@@ -70,7 +71,26 @@ function verifyOutcome(experiencePath: string, usage: AdvisoryUsageStore, expect
   try { witness = resolver.resolve(input.repositoryId, input.witnessRef); }
   finally { resolver.close(); }
   if (witness?.kind !== 'task-verification' || !witness.taskId || !applied.includes(witness.taskId)
-    || witness.operationSignature !== expectedSignature || witness.contextRevision !== input.contextRevision) {
+    || witness.operationSignature !== bundle.operationSignature
+    || !/^instruction:v1:[a-f0-9]{64}$/.test(witness.contextRevision ?? '')) {
     throw new Error('Outcome verification does not match the applied operation and context.');
+  }
+  if (bundle.contextRevision.startsWith('package-json:v1:')) {
+    const rows = database.prepare(`SELECT r.verification_evidence_id AS evidence_id, r.evidence_origin_id AS origin_id
+      FROM acl_candidate_reviews r JOIN acl_candidates c ON c.id = r.candidate_id
+      WHERE c.repository_id = ? AND c.id = ? AND c.kind = 'project-fact'
+        AND r.revision = ? AND r.to_state = 'verified' AND r.context_revision = ? LIMIT 2`)
+      .all(bundle.repositoryId, bundle.lessonId, Number(bundle.lessonRevision), bundle.contextRevision) as Array<{
+        evidence_id: string; origin_id: string }>;
+    if (rows.length !== 1) throw new Error('Advice project fact has no qualifying verification.');
+    const source = new SqliteCandidateEvidenceResolver(experiencePath, rows[0]!.origin_id);
+    let fact;
+    try { fact = source.resolve(bundle.repositoryId, rows[0]!.evidence_id); }
+    finally { source.close(); }
+    if (fact?.kind !== 'deterministic-fact' || fact.contextRevision !== bundle.contextRevision) {
+      throw new Error('Advice project fact has changed since retrieval.');
+    }
+  } else if (witness.contextRevision !== bundle.contextRevision) {
+    throw new Error('Outcome instruction context differs from retrieved advice.');
   }
 }
