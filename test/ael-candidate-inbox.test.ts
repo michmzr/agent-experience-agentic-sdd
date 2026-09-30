@@ -69,8 +69,12 @@ test('AAP read contract excludes unreviewed, unverified and contradicted rows', 
     const database = new DatabaseSync(path);
     database.prepare("UPDATE acl_candidates SET state = 'verified', verified_at = ? WHERE id = ?")
       .run('2026-09-30T00:00:00.000Z', candidate.id);
-    database.prepare('INSERT INTO acl_candidate_reviews VALUES (?, ?, ?, ?, ?)')
-      .run('review-1', candidate.id, 'verified', null, '2026-09-30T00:00:00.000Z');
+    database.prepare(`INSERT INTO acl_candidate_reviews
+      (id, candidate_id, revision, from_state, to_state, actor_id, evidence_id, evidence_origin_id,
+       evidence_kind, verification_evidence_id, context_revision, operation_signature, reviewed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run('review-1', candidate.id, 1,
+        'confirmed', 'verified', 'reviewer-1', 'evidence-1', 'session-1', 'deterministic-fact',
+        null, 'agents-sha256:abc', null, '2026-09-30T00:00:00.000Z');
     database.close();
     let reopened = new CandidateRepository(path);
     assert.deepEqual(reopened.listVerifiedLocalEntries('repo-1'), []);

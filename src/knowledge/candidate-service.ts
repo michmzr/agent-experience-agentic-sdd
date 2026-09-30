@@ -1,9 +1,10 @@
-import type { CandidateRepository, CandidateRecord, VerifiedLocalEntry } from './candidate-repository.js';
+import type { CandidateRepository, CandidateRecord, VerifiedLocalEntry, CandidateReviewRequest, CandidateReviewWitness } from './candidate-repository.js';
 import type { CandidateIdentityInput } from './candidate-identity.js';
 import type { ManualReviewResult } from '../review/review-service.js';
 
 export class CandidateService {
-  constructor(private readonly repository: CandidateRepository) {}
+  constructor(private readonly repository: CandidateRepository,
+    private readonly evidenceResolver?: { resolve(repositoryId: string, evidenceId: string): CandidateReviewWitness | undefined }) {}
   backfillOperational(repositoryId: string): number {
     let total = 0;
     let batch: number;
@@ -24,5 +25,11 @@ export class CandidateService {
   inspect(repositoryId: string, id: string): CandidateRecord | undefined { return this.repository.inspect(repositoryId, id); }
   listVerifiedLocalEntries(repositoryId: string): readonly VerifiedLocalEntry[] {
     return this.repository.listVerifiedLocalEntries(repositoryId);
+  }
+  review(request: CandidateReviewRequest): CandidateRecord {
+    if (!this.evidenceResolver) throw new Error('Candidate review requires an evidence resolver.');
+    const witness = this.evidenceResolver.resolve(request.repositoryId, request.evidenceId);
+    if (!witness) throw new Error('Review evidence was not found.');
+    return this.repository.review(request, witness);
   }
 }

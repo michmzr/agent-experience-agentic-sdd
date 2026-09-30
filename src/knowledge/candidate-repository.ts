@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { LessonKind } from '../domain/types.js';
+import { canTransition } from '../domain/transitions.js';
 import { assertDurableTextSafe } from '../review/sanitizer.js';
 import { openExperienceDatabase } from '../storage/database.js';
 import { canonicalCandidateIdentity, type CandidateIdentityInput } from './candidate-identity.js';
@@ -37,6 +38,9 @@ export interface VerifiedLocalEntry {
   readonly state: 'verified';
   readonly verifiedAt: string;
   readonly contradictionState: 'clear';
+  readonly contextRevision: string;
+  readonly verificationEvidenceId: string;
+  readonly operationSignature: string | null;
 }
 export interface ReviewRequiredRegistration {
   readonly repositoryId: string;
@@ -46,10 +50,31 @@ export interface ReviewRequiredRegistration {
   readonly recommendation: string;
 }
 export interface ReviewRequiredRecord extends ReviewRequiredRegistration { readonly id: string; readonly state: 'review-required'; }
+export interface CandidateReviewRequest {
+  readonly repositoryId: string;
+  readonly candidateId: string;
+  readonly target: CandidateRecord['state'];
+  readonly actorId: string;
+  readonly evidenceId: string;
+  readonly reviewedAt: string;
+}
+export interface CandidateReviewWitness {
+  readonly id: string;
+  readonly repositoryId: string;
+  readonly originId: string;
+  readonly kind: 'observation' | 'task-verification' | 'deterministic-fact' | 'user-confirmed-fact' | 'instruction-context' | 'contradiction';
+  readonly taskId?: string;
+  readonly procedureKey?: string;
+  readonly factKey?: string;
+  readonly contextRevision?: string;
+  readonly operationSignature?: string;
+  readonly revalidatesCandidateId?: string;
+}
 
 interface CandidateRow {
   id: string; repository_id: string; kind: LessonKind; state: CandidateRecord['state']; statement: string;
   applicability_json: string; revision: number; contradiction_state: CandidateRecord['contradictionState']; verified_at: string | null;
+  proposition_key: string | null; procedure_key: string | null;
 }
 interface OperationalRow { id: string; session_id: string; kind: LessonKind; statement: string; }
 
@@ -71,6 +96,40 @@ export class CandidateRepository {
       for (const finding of reviewRequired) this.insertReviewRequired(finding);
     });
   }
+  review(request: CandidateReviewRequest, witness: CandidateReviewWitness): CandidateRecord {
+    assertIdentifier(request.repositoryId); assertIdentifier(request.candidateId);
+    assertIdentifier(request.actorId); assertIdentifier(request.evidenceId);
+    assertTimestamp(request.reviewedAt);
+    if (witness.id !== request.evidenceId || witness.repositoryId !== request.repositoryId) throw new TypeError('Review evidence scope is invalid.');
+    assertIdentifier(witness.originId);
+    this.transaction(() => {
+      const row = this.database.prepare('SELECT * FROM acl_candidates WHERE repository_id = ? AND id = ?')
+        .get(request.repositoryId, request.candidateId) as unknown as CandidateRow | undefined;
+      if (!row) throw new Error('Candidate was not found in repository scope.');
+      const prior = this.database.prepare('SELECT to_state FROM acl_candidate_reviews WHERE candidate_id = ? AND evidence_id = ?')
+        .get(row.id, request.evidenceId) as { to_state: string } | undefined;
+      if (prior) {
+        if (prior.to_state !== request.target) throw new Error('Review evidence was already used for another transition.');
+        return;
+      }
+      if (!canTransition(row.state, request.target)) throw new Error('Candidate lifecycle transition is not allowed.');
+      this.validateReviewEvidence(row, request, witness);
+      const verifiedAt = request.target === 'verified' ? request.reviewedAt : null;
+      const contradictionState = request.target === 'disputed' ? 'disputed' : 'clear';
+      const reviewId = `acl-review:v1:${createHash('sha256').update(JSON.stringify([row.id, request.evidenceId])).digest('hex')}`;
+      this.database.prepare(`INSERT INTO acl_candidate_reviews
+        (id, candidate_id, revision, from_state, to_state, actor_id, evidence_id, evidence_origin_id,
+         evidence_kind, verification_evidence_id, context_revision, operation_signature, reviewed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(reviewId, row.id, row.revision, row.state, request.target, request.actorId, request.evidenceId,
+          witness.originId, witness.kind, request.target === 'verified' ? witness.id : null,
+          request.target === 'verified' ? witness.contextRevision! : null,
+          request.target === 'verified' ? witness.operationSignature ?? null : null, request.reviewedAt);
+      this.database.prepare(`UPDATE acl_candidates SET state = ?, contradiction_state = ?, verified_at = ? WHERE id = ?`)
+        .run(request.target, contradictionState, verifiedAt, row.id);
+    });
+    return this.inspect(request.repositoryId, request.candidateId)!;
+  }
   list(repositoryId: string): readonly CandidateRecord[] {
     assertIdentifier(repositoryId);
     const rows = this.database.prepare('SELECT * FROM acl_candidates WHERE repository_id = ? ORDER BY id').all(repositoryId) as unknown as CandidateRow[];
@@ -85,15 +144,19 @@ export class CandidateRepository {
   // ACL-A3 must write the verified review and transition together. A1/A2 has no verified writer.
   listVerifiedLocalEntries(repositoryId: string): readonly VerifiedLocalEntry[] {
     assertIdentifier(repositoryId);
-    const rows = this.database.prepare(`SELECT c.* FROM acl_candidates c WHERE c.repository_id = ?
+    const rows = this.database.prepare(`SELECT c.*, r.context_revision, r.verification_evidence_id, r.operation_signature
+      FROM acl_candidates c JOIN acl_candidate_reviews r ON r.candidate_id = c.id AND r.revision = c.revision
+      AND r.to_state = 'verified' AND r.reviewed_at = c.verified_at WHERE c.repository_id = ?
       AND c.state = 'verified' AND c.contradiction_state = 'clear' AND c.verified_at IS NOT NULL
-      AND EXISTS (SELECT 1 FROM acl_candidate_reviews r WHERE r.candidate_id = c.id
-        AND r.outcome = 'verified' AND r.verification_evidence_id IS NOT NULL)
-      ORDER BY c.id`).all(repositoryId) as unknown as CandidateRow[];
+      AND r.verification_evidence_id IS NOT NULL AND r.context_revision IS NOT NULL
+      ORDER BY c.id`).all(repositoryId) as unknown as Array<CandidateRow & {
+        context_revision: string; verification_evidence_id: string; operation_signature: string | null }>;
     return Object.freeze(rows.map((row) => Object.freeze({ candidateId: row.id, repositoryId: row.repository_id,
       revision: row.revision, kind: row.kind, statement: row.statement,
       applicability: JSON.parse(row.applicability_json) as CandidateIdentityInput['applicability'],
-      state: 'verified' as const, verifiedAt: row.verified_at!, contradictionState: 'clear' as const })));
+      state: 'verified' as const, verifiedAt: row.verified_at!, contradictionState: 'clear' as const,
+      contextRevision: row.context_revision, verificationEvidenceId: row.verification_evidence_id,
+      operationSignature: row.operation_signature })));
   }
   registerReviewRequired(input: ReviewRequiredRegistration): ReviewRequiredRecord {
     const id = this.transaction(() => this.insertReviewRequired(input));
@@ -133,11 +196,62 @@ export class CandidateRepository {
     });
   }
 
+  private validateReviewEvidence(row: CandidateRow, request: CandidateReviewRequest, witness: CandidateReviewWitness): void {
+    if (row.state === 'disputed' && witness.revalidatesCandidateId !== row.id) {
+      throw new Error('Disputed candidate requires explicit revalidation evidence.');
+    }
+    if (request.target === 'disputed') {
+      if (witness.kind !== 'contradiction') throw new Error('Dispute requires contradiction evidence.');
+      return;
+    }
+    if (request.target === 'observed' || request.target === 'confirmed') {
+      if (witness.kind !== 'observation' && witness.kind !== 'instruction-context' &&
+        witness.kind !== 'deterministic-fact' && witness.kind !== 'user-confirmed-fact') {
+        throw new Error('Observation requires source evidence.');
+      }
+      if (request.target === 'confirmed') {
+        const existing = this.database.prepare(`SELECT 1 FROM acl_candidate_reviews
+          WHERE candidate_id = ? AND evidence_origin_id = ? AND to_state IN ('observed', 'confirmed') LIMIT 1`)
+          .get(row.id, witness.originId);
+        if (existing) throw new Error('Confirmation requires independent evidence origin.');
+      }
+      return;
+    }
+    if (request.target !== 'verified') throw new Error('Review target requires separate lifecycle handling.');
+    if (!witness.contextRevision || !witness.contextRevision.trim()) {
+      throw new Error('Verification requires witnessed context revision.');
+    }
+    assertIdentifier(witness.contextRevision);
+    if (witness.operationSignature !== undefined) {
+      assertIdentifier(witness.operationSignature);
+      if (!witness.operationSignature.startsWith('operation:v1:')) throw new Error('Operation signature is not versioned.');
+    }
+    if (row.kind === 'project-fact') {
+      if (witness.kind !== 'deterministic-fact' && witness.kind !== 'user-confirmed-fact') {
+        throw new Error('Project fact requires a qualifying fact witness.');
+      }
+      if (!row.proposition_key || witness.factKey !== row.proposition_key) {
+        throw new Error('Project fact witness does not match the proposition.');
+      }
+      return;
+    }
+    if (row.kind === 'convention') {
+      if (witness.kind !== 'instruction-context') throw new Error('Convention requires instruction context evidence.');
+      return;
+    }
+    if (witness.kind !== 'task-verification' || !witness.taskId ||
+      (row.procedure_key !== null && witness.procedureKey !== row.procedure_key)) {
+      throw new Error('Repair verification requires task-relevant verification evidence.');
+    }
+    assertIdentifier(witness.taskId);
+  }
+
   private initialize(): void {
     this.database.exec(`CREATE TABLE IF NOT EXISTS acl_candidates (
       id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, kind TEXT NOT NULL,
       state TEXT NOT NULL CHECK(state IN ('candidate','observed','confirmed','verified','disputed','superseded','rejected','expired')),
-      statement TEXT NOT NULL, applicability_json TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+      statement TEXT NOT NULL, applicability_json TEXT NOT NULL, proposition_key TEXT, procedure_key TEXT,
+      revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
       contradiction_state TEXT NOT NULL DEFAULT 'clear' CHECK(contradiction_state IN ('clear','disputed')),
       verified_at TEXT
     ) STRICT;
@@ -153,8 +267,11 @@ export class CandidateRepository {
     ) STRICT;
     CREATE INDEX IF NOT EXISTS acl_review_required_repository ON acl_review_required(repository_id, id);
     CREATE TABLE IF NOT EXISTS acl_candidate_reviews (
-      id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL REFERENCES acl_candidates(id),
-      outcome TEXT NOT NULL, verification_evidence_id TEXT, reviewed_at TEXT NOT NULL
+      id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL REFERENCES acl_candidates(id), revision INTEGER NOT NULL,
+      from_state TEXT NOT NULL, to_state TEXT NOT NULL, actor_id TEXT NOT NULL,
+      evidence_id TEXT NOT NULL, evidence_origin_id TEXT NOT NULL, evidence_kind TEXT NOT NULL,
+      verification_evidence_id TEXT, context_revision TEXT, operation_signature TEXT,
+      reviewed_at TEXT NOT NULL, UNIQUE(candidate_id, evidence_id)
     ) STRICT;`);
   }
   private insertCandidate(input: CandidateRegistration): string {
@@ -166,8 +283,10 @@ export class CandidateRepository {
     const evidenceEventIds = [...new Set(input.evidenceEventIds ?? [])].sort();
     for (const evidenceId of evidenceEventIds) assertIdentifier(evidenceId);
     this.database.prepare(`INSERT INTO acl_candidates
-      (id, repository_id, kind, state, statement, applicability_json) VALUES (?, ?, ?, 'candidate', ?, ?)
-      ON CONFLICT(id) DO NOTHING`).run(id, input.repositoryId, input.kind, input.statement, JSON.stringify(input.applicability));
+      (id, repository_id, kind, state, statement, applicability_json, proposition_key, procedure_key)
+      VALUES (?, ?, ?, 'candidate', ?, ?, ?, ?)
+      ON CONFLICT(id) DO NOTHING`).run(id, input.repositoryId, input.kind, input.statement,
+        JSON.stringify(input.applicability), input.propositionKey ?? null, input.procedureKey ?? null);
     this.database.prepare(`INSERT INTO acl_candidate_origins
       (candidate_id, source, origin_id, session_id, evidence_json) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(candidate_id, source, origin_id) DO NOTHING`)
@@ -209,6 +328,11 @@ export class CandidateRepository {
 
 function assertIdentifier(value: string): void {
   if (typeof value !== 'string' || !value || value.length > 512 || value !== value.trim()) throw new TypeError('Candidate identifier is invalid.');
+}
+function assertTimestamp(value: string): void {
+  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value) {
+    throw new TypeError('Review timestamp is invalid.');
+  }
 }
 function assertDurableText(value: string): void {
   if (typeof value !== 'string' || !value.trim() || value.length > MAX_TEXT) throw new TypeError('Candidate text is invalid.');
