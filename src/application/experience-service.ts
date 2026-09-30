@@ -7,7 +7,7 @@ import { resolveRepositoryRoot } from '../repository/local-repository.js';
 import { ingestPassiveHook, type HookIngressResult } from '../capture/hook-ingress.js';
 import { drainCaptureSpool } from '../capture/spool-drain.js';
 import { CaptureSpool } from '../capture/spool.js';
-import { scopedReceiptHealth } from './health-v3.js';
+import { detectorEvaluation, scopedReceiptHealth } from './health-v3.js';
 import type { PassiveHookSource } from '../capture/hook-adapters/contracts.js';
 import { initializeDiagnosticWorkspace, resolveConfiguredWorkspaceRoot, resolveDiagnosticScope, type DiagnosticScope } from '../capture/diagnostic-scope.js';
 import { CaptureDiagnosticStore, type CursorDiagnosticCounts } from '../storage/capture-diagnostic-store.js';
@@ -190,6 +190,8 @@ export class ExperienceService {
     const legacy = this.status(input);
     const capture = this.captureHealthV3(input.id);
     const evidence = this.evidenceQuality(input.id);
+    const analysis = this.analysisQuality(input.id);
+    const detectors = detectorEvaluation(this.databasePath, input.id, analysis.state);
     return Object.freeze({
       version: 3 as const, schemaVersion: 3 as const,
       repository: Object.freeze({ id: input.id }),
@@ -198,7 +200,9 @@ export class ExperienceService {
       receipts: capture.receipts,
       operationEvidence: Object.freeze({ state: existsSync(this.databasePath) ? 'available' as const : 'unavailable' as const,
         committedOperations: evidence.operations, linkedResults: evidence.linked, unknownResults: evidence.unknownTotal }),
-      analysis: Object.freeze({ state: 'unavailable' as const })
+      analysis: Object.freeze({ ...analysis, state: detectors.state === 'unavailable' ? 'unavailable' as const : analysis.state,
+        result: detectors.detectors[0]?.status === 'insufficient-evidence' ? 'insufficient-evidence' as const
+        : analysis.result === 'findings' ? 'findings' as const : 'unavailable' as const, detectorEvaluation: detectors })
     });
   }
 
@@ -215,9 +219,12 @@ export class ExperienceService {
 
   operationalAnalysisReportV3(repositoryId: string) {
     const { result: _legacyResult, ...analysis } = this.analysisQuality(repositoryId);
+    const detectors = detectorEvaluation(this.databasePath, repositoryId, analysis.state);
     return Object.freeze({ version: 3 as const, schemaVersion: 3 as const,
-      repository: Object.freeze({ id: repositoryId }), analysis: Object.freeze({ ...analysis, result: 'unavailable' as const }),
-      detectorEvaluation: Object.freeze({ state: 'unavailable' as const }) });
+      repository: Object.freeze({ id: repositoryId }), analysis: Object.freeze({ ...analysis,
+        state: detectors.state === 'unavailable' ? 'unavailable' as const : analysis.state,
+        result: detectors.detectors[0]?.status === 'insufficient-evidence' ? 'insufficient-evidence' as const : 'unavailable' as const }),
+      detectorEvaluation: detectors });
   }
 
   private captureHealthV3(repositoryId: string) {
