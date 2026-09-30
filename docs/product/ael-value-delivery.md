@@ -12,14 +12,14 @@ The intended outcome is an attributable, complete and reviewable path from retai
 
 | ID | Priority | Scope | Specification | Plan | Approval / execution |
 |---|---|---|---|---|---|
-| ABI | P0 | Build identity and installation alignment | [Spec](../superpowers/specs/2026-09-29-ael-build-identity-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-build-identity.md) | ABI core accepted by user on 2026-09-29; ARC receipt persistence and live-host qualification pending |
+| ABI | P0 | Build identity and installation alignment | [Spec](../superpowers/specs/2026-09-29-ael-build-identity-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-build-identity.md) | Core accepted 2026-09-29; receipt attribution integrated 2026-09-30; public health reporting and live-host qualification pending |
 | AEC | P0 | Result facts and resumed evidence continuity | [Spec](../superpowers/specs/2026-09-29-ael-evidence-continuity-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-evidence-continuity.md) | Authorized 2026-09-30; implementation in progress |
-| ARC | P0 | Bounded recovery and scoped coverage | [Spec](../superpowers/specs/2026-09-29-ael-recovery-coverage-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-recovery-coverage.md) | Authorized 2026-09-30; receipt storage in progress; remaining work follows AEC |
+| ARC | P0 | Bounded recovery and scoped coverage | [Spec](../superpowers/specs/2026-09-29-ael-recovery-coverage-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-recovery-coverage.md) | Authorized 2026-09-30; receipt storage integrated, bounded recovery in progress; remaining work follows AEC |
 | ASC | P1 | Explicit conventions and subproject scope | [Spec](../superpowers/specs/2026-09-29-ael-scoped-conventions-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-scoped-conventions.md) | Authorized 2026-09-30; queued after AEC |
 | ATI | P1 | Typed evidence from a public producer | [Spec](../superpowers/specs/2026-09-29-ael-typed-evidence-ingestion-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-typed-evidence-ingestion.md) | Authorized 2026-09-30; queued after AEC and ARC |
 | ACL | P1 | Candidate review, lifecycle and retrieval | [Spec](../superpowers/specs/2026-09-29-ael-candidate-lifecycle-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-candidate-lifecycle.md) | Authorized 2026-09-30; queued after ASC and ATI |
 | AAP | P1 | Default-off local advisory pilot | [Spec](../superpowers/specs/2026-09-29-ael-advisory-pilot-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-advisory-pilot.md) | Authorized 2026-09-30 under ADR 002; queued after AVB B1 |
-| AVB | P0 baseline, P1 comparison | End-to-end value benchmark | [Spec](../superpowers/specs/2026-09-29-ael-value-benchmark-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-value-benchmark.md) | Authorized 2026-09-30; B0 baseline in progress |
+| AVB | P0 baseline, P1 comparison | End-to-end value benchmark | [Spec](../superpowers/specs/2026-09-29-ael-value-benchmark-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-value-benchmark.md) | Authorized 2026-09-30; B0 synthetic baseline frozen from main, host qualification unsupported; B1/B2 pending |
 
 Each specification contains problem, evidence, goals, exclusions, observable behavior, architecture, lifecycle, failure/privacy rules, rollout and numbered acceptance criteria. Each plan names source/test files, TDD steps, regression commands and rollback evidence. The [traceability manifest](ael-value-delivery-traceability.json) maps 46 requirements to 46 tasks and planned tests. A planned test path is not a claim that the test exists or passes.
 
@@ -68,7 +68,7 @@ RAG, additional reviewers, broad cloud/SSO integration and new enforcement are o
 - [x] Record approval of all eight specifications, including scope, limits, migration and evidence policy, on 2026-09-30.
 - [x] Record the local-slice decision in [ADR 002](../decisions/002-staged-local-knowledge-reuse.md) on 2026-09-30, before AAP implementation.
 - [ ] Review the corresponding proposed plan against the approved contract and current source; expand code-level patches after that review, before execution.
-- [ ] Capture B0 and preserve its immutable build/corpus/environment identities before product changes.
+- [x] Capture synthetic B0 and preserve its build/corpus/environment identities from main before integrating further product changes. Actual-host baseline remains unsupported.
 - [ ] Execute the selected plan in dependency order; keep incomplete host qualifications explicit.
 - [ ] Run its full acceptance path after the last change and attach actual requirement-level evidence.
 - [ ] Review the implementation, migration and rollback outcomes before recording acceptance or rollout.
