@@ -11,6 +11,7 @@ export interface ProjectSettings {
   readonly captureDeliveryDeadlineMs: number;
   readonly automaticOperationalLearning?: boolean;
   readonly instructionLocations?: readonly string[];
+  readonly instructionScopes?: readonly { readonly location: string; readonly qualifier: string; readonly path: string }[];
 }
 
 export function loadProjectSettings(projectRoot: string): ProjectSettings {
@@ -22,8 +23,9 @@ export function loadProjectSettings(projectRoot: string): ProjectSettings {
   catch { throw new TypeError('Project settings are invalid.'); }
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Project settings are invalid.');
   const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort().join(',');
-  if (!['captureDeliveryDeadlineMs,version', 'automaticOperationalLearning,captureDeliveryDeadlineMs,version', 'captureDeliveryDeadlineMs,instructionLocations,version', 'automaticOperationalLearning,captureDeliveryDeadlineMs,instructionLocations,version'].includes(keys) || record.version !== 1) {
+  const keys = Object.keys(record);
+  if (keys.some(key => !['version', 'captureDeliveryDeadlineMs', 'automaticOperationalLearning', 'instructionLocations', 'instructionScopes'].includes(key))
+    || !keys.includes('version') || !keys.includes('captureDeliveryDeadlineMs') || record.version !== 1) {
     throw new TypeError('Project settings are invalid.');
   }
   const deadline = record.captureDeliveryDeadlineMs;
@@ -32,7 +34,8 @@ export function loadProjectSettings(projectRoot: string): ProjectSettings {
   }
   if (record.automaticOperationalLearning !== undefined && typeof record.automaticOperationalLearning !== 'boolean') throw new TypeError('Automatic operational learning must be boolean.');
   const instructionLocations = parseInstructionLocations(record.instructionLocations);
-  return Object.freeze({ version: 1, captureDeliveryDeadlineMs: deadline as number, ...(record.automaticOperationalLearning === undefined ? {} : { automaticOperationalLearning: record.automaticOperationalLearning }), ...(instructionLocations === undefined ? {} : { instructionLocations }) });
+  const instructionScopes = parseInstructionScopes(record.instructionScopes, projectRoot, instructionLocations ?? defaultInstructionLocations);
+  return Object.freeze({ version: 1, captureDeliveryDeadlineMs: deadline as number, ...(record.automaticOperationalLearning === undefined ? {} : { automaticOperationalLearning: record.automaticOperationalLearning }), ...(instructionLocations === undefined ? {} : { instructionLocations }), ...(instructionScopes === undefined ? {} : { instructionScopes }) });
 }
 
 function defaults(): ProjectSettings {
@@ -52,4 +55,29 @@ function parseInstructionLocations(value: unknown): readonly string[] | undefine
   });
   if (new Set(locations).size !== locations.length) throw new TypeError('Instruction locations are invalid.');
   return Object.freeze(locations);
+}
+
+function parseInstructionScopes(value: unknown, root: string, locations: readonly string[]): ProjectSettings['instructionScopes'] {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 16) throw new TypeError('Instruction scopes exceed the limit of 16.');
+  const scopes = value.map((entry): NonNullable<ProjectSettings['instructionScopes']>[number] => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+      || Object.keys(entry).sort().join(',') !== 'location,path,qualifier') throw new TypeError('Instruction scope is invalid.');
+    const { location, path, qualifier } = entry as Record<string, unknown>;
+    if (typeof location !== 'string' || !locations.includes(location)
+      || (qualifier !== 'mobile app' && qualifier !== 'backend')
+      || typeof path !== 'string' || !/^(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+$/.test(path)) throw new TypeError('Instruction scope path or qualifier is invalid.');
+    let current = root;
+    for (const segment of path.split('/')) {
+      current = join(current, segment);
+      try { if (lstatSync(current).isSymbolicLink()) throw new TypeError('Instruction scope crosses a symlink.'); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    }
+    return Object.freeze({ location, qualifier, path });
+  });
+  for (const [index, a] of scopes.entries()) for (const b of scopes.slice(index + 1)) {
+    if (a.location === b.location && (a.path === b.path || a.path.startsWith(`${b.path}/`) || b.path.startsWith(`${a.path}/`)))
+      throw new TypeError('Ambiguous overlapping instruction scopes.');
+  }
+  return Object.freeze(scopes);
 }

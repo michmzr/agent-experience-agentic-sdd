@@ -1,0 +1,1 @@
+{"schemaVersion":1,"grammar":["Use pnpm (never npm)","pnpm only","Prefer uv rather than pip","uv only"],"scope":{"qualifier":"mobile app","path":"apps/mobile","excluded":"services/backend"}}
