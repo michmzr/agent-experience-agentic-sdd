@@ -1,4 +1,5 @@
 import { assertWriterCompatible } from '../installation/writer-contract.js';
+import { runningBuild } from '../installation/build-manifest.js';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -26,8 +27,21 @@ export interface CaptureSpoolOptions {
 
 export type CaptureDisposition = 'accepted' | 'duplicate' | 'unsupported-tool' | 'privacy-redaction' | 'unsafe-normalization' | 'malformed-envelope' | 'admission-failure' | 'delivery-retry' | 'quarantine' | 'legacy-unknown';
 export interface CaptureReceiptInput { readonly source: 'codex' | 'cursor'; readonly receivedAt: string; readonly disposition: CaptureDisposition; readonly correlationInput?: string; }
-export interface CaptureReceipt { readonly correlationKey: string; readonly disposition: CaptureDisposition; readonly receivedAt: string; }
-export interface CaptureReceiptReport { readonly accounting: 'available' | 'unavailable'; readonly receipts: readonly CaptureReceipt[]; readonly byDisposition: Readonly<Record<CaptureDisposition, number>>; }
+export interface CaptureReceipt {
+  readonly correlationKey: string;
+  readonly operationKey?: string;
+  readonly disposition: CaptureDisposition;
+  readonly receivedAt: string;
+  readonly buildRole: 'capture' | 'writer' | 'unknown';
+  readonly buildId?: string;
+  readonly writer?: number;
+}
+export interface CaptureReceiptReport {
+  readonly accounting: 'available' | 'unavailable';
+  readonly receipts: readonly CaptureReceipt[];
+  readonly byDisposition: Readonly<Record<CaptureDisposition, number>>;
+  readonly retention?: { readonly firstSequence: number; readonly lastSequence: number; readonly capacity: number };
+}
 const dispositions: readonly CaptureDisposition[] = ['accepted', 'duplicate', 'unsupported-tool', 'privacy-redaction', 'unsafe-normalization', 'malformed-envelope', 'admission-failure', 'delivery-retry', 'quarantine', 'legacy-unknown'];
 
 export interface CaptureSpoolStatus {
@@ -122,6 +136,7 @@ export class CaptureSpool {
       INSERT OR IGNORE INTO drain_completion (id, generation, state) VALUES (1, 0, 'pending');
     `);
     ensureDiagnosticColumns(this.#database);
+    ensureReceiptColumns(this.#database);
   }
 
   recordReceipt(input: CaptureReceiptInput): CaptureReceipt {
@@ -136,11 +151,23 @@ export class CaptureSpool {
   }
 
   receiptReport(): CaptureReceiptReport {
-    const rows = this.#database.prepare('SELECT correlation_key, disposition, received_at FROM capture_receipts ORDER BY sequence').all() as Array<{ correlation_key: string; disposition: CaptureDisposition; received_at: string }>;
+    const rows = this.#database.prepare('SELECT sequence, correlation_key, operation_key, disposition, received_at, build_role, build_id, writer FROM capture_receipts ORDER BY sequence').all() as Array<{ sequence: number; correlation_key: string; operation_key: string | null; disposition: CaptureDisposition; received_at: string; build_role: 'capture' | 'writer' | null; build_id: string | null; writer: number | null }>;
     const byDisposition = Object.fromEntries(dispositions.map((value) => [value, 0])) as Record<CaptureDisposition, number>;
     for (const row of rows) byDisposition[row.disposition] += 1;
     const accounting = (this.#database.prepare('SELECT state FROM receipt_accounting WHERE id = 1').get() as { state: 'available' | 'unavailable' }).state;
-    return Object.freeze({ accounting, receipts: Object.freeze(rows.map((row) => Object.freeze({ correlationKey: row.correlation_key, disposition: row.disposition, receivedAt: row.received_at }))), byDisposition: Object.freeze(byDisposition) });
+    return Object.freeze({
+      accounting,
+      receipts: Object.freeze(rows.map((row) => Object.freeze({
+        correlationKey: row.correlation_key,
+        ...(row.operation_key === null ? {} : { operationKey: row.operation_key }),
+        disposition: row.disposition,
+        receivedAt: row.received_at,
+        buildRole: row.build_role ?? 'unknown',
+        ...(row.build_id === null ? {} : { buildId: row.build_id, writer: row.writer! })
+      }))),
+      byDisposition: Object.freeze(byDisposition),
+      ...(rows.length === 0 ? {} : { retention: Object.freeze({ firstSequence: rows[0]!.sequence, lastSequence: rows[rows.length - 1]!.sequence, capacity: this.#maxReceipts }) })
+    });
   }
 
   markReceiptAccountingUnavailable(): void {
@@ -155,7 +182,7 @@ export class CaptureSpool {
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       const admission = this.#admit(record, receipt.receivedAt, false);
-      this.#writeReceipt({ ...receipt, disposition: admission.status === 'admitted' ? 'accepted' : 'duplicate' });
+      this.#writeReceipt({ ...receipt, disposition: admission.status === 'admitted' ? 'accepted' : 'duplicate' }, admission.deliveryId);
       this.#database.exec('COMMIT');
       return admission;
     } catch (error) {
@@ -194,7 +221,7 @@ export class CaptureSpool {
     }
   }
 
-  #writeReceipt(input: CaptureReceiptInput): CaptureReceipt {
+  #writeReceipt(input: CaptureReceiptInput, operationId?: string): CaptureReceipt {
     if (this.#failReceiptPersistence) throw new TypeError('Injected capture receipt persistence failure.');
     let row = this.#database.prepare('SELECT secret FROM receipt_secret WHERE id = 1').get() as { secret?: Uint8Array } | undefined;
     if (row === undefined) {
@@ -204,9 +231,14 @@ export class CaptureSpool {
     const secret = row.secret;
     if (secret === undefined) throw new TypeError('Capture receipt secret is unavailable.');
     const correlationKey = createHmac('sha256', secret).update(input.source).update('\0').update(input.correlationInput ?? '').digest('hex');
-    this.#database.prepare('INSERT INTO capture_receipts (correlation_key, disposition, received_at) VALUES (?, ?, ?)').run(correlationKey, input.disposition, input.receivedAt);
+    const operationKey = operationId === undefined ? undefined : createHmac('sha256', secret).update('operation\0').update(operationId).digest('hex');
+    const role = operationKey === undefined ? 'unknown' : input.disposition === 'accepted' ? 'capture' : input.disposition === 'delivery-retry' ? 'writer' : 'unknown';
+    const build = role === 'unknown' ? undefined : runningBuild();
+    const buildRole = build === undefined ? 'unknown' : role;
+    this.#database.prepare('INSERT INTO capture_receipts (correlation_key, operation_key, disposition, received_at, build_role, build_id, writer) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(correlationKey, operationKey ?? null, input.disposition, input.receivedAt, buildRole, build?.buildId ?? null, build?.capabilities.writer ?? null);
     this.#database.prepare('DELETE FROM capture_receipts WHERE sequence NOT IN (SELECT sequence FROM capture_receipts ORDER BY sequence DESC LIMIT ?)').run(this.#maxReceipts);
-    return Object.freeze({ correlationKey, disposition: input.disposition, receivedAt: input.receivedAt });
+    return Object.freeze({ correlationKey, ...(operationKey === undefined ? {} : { operationKey }), disposition: input.disposition, receivedAt: input.receivedAt, buildRole, ...(build === undefined ? {} : { buildId: build.buildId, writer: build.capabilities.writer }) });
   }
 
   #appendReceiptOrMarkUnavailable(input: CaptureReceiptInput): void {
@@ -323,7 +355,7 @@ export class CaptureSpool {
         UPDATE records SET state = 'pending', lease_until = NULL, next_retry_at = ?
         WHERE delivery_id = ? AND state = 'claimed'
       `).run(nextRetryAt, deliveryId);
-      if (result.changes === 1) this.#writeReceipt({ source: sourceForPayload(row.payload) ?? 'codex', receivedAt: now, disposition: 'delivery-retry', correlationInput: deliveryId });
+      if (result.changes === 1) this.#writeReceipt({ source: sourceForPayload(row.payload) ?? 'codex', receivedAt: now, disposition: 'delivery-retry', correlationInput: deliveryId }, deliveryId);
       this.#database.exec('COMMIT');
     } catch (error) {
       rollback(this.#database);
@@ -411,6 +443,18 @@ function ensureDiagnosticColumns(database: DatabaseSync): void {
     ['delayed_delivery', 'INTEGER NOT NULL DEFAULT 0'], ['latest_delivery_id', 'TEXT'], ['latest_admitted_at', 'TEXT'],
     ['latest_deadline_at', 'TEXT'], ['latest_detected_at', 'TEXT'], ['latest_committed_at', 'TEXT']
   ] as const) if (!counterColumns.has(name)) database.exec(`ALTER TABLE counters ADD COLUMN ${name} ${definition}`);
+}
+
+function ensureReceiptColumns(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const columns = new Set((database.prepare("PRAGMA table_info('capture_receipts')").all() as Array<{ name: string }>).map(({ name }) => name));
+    for (const [name, definition] of [
+      ['operation_key', 'TEXT'], ['build_role', "TEXT CHECK (build_role IN ('capture', 'writer', 'unknown'))"],
+      ['build_id', 'TEXT'], ['writer', 'INTEGER']
+    ] as const) if (!columns.has(name)) database.exec(`ALTER TABLE capture_receipts ADD COLUMN ${name} ${definition}`);
+    database.exec('COMMIT');
+  } catch (error) { rollback(database); throw error; }
 }
 
 function rollback(database: DatabaseSync): void {

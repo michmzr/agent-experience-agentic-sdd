@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { CaptureSpool } from '../src/capture/spool.js';
+import { runningBuild } from '../src/installation/build-manifest.js';
 import { drainCaptureSpool, waitForWorkerCompletion } from '../src/capture/spool-drain.js';
 import type { PassiveCaptureRecord } from '../src/capture/passive-service.js';
 import { OperationalLearningRepository } from '../src/learning/repository.js';
@@ -123,6 +124,101 @@ test('bounds retained and reported receipts deterministically', () => {
     assert.deepEqual(report.receipts.map(({ receivedAt }) => receivedAt), ['2026-09-12T08:00:01.000Z', '2026-09-12T08:00:02.000Z']);
     assert.equal(report.byDisposition.accepted, 0);
     assert.equal(report.byDisposition['delivery-retry'], 1);
+  } finally { spool.close(); rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('ABI-A5 retained receipts bind verified build roles to private operation identities across restart and retry', () => {
+  const dataDir = dataDirectory();
+  const path = join(dataDir, 'capture-spool.sqlite');
+  const build = runningBuild();
+  assert.ok(build);
+  const first = sessionStart();
+  const second = differentSessionStart();
+  let firstDelivery: string;
+  const spool = new CaptureSpool(path, { maxReceipts: 3 });
+  try {
+    firstDelivery = spool.admitWithReceipt(first, { source: 'codex', receivedAt: '2026-09-12T08:00:00.000Z', correlationInput: 'private-first' }).deliveryId;
+    spool.admitWithReceipt(second, { source: 'codex', receivedAt: '2026-09-12T08:00:01.000Z', correlationInput: 'private-second' });
+    spool.claim('2026-09-12T08:00:01.000Z', 2);
+    spool.retry(firstDelivery, '2026-09-12T08:00:02.000Z');
+  } finally { spool.close(); }
+  const reopened = new CaptureSpool(path, { maxReceipts: 3 });
+  try {
+    const report = reopened.receiptReport();
+    const [acceptedFirst, acceptedSecond, retry] = report.receipts;
+    assert.equal(report.receipts.length, 3);
+    assert.match(acceptedFirst!.operationKey ?? '', /^[a-f0-9]{64}$/);
+    assert.notEqual(acceptedFirst!.operationKey, acceptedSecond!.operationKey);
+    assert.equal(retry!.operationKey, acceptedFirst!.operationKey);
+    assert.deepEqual(report.receipts.map(({ buildRole }) => buildRole), ['capture', 'capture', 'writer']);
+    assert.deepEqual(report.receipts.map(({ buildId }) => buildId), [build.buildId, build.buildId, build.buildId]);
+    assert.deepEqual(report.receipts.map(({ writer }) => writer), [1, 1, 1]);
+    assert.equal(JSON.stringify(report).includes('private-first'), false);
+    assert.equal(JSON.stringify(report).includes('private-second'), false);
+    assert.ok(report.retention);
+    assert.equal(report.retention!.lastSequence - report.retention!.firstSequence, 2);
+  } finally { reopened.close(); rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('ABI-A5 migrated historical receipts stay unknown and retention never reconstructs an evicted capture build', () => {
+  const dataDir = dataDirectory();
+  const path = join(dataDir, 'capture-spool.sqlite');
+  const setup = new CaptureSpool(path);
+  setup.close();
+  const legacy = new DatabaseSync(path);
+  legacy.exec("DROP TABLE capture_receipts; CREATE TABLE capture_receipts (sequence INTEGER PRIMARY KEY, correlation_key TEXT NOT NULL, disposition TEXT NOT NULL, received_at TEXT NOT NULL) STRICT;");
+  legacy.prepare('INSERT INTO capture_receipts (correlation_key, disposition, received_at) VALUES (?, ?, ?)')
+    .run('a'.repeat(64), 'accepted', '2026-09-12T07:59:59.000Z');
+  legacy.close();
+  const spool = new CaptureSpool(path, { maxReceipts: 1 });
+  try {
+    const historical = spool.receiptReport().receipts[0]!;
+    assert.equal(historical.buildRole, 'unknown');
+    assert.equal(historical.buildId, undefined);
+    assert.equal(historical.operationKey, undefined);
+    const columns = new DatabaseSync(path);
+    assert.deepEqual((columns.prepare("PRAGMA table_info('capture_receipts')").all() as Array<{ name: string }>).slice(-4).map(row => row.name), ['operation_key', 'build_role', 'build_id', 'writer']);
+    columns.close();
+    const first = spool.admitWithReceipt(sessionStart(), { source: 'codex', receivedAt: '2026-09-12T08:00:00.000Z' });
+    spool.claim('2026-09-12T08:00:00.000Z', 1);
+    spool.retry(first.deliveryId, '2026-09-12T08:00:01.000Z');
+    const report = spool.receiptReport();
+    assert.equal(spool.status().admitted, 1);
+    assert.equal(report.receipts.length, 1);
+    assert.equal(report.receipts[0]!.buildRole, 'writer');
+    assert.equal(report.byDisposition.accepted, 0);
+    assert.equal(report.retention!.firstSequence, 3);
+  } finally { spool.close(); rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('ABI-A5 rejects an incompatible old writer before changing a legacy receipt schema', () => {
+  const dataDir = dataDirectory();
+  const path = join(dataDir, 'capture-spool.sqlite');
+  const setup = new CaptureSpool(path);
+  setup.close();
+  const legacy = new DatabaseSync(path);
+  legacy.exec("DROP TABLE capture_receipts; CREATE TABLE capture_receipts (sequence INTEGER PRIMARY KEY, correlation_key TEXT NOT NULL, disposition TEXT NOT NULL, received_at TEXT NOT NULL) STRICT; UPDATE ael_writer_contract SET minimum_writer = 2 WHERE id = 1;");
+  legacy.close();
+  const before = readFileSync(path);
+  try {
+    assert.throws(() => new CaptureSpool(path), /writer/i);
+    assert.deepEqual(readFileSync(path), before);
+    const inspected = new DatabaseSync(path, { readOnly: true });
+    assert.deepEqual((inspected.prepare("PRAGMA table_info('capture_receipts')").all() as Array<{ name: string }>).map(row => row.name), ['sequence', 'correlation_key', 'disposition', 'received_at']);
+    inspected.close();
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('ABI-A5 caller-supplied build fields cannot attest a standalone receipt', () => {
+  const dataDir = dataDirectory();
+  const spool = new CaptureSpool(join(dataDir, 'capture-spool.sqlite'));
+  try {
+    const forged = { source: 'codex' as const, receivedAt: '2026-09-12T08:00:00.000Z', disposition: 'accepted' as const, correlationInput: 'private-input', buildId: 'f'.repeat(64), writer: 7, operationKey: 'e'.repeat(64) };
+    const receipt = spool.recordReceipt(forged);
+    assert.equal(receipt.buildRole, 'unknown');
+    assert.equal(receipt.buildId, undefined);
+    assert.equal(receipt.operationKey, undefined);
+    assert.equal(JSON.stringify(spool.receiptReport()).includes('private-input'), false);
   } finally { spool.close(); rmSync(dataDir, { recursive: true, force: true }); }
 });
 

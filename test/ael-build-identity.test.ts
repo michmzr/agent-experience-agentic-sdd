@@ -7,6 +7,7 @@ import { ingestPassiveHook } from "../src/capture/hook-ingress.js";
 import { tmpdir } from "node:os";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createBuildManifest, validateManifest, verifyBuild } from "../src/installation/build-manifest.js";
+import { CaptureSpool } from "../src/capture/spool.js";
 import { runCli } from "../src/cli.js";
 import { installHooks, managedEventSupported } from "../src/cli/hook-installation.js";
 import { initializeGitRepository } from "./helpers/git-repository.js";
@@ -162,6 +163,58 @@ test("ABI-A5 admission carries actual build provenance and refuses newer writer 
     assert.equal("code" in result ? result.code : undefined, "INCOMPATIBLE_WRITER");
     assert.deepEqual(readFileSync(join(root, "capture-spool.sqlite")), before);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("ABI-A5 two installed builds retain per-operation capture and retry attribution", () => {
+  const root = fixture(); const installedA = fixture(); const installedB = fixture();
+  const databasePath = join(root, "experience.sqlite");
+  const captureScript = `import {pathToFileURL} from 'node:url'; const {ingestPassiveHook} = await import(pathToFileURL(process.argv[1]).href); const result = ingestPassiveHook({source:'codex',input:process.argv[4],databasePath:process.argv[2],workingDirectory:process.argv[3],now:()=> '2026-09-29T10:00:00.000Z',scheduleDrain:()=>{}}); console.log(JSON.stringify(result));`;
+  const retryScript = `import {pathToFileURL} from 'node:url'; const {CaptureSpool} = await import(pathToFileURL(process.argv[1]).href); const spool = new CaptureSpool(process.argv[2]); spool.claim('2026-09-29T10:00:00.000Z',2); spool.retry(process.argv[3],'2026-09-29T10:00:01.000Z'); spool.close();`;
+  try {
+    for (const installed of [installedA, installedB]) {
+      cpSync(join(process.cwd(), "dist/src"), join(installed, "dist/src"), { recursive: true });
+      cpSync(join(process.cwd(), "skills"), join(installed, "skills"), { recursive: true });
+      cpSync(join(process.cwd(), "package.json"), join(installed, "package.json"));
+    }
+    writeFileSync(join(installedB, "skills/ael/SKILL.md"), readFileSync(join(installedB, "skills/ael/SKILL.md"), "utf8") + "\nsecond build\n");
+    const manifestA = createBuildManifest(installedA); const manifestB = createBuildManifest(installedB);
+    assert.equal(manifestA.packageVersion, manifestB.packageVersion);
+    assert.notEqual(manifestA.buildId, manifestB.buildId);
+    writeFileSync(join(installedA, "build-manifest.json"), JSON.stringify(manifestA));
+    writeFileSync(join(installedB, "build-manifest.json"), JSON.stringify(manifestB));
+    const inputs = ["first", "second"].map(session => JSON.stringify({ session_id: session, hook_event_name: "SessionStart", source: "startup" }));
+    for (const [installed, input] of [[installedA, inputs[0]!], [installedB, inputs[1]!]] as const) {
+      const result = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", captureScript, join(installed, "dist/src/capture/hook-ingress.js"), databasePath, root, input], { encoding: "utf8" }));
+      assert.equal(result.status, "captured");
+    }
+    const initial = new CaptureSpool(join(root, "capture-spool.sqlite"));
+    const initialReceipts = initial.receiptReport().receipts;
+    const [first, second] = initialReceipts;
+    assert.equal(initial.status().admitted, 2);
+    assert.equal(initialReceipts.length, 2);
+    assert.deepEqual(initialReceipts.map(receipt => receipt.buildId), [manifestA.buildId, manifestB.buildId]);
+    assert.notEqual(first!.operationKey, second!.operationKey);
+    const database = new DatabaseSync(join(root, "capture-spool.sqlite"));
+    const firstDelivery = (database.prepare("SELECT delivery_id, payload FROM records").all() as Array<{ delivery_id: string; payload: string }>).find(row => JSON.parse(row.payload).session?.id === "first")?.delivery_id;
+    database.close();
+    assert.ok(firstDelivery);
+    initial.close();
+    execFileSync(process.execPath, ["--input-type=module", "-e", retryScript, join(installedB, "dist/src/capture/spool.js"), join(root, "capture-spool.sqlite"), firstDelivery]);
+    const reopened = new CaptureSpool(join(root, "capture-spool.sqlite"));
+    try {
+      const receipts = reopened.receiptReport().receipts;
+      assert.equal(reopened.status().admitted, 2);
+      const retry = receipts.find(receipt => receipt.disposition === "delivery-retry")!;
+      assert.equal(retry.operationKey, first!.operationKey);
+      assert.equal(retry.buildRole, "writer");
+      assert.equal(retry.buildId, manifestB.buildId);
+      const expected = new Map([[first!.operationKey, manifestA.buildId], [second!.operationKey, manifestB.buildId]]);
+      assert.equal(receipts.filter(receipt => receipt.disposition === "accepted").every(receipt => expected.get(receipt.operationKey) === receipt.buildId), true);
+      const swapped = [{ ...first!, buildId: manifestB.buildId }, { ...second!, buildId: manifestA.buildId }];
+      assert.equal(swapped.every(receipt => expected.get(receipt.operationKey) === receipt.buildId), false);
+      assert.equal(JSON.stringify(receipts).includes(inputs[0]!), false);
+    } finally { reopened.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(installedA, { recursive: true, force: true }); rmSync(installedB, { recursive: true, force: true }); }
 });
 
 test("ABI-A3 interrupted publication recovers the previous generation before replay", () => {
