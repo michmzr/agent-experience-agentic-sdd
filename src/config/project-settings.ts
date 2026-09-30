@@ -50,7 +50,8 @@ function parseInstructionLocations(value: unknown): readonly string[] | undefine
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.length < 1 || value.length > 16) throw new TypeError('Instruction locations are invalid.');
   const locations = value.map((location) => {
-    if (typeof location !== 'string' || !/^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/.test(location)) throw new TypeError('Instruction locations are invalid.');
+    if (typeof location !== 'string' || !/^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/.test(location)
+      || location.split('/').some(segment => segment === '.' || segment === '..')) throw new TypeError('Instruction locations are invalid.');
     return location;
   });
   if (new Set(locations).size !== locations.length) throw new TypeError('Instruction locations are invalid.');

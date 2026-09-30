@@ -14,6 +14,8 @@ import { CaptureDiagnosticStore } from '../storage/capture-diagnostic-store.js';
 import { resolveRepository } from '../repository/local-repository.js';
 import { dirname, join } from 'node:path';
 import { CaptureSpool, CaptureSpoolCapacityError } from './spool.js';
+import { readProjectInstructionContext, validateProjectInstructionContext } from '../learning/project-conventions.js';
+import { loadProjectSettings } from '../config/project-settings.js';
 
 
 export interface HookIngressOptions {
@@ -67,7 +69,15 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
       return { status: 'ignored' };
     }
 
-    const admittedRecord = build === undefined ? record : { ...record, buildProvenance: { buildId: build.buildId, writer: build.capabilities.writer, captureSchema: build.capabilities.captureSchema, resultSchema: build.capabilities.resultSchema } };
+    let instructionContext;
+    if (record.kind === 'technical' && record.event.phase === 'pre-action' && repository !== undefined) {
+      try {
+        const observed = readProjectInstructionContext(repository.root, loadProjectSettings(repository.root));
+        if (Buffer.byteLength(JSON.stringify(observed), 'utf8') <= 16 * 1024) instructionContext = validateProjectInstructionContext(observed);
+      } catch { /* Context acquisition cannot prevent passive capture. */ }
+    }
+    const contextualRecord = instructionContext === undefined ? record : { ...record, instructionContext };
+    const admittedRecord = build === undefined ? contextualRecord : { ...contextualRecord, buildProvenance: { buildId: build.buildId, writer: build.capabilities.writer, captureSchema: build.capabilities.captureSchema, resultSchema: build.capabilities.resultSchema } };
     const result = spool.admitWithReceipt(admittedRecord, {
       source: options.source,
       receivedAt: options.now(),

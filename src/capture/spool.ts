@@ -214,7 +214,7 @@ export class CaptureSpool {
 
   #admit(record: PassiveCaptureRecord, admittedAt: string, transaction = true): SpoolAdmission {
     const payload = JSON.stringify(record);
-    const { buildProvenance: _buildProvenance, ...operation } = record as PassiveCaptureRecord & { readonly buildProvenance?: unknown };
+    const { buildProvenance: _buildProvenance, instructionContext: _instructionContext, ...operation } = record as PassiveCaptureRecord & { readonly buildProvenance?: unknown; readonly instructionContext?: unknown };
     const operationPayload = JSON.stringify(operation);
     const deliveryId = createHash('sha256').update(`ael:capture-spool:v${SPOOL_VERSION}\0`).update(operationPayload).digest('hex');
     const payloadBytes = Buffer.byteLength(payload, 'utf8');

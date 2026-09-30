@@ -16,7 +16,7 @@ import {
   type OperationalFinding
 } from './contracts.js';
 import { createTypedEpisode, createTypedFinding, type DerivedOperationalEpisode, type DerivedOperationalFinding } from './detectors.js';
-import { CONVENTION_PARSER_VERSION, type InstructionContext, type ProjectToolConvention, type ScopedToolConvention } from './project-conventions.js';
+import { CONVENTION_PARSER_VERSION, type InstructionContext, type ProjectInstructionContext, type ProjectToolConvention, type ScopedToolConvention } from './project-conventions.js';
 
 export const DETECTOR_SET_VERSION = `m9-typed-evidence@1/asc-parser@${CONVENTION_PARSER_VERSION}`;
 export const PREVIOUS_DETECTOR_SET_VERSION = 'm9-typed-evidence@1';
@@ -118,6 +118,12 @@ const contextSchema = `
   CREATE TABLE IF NOT EXISTS operational_context_secret (
     id INTEGER PRIMARY KEY CHECK (id = 1), secret BLOB NOT NULL
   ) STRICT;
+  CREATE TABLE IF NOT EXISTS capture_instruction_contexts (
+    source TEXT NOT NULL, source_event_id TEXT NOT NULL, session_id TEXT NOT NULL, repository_id TEXT,
+    payload_json TEXT, PRIMARY KEY(source, source_event_id)
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS capture_instruction_contexts_session
+    ON capture_instruction_contexts(session_id, source, source_event_id);
 `;
 
 export interface AnalysisAdmission { readonly repositoryId: string; readonly sessionId: string; readonly inputHighWater: number; readonly detectorSetVersion?: string; }
@@ -195,6 +201,7 @@ export interface OperationalLearningReport {
   readonly findings: readonly DerivedOperationalFinding[]; readonly episodes: readonly DerivedOperationalEpisode[];
   readonly episodeEvidence: readonly EpisodeEvidence[]; readonly coverage: readonly AnalysisCoverage[];
   readonly historicalInstructionGaps: number;
+  readonly operationInstructionRevisions: readonly { readonly operationKey: string; readonly context?: ProjectInstructionContext }[];
   readonly cost: { readonly completedRuns: number; readonly total: number };
 }
 export interface OperationalAnalysisQuality {
@@ -522,9 +529,14 @@ export class OperationalLearningRepository {
       WHERE j.repository_id = ? AND j.state = 'completed' AND NOT EXISTS
       (SELECT 1 FROM operational_context_snapshots s WHERE s.repository_id = j.repository_id AND s.session_id = j.session_id)`)
       .get(repositoryId) as { count: number };
+    const operationInstructionRevisions = (this.database.prepare(`SELECT c.source, c.source_event_id, c.payload_json
+      FROM capture_instruction_contexts c WHERE c.repository_id = ? ORDER BY c.session_id, c.source, c.source_event_id`).all(repositoryId) as Array<{
+        source: string; source_event_id: string; payload_json: string | null;
+      }>).map((row) => Object.freeze({ operationKey: `${row.source}:${row.source_event_id}`,
+        ...(row.payload_json === null ? {} : { context: JSON.parse(row.payload_json) as ProjectInstructionContext }) }));
     return publicReport(Object.freeze({ episodes: Object.freeze(episodes), findings: Object.freeze(findings),
       candidates: Object.freeze(candidates), episodeEvidence: Object.freeze(episodeEvidence), coverage: Object.freeze(coverage),
-      historicalInstructionGaps: gaps.count,
+      historicalInstructionGaps: gaps.count, operationInstructionRevisions: Object.freeze(operationInstructionRevisions),
       cost: Object.freeze({ completedRuns: cost.completed_runs, total: cost.total }) }), this.contextSecret());
   }
 
@@ -1273,7 +1285,9 @@ function publicReport(report: OperationalLearningReport, secret: Uint8Array): Op
         evidenceEventIds: Object.freeze(value.evidenceEventIds.map(evidenceId)) })
     : value);
   return Object.freeze({ ...report, episodes: Object.freeze(episodes), findings: Object.freeze(findings),
-    episodeEvidence: Object.freeze(episodeEvidence) });
+    episodeEvidence: Object.freeze(episodeEvidence), operationInstructionRevisions: Object.freeze(report.operationInstructionRevisions.map((value) => Object.freeze({
+      ...value, operationKey: recordId(value.operationKey)
+    }))) });
 }
 
 function publicTypedEpisode(value: TypedEpisode, evidenceId: (value: string) => string,

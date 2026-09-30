@@ -14,6 +14,54 @@ export interface ScopedToolConvention extends ProjectToolConvention { readonly s
 export interface ProjectInstructionContext { readonly instructions: readonly InstructionContext[]; readonly conventions: readonly ProjectToolConvention[]; readonly scopedConventions: readonly ScopedToolConvention[]; readonly unresolvedScopes: readonly string[]; }
 export const CONVENTION_PARSER_VERSION = 2;
 
+export function validateProjectInstructionContext(value: unknown): ProjectInstructionContext {
+  if (!plainRecord(value, ['conventions', 'instructions', 'scopedConventions', 'unresolvedScopes'])) throw new TypeError('Instruction context shape is invalid.');
+  const context = value as unknown as ProjectInstructionContext;
+  if (!Array.isArray(context.instructions) || context.instructions.length > 16
+    || !Array.isArray(context.conventions) || context.conventions.length > 64
+    || !Array.isArray(context.scopedConventions) || context.scopedConventions.length > 64
+    || !Array.isArray(context.unresolvedScopes) || context.unresolvedScopes.length > 64) throw new TypeError('Instruction context bounds are invalid.');
+  const instructions = new Map<string, InstructionContext>();
+  for (const instruction of context.instructions) {
+    if (!plainRecord(instruction, ['delivered', 'digest', 'evidenceId', 'explicitlyRead', 'found', 'location', 'scope'])
+      || typeof instruction.location !== 'string' || !/^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/.test(instruction.location)
+      || instruction.location.split('/').some(segment => segment === '.' || segment === '..')
+      || instruction.scope !== 'repository' || typeof instruction.found !== 'boolean'
+      || instruction.delivered !== 'unknown' || instruction.explicitlyRead !== 'unknown'
+      || typeof instruction.digest !== 'string' || !/^[a-f0-9]{64}$/.test(instruction.digest)
+      || instruction.evidenceId !== `instruction-context:${instruction.location}` || instructions.has(instruction.location)) {
+      throw new TypeError('Instruction provenance is invalid.');
+    }
+    instructions.set(instruction.location, instruction as InstructionContext);
+  }
+  const checkConvention = (convention: ProjectToolConvention, scoped: boolean): void => {
+    const keys = scoped ? ['digest', 'qualifier', 'replaces', 'scopePath', 'source', 'tool'] : ['digest', 'replaces', 'source', 'tool'];
+    if (!plainRecord(convention, keys) || typeof convention.source !== 'string'
+      || !/^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+:[1-9][0-9]*$/.test(convention.source)
+      || !((convention.tool === 'pnpm' && convention.replaces === 'npm') || (convention.tool === 'uv' && convention.replaces === 'pip'))) {
+      throw new TypeError('Instruction directive is invalid.');
+    }
+    const location = convention.source.slice(0, convention.source.lastIndexOf(':'));
+    if (!instructions.get(location)?.found || instructions.get(location)?.digest !== convention.digest) throw new TypeError('Instruction directive lacks matching provenance.');
+    if (scoped) {
+      const narrowed = convention as ScopedToolConvention;
+      if (!['mobile app', 'backend'].includes(narrowed.qualifier) || typeof narrowed.scopePath !== 'string'
+        || !/^(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+$/.test(narrowed.scopePath)) throw new TypeError('Instruction scope is invalid.');
+    }
+  };
+  for (const convention of context.conventions) checkConvention(convention, false);
+  for (const convention of context.scopedConventions) checkConvention(convention, true);
+  if (context.unresolvedScopes.some(source => typeof source !== 'string' || !/^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+:[1-9][0-9]*$/.test(source))) {
+    throw new TypeError('Unresolved instruction scope is invalid.');
+  }
+  return context;
+}
+
+function plainRecord(value: unknown, keys: readonly string[]): value is Record<string, any> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
+}
+
 export function readProjectInstructionContext(repositoryRoot: string, settings?: Pick<ProjectSettings, 'instructionLocations' | 'instructionScopes'>): ProjectInstructionContext {
   const configured = settings ?? loadProjectSettings(repositoryRoot);
   const locations = configuredInstructionLocations(configured);
@@ -57,6 +105,7 @@ export function readProjectInstructionContext(repositoryRoot: string, settings?:
 }
 
 function safeFileSignature(root: string, location: string): string | undefined {
+  if (location.split('/').some(segment => segment === '.' || segment === '..' || segment.length === 0)) return undefined;
   let current = root;
   try {
     for (const segment of location.split('/')) {

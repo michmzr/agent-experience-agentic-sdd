@@ -3,6 +3,11 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
+import { ingestPassiveHook } from '../src/capture/hook-ingress.js';
+import { drainCaptureSpool } from '../src/capture/spool-drain.js';
+import { CaptureSpool } from '../src/capture/spool.js';
+import { normalizeMappedCapture } from '../src/capture/normalization.js';
 import { loadProjectSettings } from '../src/config/project-settings.js';
 import { readProjectInstructionContext, readScopedToolConventions } from '../src/learning/project-conventions.js';
 import { DETECTOR_SET_VERSION, OperationalLearningRepository } from '../src/learning/repository.js';
@@ -140,6 +145,10 @@ test('ASC-A5 bounds instruction reads and rejects symlinked ancestor paths', () 
   try {
     writeFileSync(join(outside, 'AGENTS.md'), 'Use pnpm (never npm).\n');
     symlinkSync(outside, join(root, '.agents'));
+    mkdirSync(join(root, 'sub'));
+    writeFileSync(join(root, 'AGENTS.md'), 'Use pnpm (never npm).\n');
+    assert.deepEqual(readProjectInstructionContext(join(root, 'sub'), { instructionLocations: ['../AGENTS.md'] }).conventions, []);
+    rmSync(join(root, 'AGENTS.md'));
     let context = readProjectInstructionContext(root);
     assert.equal(context.instructions.find(({ location }) => location === '.agents/AGENTS.md')?.found, false);
     assert.deepEqual(context.conventions, []);
@@ -151,4 +160,71 @@ test('ASC-A5 bounds instruction reads and rejects symlinked ancestor paths', () 
     context = readProjectInstructionContext(root);
     assert.deepEqual(context.conventions.map(({ tool }) => tool), ['uv']);
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
+});
+
+test('ASC-A3 retains distinct instruction revisions for two pre-actions admitted before drain', () => {
+  const root = mkdtempSync(join(tmpdir(), 'asc-operation-'));
+  const project = join(root, 'project'); const databasePath = join(root, 'experience.sqlite');
+  try {
+    mkdirSync(project); initializeGitRepository(project);
+    mkdirSync(join(project, '.ael')); mkdirSync(join(project, 'apps/mobile'), { recursive: true });
+    writeFileSync(join(project, '.ael/settings.json'), JSON.stringify({ version: 1, captureDeliveryDeadlineMs: 2000,
+      instructionScopes: [{ location: 'AGENTS.md', qualifier: 'mobile app', path: 'apps/mobile' }] }));
+    const store = new ExperienceStore(databasePath);
+    try {
+      store.registerRepository({ id: 'repo-1', root: project, observedAt: '2026-09-29T10:00:00.000Z' });
+      store.appendIncremental({ session: { id: 'same-session' as never, source: 'codex', startedAt: '2026-09-29T10:00:00.000Z', repositoryId: 'repo-1' as never } });
+    } finally { store.close(); }
+    const admit = (toolUseId: string, time: string) => ingestPassiveHook({ source: 'codex', databasePath,
+      workingDirectory: project, repositoryId: 'repo-1' as never, now: () => time, scheduleDrain: () => undefined,
+      input: JSON.stringify({ session_id: 'same-session', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: toolUseId,
+        tool_input: { command: 'npm install' } }) });
+    writeFileSync(join(project, 'AGENTS.md'), 'For mobile app, use pnpm (never npm).\n');
+    assert.equal(admit('operation-a', '2026-09-29T10:00:01.000Z').status, 'captured');
+    writeFileSync(join(project, 'AGENTS.md'), 'For mobile app, use uv rather than pip.\n');
+    assert.equal(admit('operation-b', '2026-09-29T10:00:02.000Z').status, 'captured');
+    assert.equal(admit('operation-a', '2026-09-29T10:00:01.000Z').status, 'duplicate');
+    drainCaptureSpool({ databasePath, now: () => '2026-09-29T10:00:03.000Z' });
+    const reopened = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      const rows = reopened.prepare(`SELECT source_event_id, payload_json FROM capture_instruction_contexts ORDER BY source_event_id`)
+        .all() as Array<{ source_event_id: string; payload_json: string }>;
+      assert.equal(rows.length, 2);
+      const contexts = rows.map(({ payload_json }) => JSON.parse(payload_json) as { scopedConventions: Array<{ tool: string; scopePath: string }>; instructions: Array<{ delivered: string; explicitlyRead: string }> });
+      assert.deepEqual(contexts.map(({ scopedConventions }) => scopedConventions.map(({ tool, scopePath }) => ({ tool, scopePath }))), [
+        [{ tool: 'pnpm', scopePath: 'apps/mobile' }], [{ tool: 'uv', scopePath: 'apps/mobile' }]
+      ]);
+      assert.ok(contexts.every(({ instructions }) => instructions.every(({ delivered, explicitlyRead }) => delivered === 'unknown' && explicitlyRead === 'unknown')));
+    } finally { reopened.close(); }
+    const report = new OperationalLearningService(databasePath).report('repo-1');
+    assert.equal(report.operationInstructionRevisions.length, 2);
+    assert.deepEqual(report.operationInstructionRevisions.map(({ context }) => context?.scopedConventions.map(({ tool, scopePath }) => ({ tool, scopePath }))), [
+      [{ tool: 'pnpm', scopePath: 'apps/mobile' }], [{ tool: 'uv', scopePath: 'apps/mobile' }]
+    ]);
+    assert.ok(report.operationInstructionRevisions.every(({ operationKey }) => !operationKey.includes('operation-')));
+    assert.equal(admit('operation-a', '2026-09-29T10:00:01.000Z').status, 'captured');
+    drainCaptureSpool({ databasePath, now: () => '2026-09-29T10:00:04.000Z' });
+    assert.deepEqual(new OperationalLearningService(databasePath).report('repo-1').operationInstructionRevisions, report.operationInstructionRevisions);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('ASC-A3 spool identity stays stable across instruction and build metadata changes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'asc-identity-'));
+  try {
+    writeFileSync(join(root, 'AGENTS.md'), 'Use pnpm (never npm).\n');
+    const firstContext = readProjectInstructionContext(root);
+    const event = normalizeMappedCapture({ source: 'codex', sourceEventId: 'same-operation', sessionId: 'same-session' as never,
+      phase: 'pre-action', occurredAt: '2026-09-29T10:00:01.000Z', tool: 'shell', action: 'run', arguments: ['npm', 'install'], summary: 'Install.' });
+    const spool = new CaptureSpool(join(root, 'capture-spool.sqlite'));
+    try {
+      const first = spool.admit({ kind: 'technical', event, instructionContext: firstContext,
+        buildProvenance: { buildId: 'build-a' } } as never);
+      writeFileSync(join(root, 'AGENTS.md'), 'Use uv rather than pip.\n');
+      const second = spool.admit({ kind: 'technical', event, instructionContext: readProjectInstructionContext(root),
+        buildProvenance: { buildId: 'build-b' } } as never);
+      assert.equal(first.status, 'admitted');
+      assert.equal(second.status, 'duplicate');
+      assert.equal(second.deliveryId, first.deliveryId);
+    } finally { spool.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

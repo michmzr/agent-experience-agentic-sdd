@@ -39,6 +39,7 @@ import { validateNormalizedCaptureEvent } from '../capture/normalization.js';
 import { assertDurableTextSafe } from '../review/sanitizer.js';
 import { openExperienceDatabase, type ExperienceDatabaseOptions } from './database.js';
 import { ensureOverrideAuditUseMigration, ensureOverrideEvidenceMigration, overrideAuditMigration } from './override-store.js';
+import { validateProjectInstructionContext, type ProjectInstructionContext } from '../learning/project-conventions.js';
 
 export type ExperienceStoreInitializationStage = 'open' | 'migration';
 
@@ -454,6 +455,15 @@ const logicalEvidenceMigration = `
   ) STRICT;
 `;
 
+const operationInstructionContextMigration = `
+  CREATE TABLE IF NOT EXISTS capture_instruction_contexts (
+    source TEXT NOT NULL, source_event_id TEXT NOT NULL, session_id TEXT NOT NULL, repository_id TEXT,
+    payload_json TEXT, PRIMARY KEY(source, source_event_id)
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS capture_instruction_contexts_session
+    ON capture_instruction_contexts(session_id, source, source_event_id);
+`;
+
 export class ExperienceStore {
   private readonly database: DatabaseSync;
 
@@ -639,6 +649,28 @@ export class ExperienceStore {
   logicalEvidenceHighWater(id: SessionId): number {
     if (this.logicalEvidenceCoverage(id).unindexed > 0) throw new Error('Logical evidence backfill is incomplete.');
     return this.indexedLogicalEvidenceHighWater(id);
+  }
+
+  preserveOperationInstructionContext(event: NormalizedCaptureEvent, context: ProjectInstructionContext | undefined): void {
+    if (event.phase !== 'pre-action') throw new TypeError('Instruction context requires a pre-action event.');
+    if (context !== undefined) validateProjectInstructionContext(context);
+    const payload = context === undefined ? null : JSON.stringify(context);
+    if (context !== undefined && (Buffer.byteLength(payload!, 'utf8') > 16 * 1024 || !Array.isArray(context.instructions) || context.instructions.length > 16
+      || !Array.isArray(context.conventions) || context.conventions.length > 64
+      || !Array.isArray(context.scopedConventions) || context.scopedConventions.length > 64)) {
+      throw new TypeError('Instruction context is invalid or exceeds its bounds.');
+    }
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const source = this.database.prepare(`SELECT session_id FROM logical_evidence
+        WHERE source = ? AND source_event_id = ?`).get(event.source, event.sourceEventId) as { session_id: string } | undefined;
+      if (source?.session_id !== event.sessionId) throw new TypeError('Instruction context source event is unavailable.');
+      const repositoryId = this.loadSession(event.sessionId)?.repositoryId ?? null;
+      this.database.prepare(`INSERT OR IGNORE INTO capture_instruction_contexts
+        (source, source_event_id, session_id, repository_id, payload_json) VALUES (?, ?, ?, ?, ?)`)
+        .run(event.source, event.sourceEventId, event.sessionId, repositoryId, payload);
+      this.database.exec('COMMIT');
+    } catch (error) { this.database.exec('ROLLBACK'); throw error; }
   }
 
   backfillLogicalEvidence(limit = 1024): { readonly indexed: number; readonly remaining: number } {
@@ -1261,6 +1293,10 @@ export class ExperienceStore {
       if (!applied.has(18)) {
         this.database.exec(logicalEvidenceMigration);
         this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(18, new Date().toISOString());
+      }
+      if (!applied.has(19)) {
+        this.database.exec(operationInstructionContextMigration);
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(19, new Date().toISOString());
       }
       this.database.exec('COMMIT');
     } catch (error) {
