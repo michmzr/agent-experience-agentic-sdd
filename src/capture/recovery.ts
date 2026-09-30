@@ -56,6 +56,7 @@ const candidateQuery = `SELECT candidate.delivery_id, records.version, COALESCE(
   LEFT JOIN records ON records.delivery_id = candidate.delivery_id
   LEFT JOIN quarantined_records quarantine ON quarantine.delivery_id = candidate.delivery_id
   LEFT JOIN capture_recovery_state recovery ON recovery.delivery_id = candidate.delivery_id`;
+const MAX_APPLIED_HISTORY = 10_000;
 
 export function createRecoveryPlan(input: RecoveryPlanInput): RecoveryPlan {
   const limit = input.limit ?? 100;
@@ -139,6 +140,9 @@ export function applyRecoveryPlan(input: RecoveryApplyInput): { applied: number;
         if (update.changes !== 1) throw new Error('Recovery plan is stale.');
         database.prepare('INSERT INTO capture_recovery_applied (plan_hash, delivery_id, applied_at) VALUES (?, ?, ?)')
           .run(input.plan.planHash, selection.deliveryId, input.now);
+        database.prepare(`DELETE FROM capture_recovery_applied WHERE rowid NOT IN
+          (SELECT rowid FROM capture_recovery_applied ORDER BY rowid DESC LIMIT ?)`)
+          .run(MAX_APPLIED_HISTORY);
         return true;
       });
       if (changed) { applied += 1; input.onApplied?.(applied); }

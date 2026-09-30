@@ -121,3 +121,39 @@ test('ARC-A2 does not select a payload that conflicts with existing repository s
     assert.equal(JSON.stringify(plan).includes(id), false);
   } finally { fixture.spool.close(); rmSync(fixture.root, { recursive: true, force: true }); }
 });
+
+test('ARC-A2 bounds apply history and refuses a pruned plan after restart without replay', () => {
+  const fixture = setup();
+  try {
+    const first = fixture.add('retained-first'); hold(fixture.spoolPath, first);
+    const firstPlan = createRecoveryPlan({ spoolPath: fixture.spoolPath, experiencePath: fixture.experiencePath, repositoryId: 'repo-one', now: at });
+    assert.deepEqual(applyRecoveryPlan({ spoolPath: fixture.spoolPath, experiencePath: fixture.experiencePath, plan: firstPlan, now: at }), { applied: 1, alreadyApplied: 0 });
+    const database = new DatabaseSync(fixture.spoolPath);
+    try {
+      database.exec('BEGIN IMMEDIATE');
+      const insert = database.prepare('INSERT INTO capture_recovery_applied (plan_hash, delivery_id, applied_at) VALUES (?, ?, ?)');
+      for (let index = 0; index < 10000; index += 1) {
+        const hex = index.toString(16).padStart(64, '0');
+        insert.run(hex, hex, at);
+      }
+      database.exec('COMMIT');
+    } finally { database.close(); }
+    const second = fixture.add('retained-second'); hold(fixture.spoolPath, second);
+    const secondPlan = createRecoveryPlan({ spoolPath: fixture.spoolPath, experiencePath: fixture.experiencePath, repositoryId: 'repo-one', now: at });
+    assert.deepEqual(secondPlan.selections.map(row => row.deliveryId), [second]);
+    assert.deepEqual(applyRecoveryPlan({ spoolPath: fixture.spoolPath, experiencePath: fixture.experiencePath, plan: secondPlan, now: at }), { applied: 1, alreadyApplied: 0 });
+    fixture.spool.close();
+    const reopened = new DatabaseSync(fixture.spoolPath, { readOnly: true });
+    try {
+      assert.equal((reopened.prepare('SELECT COUNT(*) AS count FROM capture_recovery_applied').get() as { count: number }).count, 10000);
+      assert.equal(reopened.prepare('SELECT 1 FROM capture_recovery_applied WHERE plan_hash = ? AND delivery_id = ?').get(firstPlan.planHash, first), undefined);
+      assert.equal((reopened.prepare('SELECT generation FROM capture_recovery_state WHERE delivery_id = ?').get(first) as { generation: number }).generation, 2);
+    } finally { reopened.close(); }
+    assert.throws(() => applyRecoveryPlan({ spoolPath: fixture.spoolPath, experiencePath: fixture.experiencePath, plan: firstPlan, now: at }), /stale/i);
+    const check = new DatabaseSync(fixture.spoolPath, { readOnly: true });
+    try {
+      assert.equal((check.prepare('SELECT generation FROM capture_recovery_state WHERE delivery_id = ?').get(first) as { generation: number }).generation, 2);
+      assert.equal((check.prepare('SELECT COUNT(*) AS count FROM records WHERE delivery_id = ?').get(first) as { count: number }).count, 1);
+    } finally { check.close(); }
+  } finally { try { fixture.spool.close(); } catch {} rmSync(fixture.root, { recursive: true, force: true }); }
+});
