@@ -392,7 +392,7 @@ test('does not create a project improvement or proposal from a single observatio
   assert.deepEqual(review.proposals, []);
 });
 
-test('withholds a colliding project proposal while retaining the legacy proposal', async () => {
+test('withholds a colliding project proposal while retaining a classified legacy proposal', async () => {
   const root = codexRoot([
     { kind: 'tool', occurredAt: '2026-08-24T10:00:00.000Z', text: 'architecture boundary', exitStatus: 1 },
     { kind: 'tool', occurredAt: '2026-08-24T10:01:00.000Z', text: 'architecture boundary', exitStatus: 1 }
@@ -403,9 +403,9 @@ test('withholds a colliding project proposal while retaining the legacy proposal
       {
         id: 'legacy',
         expensive: false,
-        async review() {
+        async review(artifact) {
           return [{
-            code: 'legacy',
+            code: `failure-learning:${artifact.session.events[0]?.id}`,
             findingId: 'legacy:collision',
             rootCauseId: 'project-improvement:architecture:module-boundary',
             recommendation: 'Keep the established workflow'
