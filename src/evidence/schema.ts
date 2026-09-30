@@ -45,3 +45,36 @@ export const logicalAnnotationEvidenceMigration = `
       WHERE n.session_id = NEW.session_id AND n.ordinal >= NEW.ordinal)
     BEGIN SELECT RAISE(ABORT, 'Logical ordinal requires native-aware writer'); END;
 `;
+
+export const annotationRelationScopeMigration = `
+  ALTER TABLE logical_annotation_evidence ADD COLUMN context_revision TEXT;
+  ALTER TABLE logical_annotation_evidence ADD COLUMN kind TEXT;
+  ALTER TABLE logical_annotation_evidence ADD COLUMN decision_key TEXT;
+  ALTER TABLE logical_annotation_evidence ADD COLUMN scope_key TEXT;
+  UPDATE logical_annotation_evidence SET
+    context_revision = (SELECT i.context_revision FROM imported_typed_evidence i
+      WHERE i.producer_namespace = logical_annotation_evidence.producer_namespace
+        AND i.repository_id = logical_annotation_evidence.repository_id
+        AND i.session_id = logical_annotation_evidence.session_id
+        AND i.evidence_id = logical_annotation_evidence.evidence_id),
+    kind = (SELECT i.kind FROM imported_typed_evidence i
+      WHERE i.producer_namespace = logical_annotation_evidence.producer_namespace
+        AND i.repository_id = logical_annotation_evidence.repository_id
+        AND i.session_id = logical_annotation_evidence.session_id
+        AND i.evidence_id = logical_annotation_evidence.evidence_id),
+    decision_key = (SELECT json_extract(i.payload_json, '$.decisionKey') FROM imported_typed_evidence i
+      WHERE i.producer_namespace = logical_annotation_evidence.producer_namespace
+        AND i.repository_id = logical_annotation_evidence.repository_id
+        AND i.session_id = logical_annotation_evidence.session_id
+        AND i.evidence_id = logical_annotation_evidence.evidence_id),
+    scope_key = (SELECT json_extract(i.payload_json, '$.scopeKey') FROM imported_typed_evidence i
+      WHERE i.producer_namespace = logical_annotation_evidence.producer_namespace
+        AND i.repository_id = logical_annotation_evidence.repository_id
+        AND i.session_id = logical_annotation_evidence.session_id
+        AND i.evidence_id = logical_annotation_evidence.evidence_id);
+  CREATE INDEX logical_annotation_relation_scope ON logical_annotation_evidence
+    (repository_id, session_id, producer_namespace, context_revision, kind, decision_key, scope_key, ordinal);
+  CREATE TRIGGER logical_annotation_scope_writer_fence BEFORE INSERT ON logical_annotation_evidence
+    WHEN NEW.context_revision IS NULL OR NEW.kind IS NULL OR NEW.decision_key IS NULL OR NEW.scope_key IS NULL
+    BEGIN SELECT RAISE(ABORT, 'Annotation relation scope requires current writer'); END;
+`;

@@ -40,7 +40,7 @@ import { assertDurableTextSafe } from '../review/sanitizer.js';
 import { openExperienceDatabase, type ExperienceDatabaseOptions } from './database.js';
 import { ensureOverrideAuditUseMigration, ensureOverrideEvidenceMigration, overrideAuditMigration } from './override-store.js';
 import { validateProjectInstructionContext, type ProjectInstructionContext } from '../learning/project-conventions.js';
-import { importedTypedEvidenceMigration, logicalAnnotationEvidenceMigration } from '../evidence/schema.js';
+import { annotationRelationScopeMigration, importedTypedEvidenceMigration, logicalAnnotationEvidenceMigration } from '../evidence/schema.js';
 
 export type ExperienceStoreInitializationStage = 'open' | 'migration';
 
@@ -634,7 +634,7 @@ export class ExperienceStore {
       events: page.events,
       annotations: page.annotations,
       requestedHighWater: input.through,
-      actualHighWater: page.events.length === 0 ? input.through : page.nextCursor,
+      actualHighWater: page.events.length + page.annotations.length === 0 ? input.through : page.nextCursor,
       availableHighWater
     });
   }
@@ -645,6 +645,51 @@ export class ExperienceStore {
       UNION ALL SELECT MAX(ordinal) AS high_water FROM logical_annotation_evidence WHERE session_id = ?
     )`).get(id, id) as { high_water: number | null };
     return row.high_water ?? 0;
+  }
+
+  loadIndexedAnnotationByIdentity(repositoryId: string, id: SessionId, producerNamespace: string,
+    evidenceId: string, beforeOrdinal: number): IndexedAnnotationEvidence | undefined {
+    if (!Number.isSafeInteger(beforeOrdinal) || beforeOrdinal < 0) throw new TypeError('Annotation lookback cursor is invalid.');
+    const row = this.database.prepare(`SELECT a.producer_namespace, a.evidence_id, a.repository_id,
+      a.session_id, i.payload_json, i.content_digest FROM logical_annotation_evidence a
+      JOIN imported_typed_evidence i ON i.producer_namespace = a.producer_namespace
+        AND i.repository_id = a.repository_id AND i.session_id = a.session_id AND i.evidence_id = a.evidence_id
+      WHERE a.repository_id = ? AND a.session_id = ? AND a.producer_namespace = ?
+        AND a.evidence_id = ? AND a.ordinal <= ? AND i.resolution = 'resolved'`)
+      .get(repositoryId, id, producerNamespace, evidenceId, beforeOrdinal) as {
+        producer_namespace: string; evidence_id: string; repository_id: string; session_id: string;
+        payload_json: string; content_digest: string;
+      } | undefined;
+    if (!row) return undefined;
+    if (createHash('sha256').update(row.payload_json).digest('hex') !== row.content_digest) {
+      throw new Error('Indexed annotation content is not immutable.');
+    }
+    return Object.freeze({ producerNamespace: row.producer_namespace, evidenceId: row.evidence_id,
+      repositoryId: row.repository_id, sessionId: row.session_id, payloadJson: row.payload_json });
+  }
+
+  loadPriorScopedClaim(repositoryId: string, id: SessionId, producerNamespace: string,
+    contextRevision: string, decisionKey: string, scopeKey: string, beforeOrdinal: number): IndexedAnnotationEvidence | undefined {
+    if (!Number.isSafeInteger(beforeOrdinal) || beforeOrdinal < 0) throw new TypeError('Annotation lookback cursor is invalid.');
+    const row = this.database.prepare(`SELECT a.producer_namespace, a.evidence_id, a.repository_id,
+      a.session_id, i.payload_json, i.content_digest FROM logical_annotation_evidence a
+      INDEXED BY logical_annotation_relation_scope
+      JOIN imported_typed_evidence i ON i.producer_namespace = a.producer_namespace
+        AND i.repository_id = a.repository_id AND i.session_id = a.session_id AND i.evidence_id = a.evidence_id
+      WHERE a.repository_id = ? AND a.session_id = ? AND a.producer_namespace = ?
+        AND a.context_revision = ? AND a.kind = 'agent-claim' AND a.decision_key = ? AND a.scope_key = ?
+        AND a.ordinal <= ? AND i.resolution = 'resolved'
+      ORDER BY a.ordinal LIMIT 1`)
+      .get(repositoryId, id, producerNamespace, contextRevision, decisionKey, scopeKey, beforeOrdinal) as {
+        producer_namespace: string; evidence_id: string; repository_id: string; session_id: string;
+        payload_json: string; content_digest: string;
+      } | undefined;
+    if (!row) return undefined;
+    if (createHash('sha256').update(row.payload_json).digest('hex') !== row.content_digest) {
+      throw new Error('Indexed annotation content is not immutable.');
+    }
+    return Object.freeze({ producerNamespace: row.producer_namespace, evidenceId: row.evidence_id,
+      repositoryId: row.repository_id, sessionId: row.session_id, payloadJson: row.payload_json });
   }
 
   logicalEvidenceCoverage(id: SessionId): { readonly indexed: number; readonly unindexed: number; readonly conflicts: number } {
@@ -1335,6 +1380,13 @@ export class ExperienceStore {
         this.database.exec(importedTypedEvidenceMigration);
         this.database.exec(logicalAnnotationEvidenceMigration);
         this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(20, new Date().toISOString());
+      }
+      if (!applied.has(21)) {
+        this.database.exec(annotationRelationScopeMigration);
+        const incomplete = this.database.prepare(`SELECT 1 FROM logical_annotation_evidence WHERE
+          context_revision IS NULL OR kind IS NULL OR decision_key IS NULL OR scope_key IS NULL LIMIT 1`).get();
+        if (incomplete) throw new TypeError('Annotation relation scope migration has unresolved source rows.');
+        this.database.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(21, new Date().toISOString());
       }
       this.database.exec('COMMIT');
     } catch (error) {

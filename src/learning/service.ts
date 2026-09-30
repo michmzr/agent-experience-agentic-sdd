@@ -31,6 +31,7 @@ import {
 const DEFAULT_MAX_EVENTS = 1_024;
 const DEFAULT_DEADLINE_MS = 250;
 const JOB_LEASE_MS = 30_000;
+const RELATION_LOOKBACK_PAGE = 128;
 
 interface OperationalLearningDependencies {
   readonly monotonicNow?: () => number;
@@ -169,10 +170,15 @@ export class OperationalLearningService {
 
         let result;
         let episodeEvidence: readonly EpisodeEvidence[];
+        let relationCursor: number | undefined;
         try {
+          const relationPage = loadRelatedAnnotationPage(store, job.repositoryId, job.sessionId as SessionId,
+            job.inputLowWater, range.annotations, checkpoint.relationCursor ?? 0);
+          relationCursor = relationPage.nextCursor;
           episodeEvidence = mergeEpisodeEvidence(
             [...(checkpoint.typedEvidence ?? []), ...episodeEvidenceFromCapture([...checkpoint.pendingEvents, ...range.events]),
-              ...range.annotations.map(annotationEvidenceFromIndexed)], suppliedEvidence);
+              ...range.annotations.map(annotationEvidenceFromIndexed),
+              ...relationPage.evidence], suppliedEvidence);
           result = this.detect({
             repositoryId: job.repositoryId,
             sessionId: job.sessionId,
@@ -190,11 +196,15 @@ export class OperationalLearningService {
         if (elapsedMs > deadlineMs) {
           return this.fail(repository, job, ownerId, 'timeout', range.actualHighWater, metrics(result.findings.length, elapsedMs));
         }
-        const coverage = Object.freeze([coverageFor(job, range.actualHighWater,
+        const processedHighWater = relationCursor === undefined ? range.actualHighWater : job.inputLowWater;
+        const coverage = Object.freeze([coverageFor(job, processedHighWater,
           range.events.length + range.annotations.length, result.findings.length)]);
         try {
           repository.acknowledge(job.id, {
-            ownerId, attempt: job.attempts, processedHighWater: range.actualHighWater, checkpoint: result.checkpoint,
+            ownerId, attempt: job.attempts, processedHighWater,
+            checkpoint: validateDetectorCheckpoint({ ...result.checkpoint,
+              ...(relationCursor === undefined ? {} : { pendingEvents: checkpoint.pendingEvents }),
+              ...(relationCursor === undefined ? {} : { relationCursor }) }, job.sessionId),
             metrics: { eventsLoaded: range.events.length + range.annotations.length, findings: result.findings.length, elapsedMs },
             result: { ...result, episodeEvidence, coverage }
           });
@@ -276,6 +286,40 @@ function annotationEvidenceFromIndexed(indexed: IndexedAnnotationEvidence): Epis
         indexed.repositoryId, indexed.sessionId, related))] });
 }
 
+function loadRelatedAnnotationPage(store: ExperienceStore, repositoryId: string, sessionId: SessionId,
+  beforeOrdinal: number, current: readonly IndexedAnnotationEvidence[], after: number): {
+    readonly evidence: readonly EpisodeEvidence[]; readonly nextCursor?: number;
+  } {
+  type Lookup = { readonly kind: 'identity'; readonly namespace: string; readonly evidenceId: string } |
+    { readonly kind: 'claim'; readonly namespace: string; readonly contextRevision: string;
+      readonly decisionKey: string; readonly scopeKey: string };
+  const keys = new Map<string, Lookup>();
+  for (const indexed of current) {
+    const { record, contextRevision } = readIndexedAnnotation(indexed);
+    for (const evidenceId of record.relatedEvidenceIds ?? []) {
+      const key = JSON.stringify(['identity', indexed.producerNamespace, evidenceId]);
+      keys.set(key, { kind: 'identity', namespace: indexed.producerNamespace, evidenceId });
+    }
+    if (record.kind === 'agent-claim' && record.state === 'succeeded') {
+      const key = JSON.stringify(['claim', indexed.producerNamespace, contextRevision, record.decisionKey, record.scopeKey]);
+      keys.set(key, { kind: 'claim', namespace: indexed.producerNamespace, contextRevision,
+        decisionKey: record.decisionKey, scopeKey: record.scopeKey });
+    }
+  }
+  const ordered = [...keys.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, value]) => value);
+  if (after > ordered.length) throw new TypeError('Annotation relation continuation cursor is invalid.');
+  const page = ordered.slice(after, after + RELATION_LOOKBACK_PAGE);
+  const evidence = page.flatMap((lookup) => {
+    const indexed = lookup.kind === 'identity'
+      ? store.loadIndexedAnnotationByIdentity(repositoryId, sessionId, lookup.namespace, lookup.evidenceId, beforeOrdinal)
+      : store.loadPriorScopedClaim(repositoryId, sessionId, lookup.namespace, lookup.contextRevision,
+        lookup.decisionKey, lookup.scopeKey, beforeOrdinal);
+    return indexed === undefined ? [] : [annotationEvidenceFromIndexed(indexed)];
+  });
+  const nextCursor = after + page.length < ordered.length ? after + page.length : undefined;
+  return Object.freeze({ evidence: Object.freeze(evidence), ...(nextCursor === undefined ? {} : { nextCursor }) });
+}
+
 function validateSuppliedEpisodeEvidence(supplied: readonly EpisodeEvidence[] | undefined): readonly EpisodeEvidence[] {
   if (supplied === undefined) return Object.freeze([]);
   if (!Array.isArray(supplied) || supplied.length > 128) throw new TypeError('Supplied episode evidence is invalid.');
@@ -289,13 +333,19 @@ function validateSuppliedEpisodeEvidence(supplied: readonly EpisodeEvidence[] | 
 }
 
 function mergeEpisodeEvidence(captured: readonly EpisodeEvidence[], supplied: readonly EpisodeEvidence[]): readonly EpisodeEvidence[] {
-  const merged = [...captured, ...supplied];
-  const ids = new Set<string>();
-  for (const evidence of merged) {
-    if (ids.has(evidence.id)) throw new TypeError('Supplied episode evidence contains duplicate identity.');
-    ids.add(evidence.id);
+  const internal = new Map<string, EpisodeEvidence>();
+  for (const evidence of captured) {
+    const previous = internal.get(evidence.id);
+    if (previous && JSON.stringify(previous) !== JSON.stringify(evidence)) {
+      throw new TypeError('Indexed episode evidence identity conflicts with retained content.');
+    }
+    internal.set(evidence.id, evidence);
   }
-  return Object.freeze(merged);
+  for (const evidence of supplied) {
+    if (internal.has(evidence.id)) throw new TypeError('Supplied episode evidence contains duplicate identity.');
+    internal.set(evidence.id, evidence);
+  }
+  return Object.freeze([...internal.values()]);
 }
 
 function captureEvidenceId(source: string, sourceEventId: string): string {

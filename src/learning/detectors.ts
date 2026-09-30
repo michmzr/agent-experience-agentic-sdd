@@ -79,7 +79,7 @@ export function detectOperationalEpisodes(input: DetectorInput): DetectorResult 
     version: 1,
     pendingEvents: repairs.pendingEvents.slice(-128),
     typedEvidence: [...new Map([...(previous.typedEvidence ?? []), ...(input.episodeEvidence ?? [])]
-      .filter(({ id }) => id.startsWith('annotation-')).map((item) => [item.id, item])).values()]
+      .filter(({ id }) => id.startsWith('annotation-')).map((item) => [item.id, item])).values()].slice(-128)
   }, input.sessionId);
   return Object.freeze({
     episodes: Object.freeze([...convention.episodes, ...repairs.episodes, ...typed.episodes].sort(byId)),

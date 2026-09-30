@@ -241,8 +241,10 @@ export class ImportedTypedEvidenceRepository {
               UNION ALL SELECT ordinal FROM logical_annotation_evidence WHERE session_id = ?
             )`).get(artifact.sessionId, artifact.sessionId) as { ordinal: number };
             this.database.prepare(`INSERT INTO logical_annotation_evidence
-              (session_id, ordinal, producer_namespace, repository_id, evidence_id) VALUES (?, ?, ?, ?, ?)`)
-              .run(artifact.sessionId, next.ordinal, artifact.producer.namespace, artifact.repositoryId, row.record.id);
+              (session_id, ordinal, producer_namespace, repository_id, evidence_id,
+               context_revision, kind, decision_key, scope_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+              .run(artifact.sessionId, next.ordinal, artifact.producer.namespace, artifact.repositoryId, row.record.id,
+                artifact.contextRevision, row.record.kind, row.record.decisionKey, row.record.scopeKey);
             indexed++;
           }
         }

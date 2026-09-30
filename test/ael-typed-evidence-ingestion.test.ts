@@ -9,6 +9,7 @@ import { runCli } from '../src/cli.js';
 import { normalizeMappedCapture } from '../src/capture/normalization.js';
 import type { RepositoryId, SessionId } from '../src/domain/types.js';
 import { localAnnotationEvidenceCapability, sourceEvidenceCapabilities } from '../src/evidence/capabilities.js';
+import { annotationEvidenceId } from '../src/evidence/import.js';
 import { ExperienceStore } from '../src/storage/experience-store.js';
 
 const example = JSON.parse(readFileSync(new URL('../../test/fixtures/ael-typed-evidence-ingestion/cases.json', import.meta.url), 'utf8'));
@@ -175,6 +176,9 @@ test('ATI-A6 migration fences a native writer that allocates ordinals without th
   assert.throws(() => legacyWriter.prepare(`INSERT INTO logical_evidence
     (ordinal, source, source_event_id, session_id, path, event_id) VALUES (?, ?, ?, ?, ?, ?)`)
     .run(native.ordinal + 1, 'codex', 'old-writer-event', 'ati-session', 'legacy', 'old-writer-event'));
+  assert.throws(() => legacyWriter.prepare(`INSERT INTO logical_annotation_evidence
+    (session_id, ordinal, producer_namespace, repository_id, evidence_id) VALUES (?, ?, ?, ?, ?)`)
+    .run('ati-session', native.ordinal + 2, 'controlled-test', 'ati-repo', 'old-annotation-writer'));
   legacyWriter.close();
 });
 
@@ -294,4 +298,174 @@ test('ATI-A3 unresolved decision links stay pending and cross-session links are 
     { ...original, id: 'cycle-two', relatedEvidenceIds: ['cycle-one'] }
   ] });
   assert.equal(cycle.exitCode, 1);
+});
+
+test('ATI-A4 indexed lookback resolves a decision older than 128 annotations after restart', () => {
+  const { dataDir, databasePath, invoke } = fixture();
+  const base = example.records[0];
+  const original = { ...base, id: 'old-decision', kind: 'user-instruction', state: 'observed', reasonClass: 'instruction' };
+  const filler = Array.from({ length: 127 }, (_, index) => ({ ...original,
+    id: `filler-${index}`, decisionKey: `filler-decision-${index}` }));
+  const first = invoke({ ...example, records: [original, ...filler] });
+  assert.equal(first.exitCode, 0, first.stdout);
+  const firstRun = runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']);
+  assert.equal(JSON.parse(firstRun.stdout).status, 'completed', firstRun.stdout);
+  const overflow = invoke({ ...example, records: [{ ...original, id: 'filler-128', decisionKey: 'filler-decision-128' }] });
+  assert.equal(overflow.exitCode, 0, overflow.stdout);
+  const overflowRun = runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']);
+  assert.equal(JSON.parse(overflowRun.stdout).status, 'completed', overflowRun.stdout);
+  const checkpointDb = new DatabaseSync(databasePath, { readOnly: true });
+  const checkpoint = JSON.parse((checkpointDb.prepare('SELECT checkpoint_json FROM operational_analysis_streams WHERE session_id = ?')
+    .get('ati-session') as { checkpoint_json: string }).checkpoint_json) as { typedEvidence: Array<{ id: string }> };
+  checkpointDb.close();
+  assert.equal(checkpoint.typedEvidence.length, 128);
+  assert.equal(checkpoint.typedEvidence.some(({ id }) => id === annotationEvidenceId('controlled-test', 'ati-repo', 'ati-session', 'old-decision')), false);
+  const reopened = new ExperienceStore(databasePath);
+  assert.equal(reopened.logicalEvidenceHighWater('ati-session' as SessionId), 130);
+  reopened.close();
+  const changed = { ...original, id: 'new-decision', reasonClass: 'superseded', relatedEvidenceIds: ['old-decision'] };
+  const second = invoke({ ...example, records: [changed] });
+  assert.equal(second.exitCode, 0, second.stdout);
+  const secondRun = runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']);
+  assert.equal(JSON.parse(secondRun.stdout).status, 'completed', secondRun.stdout);
+  const reported = runCli(['analysis', 'report', '--repository-id', 'ati-repo', '--schema-version', '2', '--data-dir', dataDir, '--json']);
+  assert.equal(reported.exitCode, 0, reported.stdout);
+  assert.equal((JSON.parse(reported.stdout).typed.episodes as Array<{ kind: string }>).some(({ kind }) => kind === 'correction'), true);
+});
+
+test('ATI-A4 relation lookup persists an incomplete page cursor and resumes without retry failure', () => {
+  const { dataDir, databasePath, invoke } = fixture();
+  const base = example.records[0];
+  const original = (index: number) => ({ ...base, id: `old-${String(index).padStart(3, '0')}`,
+    kind: 'user-instruction', state: 'observed', reasonClass: 'instruction' });
+  for (const [start, count] of [[0, 128], [128, 128], [256, 1]]) {
+    const imported = invoke({ ...example, records: Array.from({ length: count }, (_, offset) => original(start + offset)) });
+    assert.equal(imported.exitCode, 0, imported.stdout);
+    const run = runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']);
+    assert.equal(JSON.parse(run.stdout).status, 'completed', run.stdout);
+  }
+  const paged = new ExperienceStore(databasePath);
+  const firstPage = paged.loadCapturedSessionRange('ati-session' as SessionId, {
+    after: 1, through: paged.logicalEvidenceHighWater('ati-session' as SessionId), limit: 128 });
+  assert.equal(firstPage.annotations.length, 128);
+  assert.equal(firstPage.actualHighWater, 129);
+  paged.appendIncremental({ event: normalizeMappedCapture({ source: 'codex', sourceEventId: 'continuation-request',
+    sessionId: 'ati-session', phase: 'pre-action', occurredAt: '2026-09-30T10:00:05.000Z',
+    tool: 'shell', action: 'test', summary: 'Continuation request.' }) });
+  paged.close();
+  const changed = Array.from({ length: 9 }, (_, index) => ({ ...original(300 + index), reasonClass: 'superseded',
+    relatedEvidenceIds: Array.from({ length: index === 8 ? 1 : 16 }, (_, offset) =>
+      `old-${String(index * 16 + offset).padStart(3, '0')}`) }));
+  const imported = invoke({ ...example, records: changed });
+  assert.equal(imported.exitCode, 0, imported.stdout);
+  const first = runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']);
+  assert.equal(JSON.parse(first.stdout).status, 'completed', first.stdout);
+  const interim = new DatabaseSync(databasePath, { readOnly: true });
+  const stream = interim.prepare('SELECT processed_high_water, committed_high_water, checkpoint_json FROM operational_analysis_streams WHERE session_id = ?')
+    .get('ati-session') as { processed_high_water: number; committed_high_water: number; checkpoint_json: string };
+  assert.equal(stream.processed_high_water < stream.committed_high_water, true);
+  assert.equal(JSON.parse(stream.checkpoint_json).relationCursor, 128);
+  assert.equal((JSON.parse(stream.checkpoint_json).pendingEvents as Array<{ sourceEventId: string }>).
+    some(({ sourceEventId }) => sourceEventId === 'continuation-request'), false);
+  assert.equal((interim.prepare("SELECT status FROM operational_analysis_coverage ORDER BY rowid DESC LIMIT 1")
+    .get() as { status: string }).status, 'incomplete');
+  interim.close();
+  const restarted = new ExperienceStore(databasePath);
+  assert.equal(restarted.logicalEvidenceHighWater('ati-session' as SessionId), stream.committed_high_water);
+  restarted.close();
+  const second = runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']);
+  assert.equal(JSON.parse(second.stdout).status, 'completed', second.stdout);
+  const finalDb = new DatabaseSync(databasePath, { readOnly: true });
+  const completed = finalDb.prepare('SELECT processed_high_water, committed_high_water, checkpoint_json FROM operational_analysis_streams WHERE session_id = ?')
+    .get('ati-session') as { processed_high_water: number; committed_high_water: number; checkpoint_json: string };
+  assert.equal(completed.processed_high_water, completed.committed_high_water);
+  assert.equal(JSON.parse(completed.checkpoint_json).relationCursor, undefined);
+  finalDb.close();
+  const reported = runCli(['analysis', 'report', '--repository-id', 'ati-repo', '--schema-version', '2', '--data-dir', dataDir, '--json']);
+  assert.equal(reported.exitCode, 0, reported.stdout);
+  assert.equal((JSON.parse(reported.stdout).typed.episodes as Array<{ kind: string }>).some(({ kind }) => kind === 'correction'), true);
+});
+
+test('ATI-A4 scoped lookback cannot resolve a pending or foreign-session relation', () => {
+  const { databasePath, invoke } = fixture();
+  const base = example.records[0];
+  const pending = { ...base, id: 'pending-change', kind: 'user-instruction', state: 'observed',
+    reasonClass: 'superseded', relatedEvidenceIds: ['absent-original'] };
+  assert.equal(JSON.parse(invoke({ ...example, records: [pending] }).stdout).pending, 1);
+  const store = new ExperienceStore(databasePath);
+  assert.equal(store.loadIndexedAnnotationByIdentity('ati-repo', 'ati-session' as SessionId,
+    'controlled-test', 'pending-change', 100), undefined);
+  store.appendIncremental({ session: { id: 'other-session' as SessionId, source: 'codex',
+    startedAt: '2026-09-30T10:00:02.000Z', repositoryId: 'ati-repo' as RepositoryId } });
+  store.appendIncremental({ event: normalizeMappedCapture({ source: 'codex', sourceEventId: 'other-request',
+    sessionId: 'other-session', phase: 'pre-action', occurredAt: '2026-09-30T10:00:03.000Z',
+    tool: 'shell', action: 'test', summary: 'Test.' }) });
+  store.close();
+  const foreign = { ...base, id: 'foreign-original', kind: 'user-instruction', state: 'observed',
+    reasonClass: 'instruction', operation: { source: 'codex', sourceEventId: 'other-request' } };
+  assert.equal(invoke({ ...example, sessionId: 'other-session', records: [foreign] }).exitCode, 0);
+  const scoped = new ExperienceStore(databasePath);
+  assert.equal(scoped.loadIndexedAnnotationByIdentity('ati-repo', 'ati-session' as SessionId,
+    'controlled-test', 'foreign-original', 100), undefined);
+  assert.equal(scoped.loadIndexedAnnotationByIdentity('other-repo', 'other-session' as SessionId,
+    'controlled-test', 'foreign-original', 100), undefined);
+  assert.notEqual(scoped.loadIndexedAnnotationByIdentity('ati-repo', 'other-session' as SessionId,
+    'controlled-test', 'foreign-original', 100), undefined);
+  scoped.close();
+});
+
+test('ATI-A4 repeated acceptance finds a scoped claim older than the checkpoint', () => {
+  const { dataDir, databasePath, invoke } = fixture();
+  const base = example.records[0];
+  const claim = { ...base, id: 'first-claim', origin: 'agent-claimed', kind: 'agent-claim',
+    state: 'succeeded', reasonClass: 'verification' };
+  assert.equal(invoke({ ...example, records: [claim] }).exitCode, 0);
+  assert.equal(JSON.parse(runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']).stdout).status, 'completed');
+  const filler = (index: number) => ({ ...base, id: `claim-filler-${index}`, kind: 'user-instruction',
+    state: 'observed', reasonClass: 'instruction', decisionKey: `other-${index}` });
+  for (const [start, count] of [[0, 128], [128, 1]]) {
+    const imported = invoke({ ...example, records: Array.from({ length: count }, (_, offset) => filler(start + offset)) });
+    assert.equal(imported.exitCode, 0, imported.stdout);
+    const run = runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']);
+    assert.equal(JSON.parse(run.stdout).status, 'completed', run.stdout);
+  }
+  const db = new DatabaseSync(databasePath, { readOnly: true });
+  const checkpoint = JSON.parse((db.prepare('SELECT checkpoint_json FROM operational_analysis_streams WHERE session_id = ?')
+    .get('ati-session') as { checkpoint_json: string }).checkpoint_json) as { typedEvidence: Array<{ id: string }> };
+  const plan = db.prepare(`EXPLAIN QUERY PLAN SELECT ordinal FROM logical_annotation_evidence
+    WHERE repository_id = ? AND session_id = ? AND producer_namespace = ? AND context_revision = ?
+      AND kind = 'agent-claim' AND decision_key = ? AND scope_key = ? AND ordinal <= ?
+    ORDER BY ordinal LIMIT 1`).all('ati-repo', 'ati-session', 'controlled-test', 'rev-1', 'decision-1', 'task-1', 1000) as Array<{ detail: string }>;
+  assert.equal(plan.some(({ detail }) => detail.includes('logical_annotation_relation_scope')), true, JSON.stringify(plan));
+  db.close();
+  assert.equal(checkpoint.typedEvidence.some(({ id }) => id === annotationEvidenceId('controlled-test', 'ati-repo', 'ati-session', 'first-claim')), false);
+  assert.equal(invoke({ ...example, records: [{ ...claim, id: 'second-claim' }] }).exitCode, 0);
+  const run = runCli(['analysis', 'run', '--repository-id', 'ati-repo', '--data-dir', dataDir, '--json']);
+  assert.equal(JSON.parse(run.stdout).status, 'completed', run.stdout);
+  const reported = runCli(['analysis', 'report', '--repository-id', 'ati-repo', '--schema-version', '2', '--data-dir', dataDir, '--json']);
+  assert.equal(reported.exitCode, 0, reported.stdout);
+  assert.equal((JSON.parse(reported.stdout).typed.episodes as Array<{ kind: string }>).some(({ kind }) => kind === 'repeated-acceptance'), true);
+});
+
+test('ATI-A4 migration 21 backfills indexed decision scope for retained version 20 annotations', () => {
+  const { databasePath, invoke } = fixture();
+  const claim = { ...example.records[0], id: 'upgrade-claim', origin: 'agent-claimed',
+    kind: 'agent-claim', state: 'succeeded' };
+  assert.equal(invoke({ ...example, records: [claim] }).exitCode, 0);
+  const old = new DatabaseSync(databasePath);
+  old.exec('DROP TRIGGER logical_annotation_scope_writer_fence');
+  old.exec('DROP INDEX logical_annotation_relation_scope');
+  for (const column of ['context_revision', 'kind', 'decision_key', 'scope_key']) {
+    old.exec(`ALTER TABLE logical_annotation_evidence DROP COLUMN ${column}`);
+  }
+  old.prepare('DELETE FROM schema_migrations WHERE version = ?').run(21);
+  old.close();
+  const reopened = new ExperienceStore(databasePath);
+  const found = reopened.loadPriorScopedClaim('ati-repo', 'ati-session' as SessionId, 'controlled-test',
+    'rev-1', 'decision-1', 'task-1', 100);
+  assert.equal(found?.evidenceId, 'upgrade-claim');
+  reopened.close();
+  const db = new DatabaseSync(databasePath, { readOnly: true });
+  assert.equal((db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number }).version, 21);
+  db.close();
 });
