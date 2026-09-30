@@ -2,7 +2,7 @@
 
 ## Status
 
-ABI implementation was authorized by the user on 2026-09-29. The user accepted its verified core on 2026-09-29 before real-host qualification; full ABI-A5 receipt persistence is pending ARC. The other seven specifications and their plans remain proposed. No milestone completion or live rollout is recorded here.
+ABI implementation was authorized by the user on 2026-09-29. The user accepted its verified core on 2026-09-29 before real-host qualification; full ABI-A5 receipt persistence is pending ARC. On 2026-09-30 the user authorized implementation of all eight AEL specifications and requested subagents. Work proceeds in isolated worktrees with explicit file ownership. No additional acceptance or live rollout is recorded here.
 
 On 2026-09-29, the user accepted the controlled process-interruption test as sufficient evidence for ABI-A3 lock recovery. This decision does not approve rollout or complete the remaining ABI acceptance work.
 
@@ -10,16 +10,16 @@ The intended outcome is an attributable, complete and reviewable path from retai
 
 ## Delivery units
 
-| ID | Priority | Scope | Specification | Proposed plan | Approval / execution |
+| ID | Priority | Scope | Specification | Plan | Approval / execution |
 |---|---|---|---|---|---|
 | ABI | P0 | Build identity and installation alignment | [Spec](../superpowers/specs/2026-09-29-ael-build-identity-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-build-identity.md) | ABI core accepted by user on 2026-09-29; ARC receipt persistence and live-host qualification pending |
-| AEC | P0 | Result facts and resumed evidence continuity | [Spec](../superpowers/specs/2026-09-29-ael-evidence-continuity-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-evidence-continuity.md) | Not recorded / not started |
-| ARC | P0 | Bounded recovery and scoped coverage | [Spec](../superpowers/specs/2026-09-29-ael-recovery-coverage-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-recovery-coverage.md) | Not recorded / not started |
-| ASC | P1 | Explicit conventions and subproject scope | [Spec](../superpowers/specs/2026-09-29-ael-scoped-conventions-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-scoped-conventions.md) | Not recorded / not started |
-| ATI | P1 | Typed evidence from a public producer | [Spec](../superpowers/specs/2026-09-29-ael-typed-evidence-ingestion-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-typed-evidence-ingestion.md) | Not recorded / not started |
-| ACL | P1 | Candidate review, lifecycle and retrieval | [Spec](../superpowers/specs/2026-09-29-ael-candidate-lifecycle-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-candidate-lifecycle.md) | Not recorded / not started |
-| AAP | P1 | Default-off local advisory pilot | [Spec](../superpowers/specs/2026-09-29-ael-advisory-pilot-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-advisory-pilot.md) | Not recorded / not started |
-| AVB | P0 baseline, P1 comparison | End-to-end value benchmark | [Spec](../superpowers/specs/2026-09-29-ael-value-benchmark-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-value-benchmark.md) | Not recorded / not started |
+| AEC | P0 | Result facts and resumed evidence continuity | [Spec](../superpowers/specs/2026-09-29-ael-evidence-continuity-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-evidence-continuity.md) | Authorized 2026-09-30; implementation in progress |
+| ARC | P0 | Bounded recovery and scoped coverage | [Spec](../superpowers/specs/2026-09-29-ael-recovery-coverage-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-recovery-coverage.md) | Authorized 2026-09-30; receipt storage in progress; remaining work follows AEC |
+| ASC | P1 | Explicit conventions and subproject scope | [Spec](../superpowers/specs/2026-09-29-ael-scoped-conventions-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-scoped-conventions.md) | Authorized 2026-09-30; queued after AEC |
+| ATI | P1 | Typed evidence from a public producer | [Spec](../superpowers/specs/2026-09-29-ael-typed-evidence-ingestion-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-typed-evidence-ingestion.md) | Authorized 2026-09-30; queued after AEC and ARC |
+| ACL | P1 | Candidate review, lifecycle and retrieval | [Spec](../superpowers/specs/2026-09-29-ael-candidate-lifecycle-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-candidate-lifecycle.md) | Authorized 2026-09-30; queued after ASC and ATI |
+| AAP | P1 | Default-off local advisory pilot | [Spec](../superpowers/specs/2026-09-29-ael-advisory-pilot-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-advisory-pilot.md) | Authorized 2026-09-30 under ADR 002; queued after AVB B1 |
+| AVB | P0 baseline, P1 comparison | End-to-end value benchmark | [Spec](../superpowers/specs/2026-09-29-ael-value-benchmark-design.md) | [Plan](../superpowers/plans/2026-09-29-ael-value-benchmark.md) | Authorized 2026-09-30; B0 baseline in progress |
 
 Each specification contains problem, evidence, goals, exclusions, observable behavior, architecture, lifecycle, failure/privacy rules, rollout and numbered acceptance criteria. Each plan names source/test files, TDD steps, regression commands and rollback evidence. The [traceability manifest](ael-value-delivery-traceability.json) maps 46 requirements to 46 tasks and planned tests. A planned test path is not a claim that the test exists or passes.
 
@@ -45,28 +45,28 @@ After AEC, ASC is independent of ARC in product terms, but shared file ownership
 
 One implementer owns shared edits to `src/cli.ts`, `src/storage/experience-store.ts`, `src/learning/service.ts`, `src/learning/repository.ts` and retrieval at any time. If parallel work is explicitly authorized, use separate worktrees, assign files and integration ownership before starting, and serialize shared-file merges.
 
-## Scope decisions for review
+## Implementation scope decisions
 
-The proposed first producer for typed task evidence is a bounded, explicit local annotation import. It proves the production path without claiming that native hooks supply verification they do not expose. User-declared and agent-declared evidence retain their origins. Native mappings require actual qualified structured source examples.
+The first producer for typed task evidence is a bounded, explicit local annotation import. It proves the production path without claiming that native hooks supply verification they do not expose. User-declared and agent-declared evidence retain their origins. Native mappings require actual qualified structured source examples.
 
 The first advisory channel is agent-invoked CLI retrieval in a controlled Codex scenario. It is off by default and separate from enforcement. Actionable entries require verified lifecycle, resolved scope and fresh context. The pilot covers an explicit tooling convention and a fact newly acquired in session A and used in session B. The latter prevents measuring only repetition of existing instructions.
 
-The proposed benchmark requires at least five paired repetitions per scenario and condition, a correct task outcome, and at least one fewer redundant operation in the median advisory run than the matched disabled baseline. These are proposed thresholds, not measured results or statistical significance claims. Wrong-scope guidance, secret persistence, passive intervention and unapproved promotion each fail the run. Missing cost telemetry prevents a net-cost benefit claim.
+The benchmark requires at least five paired repetitions per scenario and condition, a correct task outcome, and at least one fewer redundant operation in the median advisory run than the matched disabled baseline. These are approved thresholds, not measured results or statistical significance claims. Wrong-scope guidance, secret persistence, passive intervention and unapproved promotion each fail the run. Missing cost telemetry prevents a net-cost benefit claim.
 
-Proposed bounds include four automatic recovery attempts per generation, 100 records per explicit recovery plan, 1024 logical evidence entries per page, 128 typed annotation records / 256 KiB per import, and three advice entries / 4096 UTF-8 bytes / 200 ms lookup budget. Approval must explicitly accept or revise these limits before implementation.
+Approved bounds include four automatic recovery attempts per generation, 100 records per explicit recovery plan, 1024 logical evidence entries per page, 128 typed annotation records / 256 KiB per import, and three advice entries / 4096 UTF-8 bytes / 200 ms lookup budget.
 
 ## Relation to existing milestones
 
 ABI addresses installation differences not represented by package version alone. AEC and ARC close observed gaps in the reliable-observation and worker paths, rather than declaring M4–M6 absent. ASC and ATI extend the supported evidence path. ACL joins existing candidate and knowledge stores without weakening lifecycle rules.
 
-AAP proposes a limited local delivery slice before full cloud/SSO M7, recorded in proposed ADR 002. It does not replace the full M8 scope, change approved runtime authority or complete M9. Existing M7–M9 dependencies remain authoritative until the amendment is approved. AVB begins measurement early while preserving the full cross-agent benchmark as later work.[^milestones]
+AAP implements a limited local delivery slice before full cloud/SSO M7, recorded in ADR 002. It does not replace the full M8 scope, change approved runtime authority or complete M9. Existing M7–M9 dependencies remain authoritative for full milestone acceptance. AVB begins measurement early while preserving the full cross-agent benchmark as later work.[^milestones]
 
 RAG, additional reviewers, broad cloud/SSO integration and new enforcement are outside this package. Admission performance is measured in ASC/AVB; no unmeasured speedup is promised.
 
 ## Approval and execution gates
 
-- [ ] Record approval of each selected specification, including scope, limits, migration and evidence policy.
-- [ ] Record the decision on [ADR 002](../decisions/002-staged-local-knowledge-reuse.md) before AAP implementation.
+- [x] Record approval of all eight specifications, including scope, limits, migration and evidence policy, on 2026-09-30.
+- [x] Record the local-slice decision in [ADR 002](../decisions/002-staged-local-knowledge-reuse.md) on 2026-09-30, before AAP implementation.
 - [ ] Review the corresponding proposed plan against the approved contract and current source; expand code-level patches after that review, before execution.
 - [ ] Capture B0 and preserve its immutable build/corpus/environment identities before product changes.
 - [ ] Execute the selected plan in dependency order; keep incomplete host qualifications explicit.
