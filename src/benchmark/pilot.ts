@@ -40,10 +40,17 @@ function assessScenario(id: string, trials: readonly PilotTrial[]) {
     && byCondition[condition].every(trial => pairs.has(trial.pair)));
   const medians = Object.fromEntries(conditions.map(condition => [condition,
     median(byCondition[condition].map(trial => new Set(trial.redundantOperationIds).size))])) as Record<Condition, number | null>;
+  const redundantOperationSavings = [...pairs].sort((a, b) => a - b).map(pair => {
+    const baseline = byCondition.disabled.find(trial => trial.pair === pair)!;
+    const advice = byCondition.advice.find(trial => trial.pair === pair);
+    return advice === undefined ? null : new Set(baseline.redundantOperationIds).size - new Set(advice.redundantOperationIds).size;
+  });
+  const medianSavedRedundantOperations = complete
+    ? median(redundantOperationSavings.filter((value): value is number => value !== null)) : null;
   const status: PilotStatus = trials.some(trial => trial.safetyViolations.length > 0) ? 'safety-fail'
     : trials.some(trial => !trial.taskCorrect) ? 'correctness-fail'
       : !complete ? 'incomplete'
-        : medians.disabled! - medians.advice! >= 1 ? 'behavioral-pass' : 'no-improvement';
+        : medianSavedRedundantOperations! >= 1 ? 'behavioral-pass' : 'no-improvement';
   const paired = [...pairs].map(pair => {
     const baseline = byCondition.disabled.find(trial => trial.pair === pair);
     const advice = byCondition.advice.find(trial => trial.pair === pair);
@@ -61,8 +68,13 @@ function assessScenario(id: string, trials: readonly PilotTrial[]) {
   return Object.freeze({ scenarioId: id, status,
     net,
     medianRedundantOperations: Object.freeze(medians),
+    medianSavedRedundantOperations,
     redundantOperations: Object.freeze(trials.map(trial => Object.freeze({ condition: trial.condition, pair: trial.pair,
       operationIds: Object.freeze([...new Set(trial.redundantOperationIds)]) }))),
+    measurements: Object.freeze([...trials].sort((a, b) => a.pair - b.pair
+      || conditions.indexOf(a.condition) - conditions.indexOf(b.condition)).map(trial => Object.freeze({
+      condition: trial.condition, pair: trial.pair, wallMilliseconds: trial.wallMilliseconds,
+      aelOverheadMilliseconds: trial.aelOverheadMilliseconds, tokens: trial.tokens }))),
     wallMilliseconds: Object.freeze(Object.fromEntries(conditions.map(condition => [condition,
       median(byCondition[condition].map(trial => trial.wallMilliseconds).filter((value): value is number => value !== null))]))),
     aelOverheadMilliseconds: Object.freeze(Object.fromEntries(conditions.map(condition => [condition,

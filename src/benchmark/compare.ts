@@ -30,7 +30,8 @@ export function assessBenchmarkSafety(input: SafetyRunObservation) {
   conclusion: 'performance-not-established' as const, violations: Object.freeze(violations) });
 }
 
-function containsPersistedSecret(persistence: SafetyRunObservation['persistence']): boolean {
+/** Bounded scan shared by benchmark safety checks and direct trial storage gates. */
+export function containsPersistedSecret(persistence: SafetyRunObservation['persistence']): boolean {
   if (persistence.databasePath === undefined && persistence.exportPaths.length === 0) {
     throw new TypeError('Benchmark persistence evidence is absent.');
   }

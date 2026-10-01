@@ -251,7 +251,7 @@ function validateObservation(value: EvidenceObservation): void {
   if (value.kind === 'request' && value.relatedEventId !== undefined) throw new TypeError('Request evidence cannot relate to another request.');
   if (value.outcome !== undefined && !['succeeded', 'failed', 'unknown'].includes(value.outcome)) throw new TypeError('Evidence outcome is invalid.');
   if (value.exitStatus !== undefined && (!Number.isSafeInteger(value.exitStatus) || value.kind !== 'result')) throw new TypeError('Evidence exit status is invalid.');
-  if (value.resultProvenance !== undefined && (value.kind !== 'result' || !['hook-envelope', 'async-completion'].includes(value.resultProvenance))) throw new TypeError('Result provenance is invalid.');
+  if (value.resultProvenance !== undefined && (value.kind !== 'result' || !['hook-envelope', 'async-completion', 'cli-json-item'].includes(value.resultProvenance))) throw new TypeError('Result provenance is invalid.');
   if (value.resultUnknownReason !== undefined && (value.kind !== 'result' || !['source-field-absent', 'result-not-delivered', 'awaiting-async-completion', 'correlation-missing', 'unsupported-result-shape', 'privacy-redacted', 'legacy-record'].includes(value.resultUnknownReason))) throw new TypeError('Result unknown reason is invalid.');
   if (value.interpretation !== undefined) {
     if (value.kind !== 'result') throw new TypeError('Result interpretation is invalid.');

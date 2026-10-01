@@ -30,13 +30,14 @@ export function recordLocalAdviceUsage(dataDir: string, workingDirectory: string
     }
   }
   if (input.kind === 'applied' || input.kind === 'outcome-observed') {
+    const progress = usage.qualifiedProgress(input.bundleId);
     const experiencePath = join(dataDir, 'experience.sqlite');
     if (!existsSync(experiencePath)) throw new Error('Operation evidence is unavailable.');
     const database = new DatabaseSync(experiencePath, { readOnly: true, timeout: 125 });
     try {
       if (input.kind === 'applied') verifyApplied(database, bundle.operationSignature,
-        bundle.retrievedAt, usage.firstFactTime(input.bundleId, 'selected'), input);
-      else verifyOutcome(database, experiencePath, usage, bundle, input);
+        bundle.retrievedAt, progress.selectedAt, input);
+      else verifyOutcome(database, experiencePath, progress.appliedRefs, bundle, input);
     } finally { database.close(); }
   }
   usage.record(input);
@@ -62,9 +63,8 @@ function verifyApplied(database: DatabaseSync, expectedSignature: string, retrie
   }
 }
 
-function verifyOutcome(database: DatabaseSync, experiencePath: string, usage: AdvisoryUsageStore,
+function verifyOutcome(database: DatabaseSync, experiencePath: string, applied: readonly string[],
   bundle: StoredAdviceBundle, input: AdviceUsageRequest): void {
-  const applied = usage.facts(input.bundleId).filter(fact => fact.kind === 'applied').map(fact => fact.witnessRef);
   if (applied.length === 0) throw new Error('Outcome requires an applied operation witness.');
   const resolver = new SqliteCandidateEvidenceResolver(experiencePath, input.sessionId);
   let witness;

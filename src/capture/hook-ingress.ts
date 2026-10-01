@@ -6,8 +6,7 @@ import { TechnicalSignatureRejection } from './hook-adapters/technical-signature
 import { type DiagnosticScope, findConfiguredWorkspaceRoot, resolveDiagnosticScope } from './diagnostic-scope.js';
 import type { CursorCaptureDiagnosticCategory } from './hook-diagnostics.js';
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { startCaptureDrain } from './drain-scheduler.js';
 import type { RepositoryId, SessionId } from '../domain/types.js';
 import type { PassiveCaptureRecord } from './passive-service.js';
 import { CaptureDiagnosticStore } from '../storage/capture-diagnostic-store.js';
@@ -88,7 +87,7 @@ export function ingestPassiveHook(options: HookIngressOptions): HookIngressResul
       repositoryId: receiptRepositoryId
     });
     if (result.status === 'admitted') {
-      try { (options.scheduleDrain ?? startDrain)(dirname(options.databasePath)); }
+      try { (options.scheduleDrain ?? startCaptureDrain)(dirname(options.databasePath)); }
       catch { /* Durable admission does not depend on best-effort worker startup. */ }
     }
     return { status: result.status === 'admitted' ? 'captured' : 'duplicate' };
@@ -192,13 +191,4 @@ class HookIngressDiagnosticError extends Error {
 
 function degraded(code: 'INVALID_INPUT' | 'PRIVATE_INPUT' | 'PERSISTENCE_FAILED' | 'INCOMPATIBLE_WRITER'): HookIngressResult {
   return { status: 'degraded', code };
-}
-
-function startDrain(dataDirectory: string): void {
-  try {
-    const entrypoint = join(dirname(fileURLToPath(import.meta.url)), '..', 'cli.js');
-    spawn(process.execPath, [entrypoint, 'capture', 'drain', '--data-dir', dataDirectory], { detached: true, stdio: 'ignore' }).unref();
-  } catch {
-    // Admission is durable even if the best-effort worker launch fails.
-  }
 }

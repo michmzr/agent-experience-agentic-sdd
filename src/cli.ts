@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { compareBaseline, currentBuildIdentity, runBaseline } from './benchmark/runner.js';
+import { stageTrial } from './benchmark/trial-stage.js';
+import { runRealBenchmarkCommand } from './benchmark/real-command.js';
 import { AdvisoryConfigurationStore } from './advice/configuration.js';
 import { retrieveLocalAdvice, type AdviceRequest } from './advice/service.js';
 import { recordLocalAdviceUsage, type AdviceUsageRequest } from './advice/record.js';
@@ -258,6 +260,25 @@ function opaquePublicKey(value: string): string {
 
 export async function runCliAsync(args: string[], options: RunCliAsyncOptions = {}): Promise<CliResult> {
   const positionals = routingPositionals(args);
+  if (positionals[0] === 'benchmark' && positionals[1] === 'real' && positionals[2] === 'run') {
+    try {
+      const parsed = parseArguments(args);
+      if (parsed.positionals.length !== 3) throw new SyntaxError('Unknown benchmark command.');
+      assertNoUnknownOptions(parsed.options, ['plan', 'codex-binary', 'baseline-root', 'candidate-root', 'output', 'json']);
+      const value = await runRealBenchmarkCommand({ planPath: requiredString(parsed.options, 'plan'),
+        codexBinary: requiredString(parsed.options, 'codex-binary'),
+        baselineRoot: requiredString(parsed.options, 'baseline-root'),
+        candidateRoot: requiredString(parsed.options, 'candidate-root'),
+        output: requiredString(parsed.options, 'output') });
+      return success(value, parsed.options.has('json'), parsed.positionals, options.humanOutput);
+    } catch (error) {
+      const syntax = error instanceof SyntaxError;
+      const diagnostic = toDiagnostic(error, syntax ? 'INVALID_SYNTAX' : 'STORAGE_ERROR');
+      return args.includes('--json')
+        ? { exitCode: syntax ? 2 : 1, stdout: `${JSON.stringify({ error: diagnostic })}\n`, stderr: '' }
+        : { exitCode: syntax ? 2 : 1, stdout: '', stderr: `${renderHumanError(diagnostic, nextStep(diagnostic.code, args), options.humanOutput)}\n` };
+    }
+  }
   if (isCaptureHookCommand(positionals)) return runCaptureHookCli(args, options);
   if (positionals[0] === 'hooks' && positionals[1] === 'verify') return runHookReadinessCli(args, options.humanOutput);
   if (isInternalAnalysisWorkerCommand(positionals)) return runInternalAnalysisWorkerCli(args, options);
@@ -862,6 +883,8 @@ function usage(): string {
     '  installation inspect [--repository <path>|--repository-id <id>] [--json]',
     '  benchmark identity [--json]',
     '  benchmark run --manifest <run.json> --output <report.json>',
+    '  benchmark real run --plan <frozen-plan.json> --codex-binary <absolute-path> --baseline-root <absolute-path> --candidate-root <absolute-path> --output <report.json> (v2: preflight only; v3 b2-2/rev1 and b2-3/rev2: scenario rejected before provider)',
+    '  benchmark trial stage --protocol <frozen.json> --slot-index <n> --manifest <run.json> --declaration <sanitized.json> --output <report.json> (incomplete; does not verify host delivery or result)',
     '  benchmark compare --baseline <report.json> --candidate <report.json> --output <comparison.json>',
     '  advice configure --repository-id <id> --enabled true|false --json',
     '  advice status --repository-id <id> --json',
@@ -1012,6 +1035,11 @@ function executeInstallation(parsed: ParsedArguments, options: Pick<RunCliAsyncO
 }
 
 function executeBenchmark(parsed: ParsedArguments): unknown {
+  if (parsed.positionals.length === 3 && parsed.positionals[1] === 'trial' && parsed.positionals[2] === 'stage') {
+    assertNoUnknownOptions(parsed.options, ['protocol', 'slot-index', 'manifest', 'declaration', 'output', 'json']);
+    return stageTrial(requiredString(parsed.options, 'protocol'), requiredString(parsed.options, 'slot-index'),
+      requiredString(parsed.options, 'manifest'), requiredString(parsed.options, 'declaration'), requiredString(parsed.options, 'output'));
+  }
   if (parsed.positionals.length !== 2) throw new SyntaxError('Unknown benchmark command.');
   const command = parsed.positionals[1];
   if (command === 'identity') {

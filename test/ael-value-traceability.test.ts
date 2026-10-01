@@ -70,3 +70,44 @@ test('AVB-A6 maps every requirement to truthful test and run evidence', () => {
     assert.equal(entry.testPath, testPath);
   }
 });
+
+test('AVB-A6 current overlay separates AVB test evidence from acceptance and retains exclusions', () => {
+  const overlay = read('docs/verification/2026-10-01-avb-requirement-evidence.json');
+  const historical = read('docs/verification/2026-09-30-ael-requirement-traceability.json');
+  assert.equal(overlay.schemaVersion, 1);
+  assert.equal(overlay.spec, 'AVB');
+  assert.equal(overlay.historicalManifest, 'docs/verification/2026-09-30-ael-requirement-traceability.json');
+  assert.deepEqual(overlay.requirements.map((entry: { requirement: string }) => entry.requirement),
+    historical.requirements.filter((entry: { spec: string }) => entry.spec === 'AVB')
+      .map((entry: { requirement: string }) => entry.requirement));
+  for (const entry of overlay.requirements) {
+    const historicalEntry = historical.requirements.find((item: { requirement: string }) => item.requirement === entry.requirement);
+    assert.equal(entry.acceptance, historicalEntry.acceptance);
+    assert.ok(['review-pending', 'unsupported'].includes(entry.acceptanceStatus), entry.acceptance);
+    assert.equal(entry.testEvidence.status, 'test-present', entry.acceptance);
+    assert.ok(entry.testEvidence.paths.length > 0, entry.acceptance);
+    for (const path of entry.testEvidence.paths) {
+      assert.ok(existsSync(join(root, path)), `${entry.acceptance}: ${path}`);
+      const source = readFileSync(join(root, path), 'utf8');
+      assert.ok(source.includes(entry.acceptance)
+        || (entry.acceptance === 'AVB-A5' && source.includes('AVB-A4/A5')), entry.acceptance);
+    }
+    assert.ok(entry.runEvidence.artifactPaths.length > 0, entry.acceptance);
+    for (const path of entry.runEvidence.artifactPaths) {
+      assert.ok(existsSync(join(root, path)), `${entry.acceptance}: ${path}`);
+    }
+  }
+  for (const id of ['AVB-A4', 'AVB-A5']) {
+    const entry = overlay.requirements.find((item: { acceptance: string }) => item.acceptance === id);
+    assert.equal(entry.acceptanceStatus, 'unsupported');
+    assert.equal(entry.runEvidence.hostSeries, 'not-observed');
+    assert.equal(entry.runEvidence.measuredBenefit, false);
+  }
+  assert.deepEqual(overlay.exclusions.fullMilestones, ['M7', 'M8', 'M9']);
+  assert.equal(overlay.externalRunScope.qualificationProbe, 'performed-no-hook-qualification');
+  assert.equal(overlay.externalRunScope.benchmarkSeries, 'not-observed');
+  assert.equal(overlay.externalRunScope.qualificationArtifactPath,
+    'docs/verification/2026-10-01-aec-real-host-probe.md');
+  assert.equal(Object.hasOwn(overlay.exclusions, 'paidOrExternalRuns'), false);
+  assert.equal(overlay.exclusions.syntheticAsHostEvidence, 'excluded');
+});

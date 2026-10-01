@@ -26,4 +26,6 @@ The qualification command invokes the installed executable wrapper with isolated
 ael installation qualify --repository /absolute/repository --json
 ```
 
-Hook admission retains a bounded build-provenance envelope and enforces the spool writer minimum without opening the primary database. Full receipt provenance, retention and schema-upgrade synchronization are pending ARC. Historical records do not acquire inferred writer provenance.
+Hook admission retains a bounded build-provenance envelope and enforces the spool writer minimum without opening the primary database. The spool records receipt writer and operation scope, applies bounded retention, and upgrades older receipt columns on open. Historical records do not acquire inferred writer provenance.[^receipt]
+
+[^receipt]: [Capture spool implementation](../../src/capture/spool.ts).

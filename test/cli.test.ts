@@ -45,6 +45,7 @@ test('groups public help and documents context precedence', () => {
   }
   assert.match(result.stdout, /unregister \[--repository-id <id>\]/);
   assert.match(result.stdout, /runtime config explain \[--workspace <path>\]/);
+  assert.match(result.stdout, /benchmark real run .*v3 b2-2\/rev1 and b2-3\/rev2: scenario rejected before provider/);
   assert.match(result.stdout, /^Context: explicit option > nearest \.ael\/workspace\.json > Git root > interactive prompt\.$/m);
   assert.equal(result.stdout.includes('worker-child'), false);
   assert.equal(result.stdout.includes('capture hook'), false);

@@ -209,7 +209,7 @@ function createManifest(files: Readonly<Record<string, Buffer>>): AelSkillManife
     schemaVersion: 1,
     skillVersion: '1.0.0',
     compatibleAelVersion: '0.0.0',
-    documentationSnapshotDate: '2026-09-03',
+    documentationSnapshotDate: '2026-10-01',
     files: Object.fromEntries(artifactFiles.map((path) => [path, sha256(files[path])]))
   };
 }

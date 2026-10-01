@@ -1,4 +1,6 @@
-import { readFileSync, statSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
+import { qualifiedCodexCli } from '../host/codex-cli-launcher.js';
+import { crossSessionFixtureDigest, crossSessionFixtureDigestV2 } from './cross-session-scenario.js';
 import { digest, assertComparable, type RunManifest } from './manifest.js';
 import { assessPairedPilot, type PilotTrial } from './pilot.js';
 
@@ -10,26 +12,89 @@ export interface PairedProtocol {
   readonly schemaVersion: 1; readonly corpusVersion: string; readonly baselineBuildId: string; readonly candidateBuildId: string;
   readonly sourceVersions: { readonly runnerCorpus: string; readonly aap: string };
   readonly environment: { readonly nodeMajor: number; readonly platform: string; readonly arch: string };
-  readonly seed: number; readonly pairs: 5; readonly scenarios: readonly { readonly id: string; readonly revision: 1 }[];
+  readonly seed: number; readonly pairs: 5; readonly scenarios: readonly { readonly id: string; readonly revision: 1 | 2 }[];
   readonly budgets: { readonly wallMilliseconds: number; readonly aelOverheadMilliseconds: number; readonly tokens: number | null };
   readonly order: readonly PairedSlot[]; readonly protocolDigest: string;
 }
 
 type PairedInput = Omit<PairedProtocol, 'schemaVersion' | 'pairs' | 'order' | 'protocolDigest'>;
 
+export interface RealPairedProtocol extends Omit<PairedProtocol, 'schemaVersion'> {
+  readonly schemaVersion: 2;
+  readonly agent: { readonly model: string; readonly cliVersion: string; readonly binarySha256: string;
+    readonly sandbox: string; readonly approval: string };
+  readonly fixtureDigest: string;
+  readonly seedStoreDigest: string;
+}
+
+export interface CrossSessionRealProtocol extends Omit<PairedProtocol, 'schemaVersion'> {
+  readonly schemaVersion: 3;
+  readonly agent: RealPairedProtocol['agent'];
+  readonly fixtureDigest: string;
+  readonly seedStoreDigest: string;
+}
+
+/** New corpus revision. Every slot runs two independent B sessions against one reset repository. */
+export function createCrossSessionRealProtocol(input: PairedInput
+  & Pick<CrossSessionRealProtocol, 'agent' | 'fixtureDigest' | 'seedStoreDigest'>): CrossSessionRealProtocol {
+  const revision = input.corpusVersion === 'b2-2' ? 1 : input.corpusVersion === 'b2-3' ? 2 : null;
+  if (!exactKeys(input, ['corpusVersion', 'baselineBuildId', 'candidateBuildId', 'sourceVersions', 'environment',
+    'seed', 'scenarios', 'budgets', 'agent', 'fixtureDigest', 'seedStoreDigest'])
+    || !exactKeys(input.agent, ['model', 'cliVersion', 'binarySha256', 'sandbox', 'approval'])
+    || input.agent.model !== qualifiedCodexCli.model
+    || `codex-cli ${input.agent.cliVersion}` !== qualifiedCodexCli.version
+    || input.agent.binarySha256 !== qualifiedCodexCli.sha256
+    || input.agent.sandbox !== 'workspace-write' || input.agent.approval !== 'never'
+    || revision === null || input.sourceVersions.runnerCorpus !== input.corpusVersion
+    || input.sourceVersions.aap !== 'codex-exposure-v1'
+    || input.scenarios.length !== 1 || input.scenarios[0]?.id !== 'cross-session-package-manager'
+    || input.scenarios[0]?.revision !== revision
+    || input.fixtureDigest !== (revision === 1 ? crossSessionFixtureDigest : crossSessionFixtureDigestV2)
+    || !hex(input.seedStoreDigest)) {
+    throw new TypeError('Cross-session real protocol is invalid.');
+  }
+  const { agent, fixtureDigest, seedStoreDigest, ...sharedInput } = input;
+  const legacy = createPairedProtocol(sharedInput);
+  const { schemaVersion: _schemaVersion, protocolDigest: _protocolDigest, ...shared } = legacy;
+  const body = { schemaVersion: 3 as const, ...shared, agent, fixtureDigest, seedStoreDigest };
+  return Object.freeze({ ...body, protocolDigest: digest(JSON.stringify(body)) });
+}
+
+export function createRealPairedProtocol(input: PairedInput & Pick<RealPairedProtocol, 'agent' | 'fixtureDigest' | 'seedStoreDigest'>): RealPairedProtocol {
+  if (!exactKeys(input, ['corpusVersion', 'baselineBuildId', 'candidateBuildId', 'sourceVersions', 'environment',
+    'seed', 'scenarios', 'budgets', 'agent', 'fixtureDigest', 'seedStoreDigest'])
+    || !exactKeys(input.agent, ['model', 'cliVersion', 'binarySha256', 'sandbox', 'approval'])
+    || input.agent.model !== 'gpt-6-sol' || `codex-cli ${input.agent.cliVersion}` !== qualifiedCodexCli.version
+    || input.agent.binarySha256 !== qualifiedCodexCli.sha256
+    || input.agent.sandbox !== 'workspace-write' || input.agent.approval !== 'never'
+    || !hex(input.fixtureDigest) || !hex(input.seedStoreDigest) || input.corpusVersion !== 'b2-1'
+    || input.sourceVersions.runnerCorpus !== 'b2-1'
+    || input.sourceVersions.aap !== 'codex-exposure-v1'
+    || input.scenarios.length !== 1 || input.scenarios[0]?.id !== 'package-manager-fact') {
+    throw new TypeError('Real paired benchmark protocol is invalid.');
+  }
+  const { agent, fixtureDigest, seedStoreDigest, ...legacyInput } = input;
+  const legacy = createPairedProtocol(legacyInput);
+  const { schemaVersion: _schemaVersion, protocolDigest: _protocolDigest, ...shared } = legacy;
+  const body = { schemaVersion: 2 as const, ...shared, agent, fixtureDigest, seedStoreDigest };
+  return Object.freeze({ ...body, protocolDigest: digest(JSON.stringify(body)) });
+}
+
 export function createPairedProtocol(input: PairedInput): PairedProtocol {
   const key = (value: unknown): value is string => typeof value === 'string' && /^[a-z0-9][a-z0-9@._-]{0,79}$/.test(value);
   if (!exactKeys(input, ['corpusVersion', 'baselineBuildId', 'candidateBuildId', 'sourceVersions', 'environment', 'seed', 'scenarios', 'budgets'])
     || !exactKeys(input.sourceVersions, ['runnerCorpus', 'aap']) || !exactKeys(input.environment, ['nodeMajor', 'platform', 'arch'])
     || !exactKeys(input.budgets, ['wallMilliseconds', 'aelOverheadMilliseconds', 'tokens'])
-    || input.corpusVersion !== 'b2-1' || !hex(input.baselineBuildId) || !hex(input.candidateBuildId)
+    || (input.corpusVersion !== 'b2-1' && input.corpusVersion !== 'b2-2' && input.corpusVersion !== 'b2-3')
+    || !hex(input.baselineBuildId) || !hex(input.candidateBuildId)
     || !key(input.sourceVersions?.runnerCorpus) || !key(input.sourceVersions?.aap)
     || !Number.isSafeInteger(input.seed) || input.seed < 0 || input.seed > 0xffffffff
     || input.environment?.nodeMajor !== Number(process.versions.node.split('.')[0])
     || input.environment.platform !== process.platform || input.environment.arch !== process.arch
     || !Array.isArray(input.scenarios) || input.scenarios.length < 1 || input.scenarios.length > 20
     || new Set(input.scenarios.map(scenario => scenario.id)).size !== input.scenarios.length
-    || input.scenarios.some(scenario => !exactKeys(scenario, ['id', 'revision']) || !key(scenario.id) || scenario.revision !== 1)
+    || input.scenarios.some(scenario => !exactKeys(scenario, ['id', 'revision']) || !key(scenario.id)
+      || scenario.revision !== (input.corpusVersion === 'b2-3' ? 2 : 1))
     || !Number.isSafeInteger(input.budgets?.wallMilliseconds) || input.budgets.wallMilliseconds < 1 || input.budgets.wallMilliseconds > 3_600_000
     || !Number.isSafeInteger(input.budgets.aelOverheadMilliseconds) || input.budgets.aelOverheadMilliseconds < 0
     || input.budgets.aelOverheadMilliseconds > input.budgets.wallMilliseconds
@@ -70,6 +135,20 @@ export function assessPairedReports(protocol: PairedProtocol, reports: readonly 
     if (!slots.has(key) || seen.has(key)) throw new TypeError('Paired report slot is invalid or repeated.');
     seen.add(key);
     const report = readReport(entry.path);
+    // Neither the synthetic runner nor a staged operator declaration proves
+    // that an agent saw advice or performed the declared operations.
+    const host = report.actualHost as { status?: string } | undefined;
+    if (host?.status !== 'unsupported' || 'pilot' in report
+      || (report.schemaVersion === 2 && report.status !== 'complete')
+      || (report.schemaVersion === 1 && (report.status !== 'incomplete'
+        || report.protocolDigest !== fixed.protocolDigest
+        || JSON.stringify(report.protocol) !== JSON.stringify(fixed)
+        || report.slotIndex !== fixed.order.findIndex(slot => slotKey(slot) === key)
+        || JSON.stringify(report.slot) !== JSON.stringify(entry.slot)
+        || report.conclusion !== 'performance-not-established'))
+      || (report.schemaVersion !== 1 && report.schemaVersion !== 2)) {
+      throw new TypeError('Paired report has no qualified host witness.');
+    }
     const expectedBuild = entry.slot.condition === 'disabled' ? fixed.baselineBuildId : fixed.candidateBuildId;
     const manifest = report.manifest as RunManifest;
     if (report.buildId !== expectedBuild || manifest.buildId !== expectedBuild
@@ -87,20 +166,6 @@ export function assessPairedReports(protocol: PairedProtocol, reports: readonly 
     if (entry.slot.condition === 'disabled') baselineManifest ??= manifest;
     else candidateManifest ??= manifest;
     if (baselineManifest && candidateManifest) assertComparable(baselineManifest, candidateManifest);
-    const host = report.actualHost as { status?: string; qualification?: string } | undefined;
-    const observation = report.pilot as (PilotTrial & { readonly integrationVersion?: string }) | undefined;
-    if (fixed.sourceVersions.aap === 'unsupported' || host?.status !== 'observed' || host.qualification !== 'verified'
-      || observation?.integrationVersion !== fixed.sourceVersions.aap) continue;
-    if (observation.scenarioId !== entry.slot.scenarioId || observation.pair !== entry.slot.pair
-      || observation.condition !== entry.slot.condition) throw new TypeError('Paired observation slot conflicts with report.');
-    const wall = observation.wallMilliseconds;
-    const overhead = observation.aelOverheadMilliseconds;
-    const measuredTokens = manifest.telemetry.tokens === 'available' && fixed.budgets.tokens !== null ? observation.tokens : null;
-    const exceeded = wall !== null && overhead !== null && wall + overhead > fixed.budgets.wallMilliseconds
-      || overhead !== null && overhead > fixed.budgets.aelOverheadMilliseconds
-      || measuredTokens !== null && fixed.budgets.tokens !== null && measuredTokens > fixed.budgets.tokens;
-    trials.push({ ...observation, tokens: measuredTokens,
-      safetyViolations: exceeded ? [...observation.safetyViolations, 'budget-exceeded'] : observation.safetyViolations });
   }
   const assessed = assessPairedPilot(trials);
   const complete = seen.size === fixed.order.length && trials.length === fixed.order.length;
@@ -115,10 +180,25 @@ export function assessPairedReports(protocol: PairedProtocol, reports: readonly 
 }
 
 function readReport(path: string): Record<string, unknown> {
-  if (statSync(path).size > maximumReportBytes) throw new TypeError('Paired report exceeds size bound.');
-  const report = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  let contents: string;
+  try {
+    const state = fstatSync(descriptor);
+    if (!state.isFile()) throw new TypeError('Paired report must be a regular file.');
+    if (state.size > maximumReportBytes) throw new TypeError('Paired report exceeds size bound.');
+    const bytes = Buffer.allocUnsafe(maximumReportBytes + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = readSync(descriptor, bytes, length, bytes.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    if (length > maximumReportBytes) throw new TypeError('Paired report exceeds size bound.');
+    contents = bytes.toString('utf8', 0, length);
+  } finally { closeSync(descriptor); }
+  const report = JSON.parse(contents) as Record<string, unknown>;
   const { reportDigest, ...body } = report;
-  if (typeof reportDigest !== 'string' || digest(JSON.stringify(body)) !== reportDigest || report.status !== 'complete'
+  if (typeof reportDigest !== 'string' || digest(JSON.stringify(body)) !== reportDigest
     || typeof report.manifest !== 'object' || report.manifest === null) throw new TypeError('Paired report was modified.');
   return report;
 }

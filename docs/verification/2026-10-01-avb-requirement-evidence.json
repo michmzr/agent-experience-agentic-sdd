@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "spec": "AVB",
+  "date": "2026-10-01",
+  "historicalManifest": "docs/verification/2026-09-30-ael-requirement-traceability.json",
+  "statusSemantics": {
+    "test-present": "A tagged repository test exists; it does not establish acceptance.",
+    "review-pending": "Local evidence exists but requirement acceptance has not been recorded.",
+    "unsupported": "A required actual-host acceptance input has not been observed."
+  },
+  "requirements": [
+    {
+      "requirement": "AVB-R1",
+      "acceptance": "AVB-A1",
+      "acceptanceStatus": "review-pending",
+      "testEvidence": { "status": "test-present", "paths": ["test/ael-value-benchmark.test.ts"] },
+      "runEvidence": { "status": "historical-scoped", "artifactPaths": ["docs/verification/2026-09-29-ael-value-benchmark-b0.md", "test/fixtures/ael-value-benchmark/current-main-b0.report.json"] }
+    },
+    {
+      "requirement": "AVB-R2",
+      "acceptance": "AVB-A2",
+      "acceptanceStatus": "review-pending",
+      "testEvidence": { "status": "test-present", "paths": ["test/ael-value-benchmark-runner.test.ts"] },
+      "runEvidence": { "status": "historical-scoped", "artifactPaths": ["docs/verification/2026-09-30-ael-eight-spec-integration.md"] }
+    },
+    {
+      "requirement": "AVB-R3",
+      "acceptance": "AVB-A3",
+      "acceptanceStatus": "review-pending",
+      "testEvidence": { "status": "test-present", "paths": ["test/ael-value-benchmark.test.ts"] },
+      "runEvidence": { "status": "historical-scoped", "artifactPaths": ["docs/verification/2026-09-30-ael-eight-spec-integration.md"] }
+    },
+    {
+      "requirement": "AVB-R4",
+      "acceptance": "AVB-A4",
+      "acceptanceStatus": "unsupported",
+      "testEvidence": { "status": "test-present", "paths": ["test/ael-value-benchmark.test.ts", "test/ael-value-benchmark-paired.test.ts", "test/ael-value-benchmark-trial-stage.test.ts"] },
+      "runEvidence": { "status": "incomplete", "artifactPaths": ["docs/verification/2026-10-01-avb-b2-development.md"], "hostSeries": "not-observed", "measuredBenefit": false }
+    },
+    {
+      "requirement": "AVB-R5",
+      "acceptance": "AVB-A5",
+      "acceptanceStatus": "unsupported",
+      "testEvidence": { "status": "test-present", "paths": ["test/ael-value-benchmark.test.ts", "test/ael-value-benchmark-paired.test.ts"] },
+      "runEvidence": { "status": "incomplete", "artifactPaths": ["docs/verification/2026-10-01-avb-b2-development.md"], "hostSeries": "not-observed", "measuredBenefit": false }
+    },
+    {
+      "requirement": "AVB-R6",
+      "acceptance": "AVB-A6",
+      "acceptanceStatus": "review-pending",
+      "testEvidence": { "status": "test-present", "paths": ["test/ael-value-traceability.test.ts"] },
+      "runEvidence": { "status": "local-check", "artifactPaths": ["docs/verification/2026-10-01-avb-a6-evidence.md"] }
+    }
+  ],
+  "externalRunScope": {
+    "qualificationProbe": "performed-no-hook-qualification",
+    "qualificationArtifactPath": "docs/verification/2026-10-01-aec-real-host-probe.md",
+    "benchmarkSeries": "not-observed"
+  },
+  "exclusions": {
+    "fullMilestones": ["M7", "M8", "M9"],
+    "syntheticAsHostEvidence": "excluded",
+    "netCostWithoutTokenTelemetry": "excluded",
+    "liveCloudMutations": "excluded"
+  }
+}

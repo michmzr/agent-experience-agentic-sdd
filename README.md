@@ -105,7 +105,10 @@ ael skill status --scope workspace|global [--workspace <directory>] [--json]
 ael skill validate <skill-directory> [--json]
 ael skill uninstall --scope workspace [--workspace <directory>] [--json]
 ael skill uninstall --scope global --yes [--json]
+ael benchmark real run --plan <frozen-plan.json> --codex-binary <absolute-path> --baseline-root <absolute-path> --candidate-root <absolute-path> --output <report.json>
 ```
+
+The current `b2-2/rev1` real benchmark scenario was rejected by an exploratory host probe. Its public command writes an incomplete report and stops before invoking the model. The older v2 plan performs preflight only.[^avb-real]
 
 For commands that need a repository or workspace, an explicit option wins. Otherwise AEL uses the nearest ancestor `.ael/workspace.json`, then the current Git root. An interactive terminal asks for a path only when neither source resolves context. JSON and redirected execution never prompt. Use `NO_COLOR=1` to disable ANSI styling while retaining the human-readable layout.
 
@@ -154,3 +157,5 @@ The import format accepts normalized sessions, events, observations, clusters, c
 Repository knowledge is written through the repository-knowledge storage boundary. Capture normalization and structured repository runtime directives use the same credential-aware argument classifier. Split, attached, assignment, environment, authorization-header, single-dash named, double-dash named, and tool-specific credential forms are rejected without retaining their values. Ambiguous one-character flags remain tool-specific. The CLI export command returns deterministic JSON only and does not turn local records into shared policy.
 
 Automatic runtime capture stores normalized events, observations, candidates, evidence, and lifecycle transitions in the private local SQLite database. Capture does not store raw transcripts or arbitrary payloads and does not change the synchronous decision when capture fails. Evidence cursors retain their high-water and filter fields as opaque adapter state so incremental capture does not reinterpret source-specific cursor semantics.
+
+[^avb-real]: [Cross-session exploratory record](docs/verification/2026-10-01-avb-cross-session-pre-freeze.md) and [public benchmark command](src/benchmark/real-command.ts).

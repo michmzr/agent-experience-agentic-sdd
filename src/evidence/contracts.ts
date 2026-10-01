@@ -33,7 +33,7 @@ export interface TypedAnnotationArtifact {
 export type SessionLifecycleState = 'open' | 'source-ended' | 'reconciled-complete' | 'incomplete';
 export type OperationOutcome = 'process-succeeded' | 'command-failed' | 'task-verification-failed' | 'unknown';
 export type EvidenceObservationKind = 'request' | 'result' | 'task-verification' | 'human-wait';
-export type ResultProvenance = 'hook-envelope' | 'async-completion';
+export type ResultProvenance = 'hook-envelope' | 'async-completion' | 'cli-json-item';
 export type ResultUnknownReason = 'source-field-absent' | 'result-not-delivered' | 'awaiting-async-completion' | 'correlation-missing' | 'unsupported-result-shape' | 'privacy-redacted' | 'legacy-record';
 export type ResultInterpretationKind = 'no-match' | 'interrupted' | 'environment-limited' | 'failed-test' | 'expected-red' | 'unclassified-nonzero' | 'unknown';
 

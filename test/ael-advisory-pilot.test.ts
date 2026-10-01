@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { AdvisoryConfigurationStore } from '../src/advice/configuration.js';
@@ -109,6 +110,8 @@ test('AAP-A3 public record distinguishes agent delivery claim from verified appl
         { workingDirectory: repositoryRoot });
     };
     assert.equal(record({ ...scope, bundleId: bundle.id, kind: 'delivered', origin: 'agent-claim', witnessRef: 'claim-b' }).exitCode, 0);
+    assert.equal(record({ ...scope, bundleId: bundle.id, kind: 'delivered', origin: 'host-challenge',
+      witnessRef: `codex-exposure:v1:${'a'.repeat(64)}` }).exitCode, 1);
     assert.equal(record({ ...scope, bundleId: bundle.id, kind: 'selected', origin: 'agent-selection', witnessRef: 'selection-b' }).exitCode, 0);
     assert.deepEqual(usage.facts(bundle.id).map(fact => [fact.kind, fact.origin]), [
       ['retrieved', 'cli-retrieval'], ['delivered', 'agent-claim'], ['selected', 'agent-selection']
@@ -176,13 +179,20 @@ test('AAP-A3 public application and outcome link captured operation to resolved 
       return runCli(['advice', 'record', '--input', inputPath, '--data-dir', dataDir, '--json'],
         { workingDirectory: repositoryRoot });
     };
+    const legacy = new DatabaseSync(advicePath);
+    try {
+      const insert = legacy.prepare(`INSERT INTO advice_usage_facts
+        (bundle_id, kind, origin, witness_ref, recorded_at) VALUES (?, ?, ?, ?, ?)`);
+      insert.run(bundle.id, 'delivered', 'cli-output', 'legacy-output', '2026-09-30T09:00:01.000Z');
+      insert.run(bundle.id, 'selected', 'agent-selection', 'legacy-selection', '2026-09-30T09:00:02.000Z');
+    } finally { legacy.close(); }
     assert.equal(record('delivered', 'agent-claim', 'delivery-b').exitCode, 0);
     assert.equal(record('selected', 'agent-selection', 'selection-b').exitCode, 0);
     assert.equal(record('applied', 'operation-evidence', oldRequest.id).exitCode, 1);
     assert.equal(record('applied', 'operation-evidence', request.id).exitCode, 0);
     assert.equal(record('outcome-observed', 'verification-evidence', evidenceId).exitCode, 0);
     assert.deepEqual(usage.facts(bundle.id).map(fact => fact.kind),
-      ['retrieved', 'delivered', 'selected', 'applied', 'outcome-observed']);
+      ['retrieved', 'delivered', 'selected', 'delivered', 'selected', 'applied', 'outcome-observed']);
     assert.equal(record('outcome-observed', 'verification-evidence', 'unknown-evidence').exitCode, 1);
     const lateScope = { ...scope, lessonRevision: '2' };
     const lateUsage = new AdvisoryUsageStore(advicePath,
