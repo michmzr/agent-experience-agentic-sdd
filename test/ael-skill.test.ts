@@ -97,6 +97,27 @@ test('validates, installs, updates, and protects managed AEL skills', () => {
   }
 });
 
+test('updates an intact managed skill with an older documentation snapshot', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ael-skill-older-snapshot-'));
+  const workspace = join(root, 'workspace');
+  const home = join(root, 'home');
+  try {
+    mkdirSync(workspace); mkdirSync(home);
+    const location = { source: skillDirectory, scope: 'workspace' as const, workspace, home };
+    const destination = installAelSkill(location).destination;
+    const manifestPath = join(destination, '.ael-skill.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { documentationSnapshotDate: string };
+    manifest.documentationSnapshotDate = '2026-09-03';
+    writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+
+    assert.equal(inspectAelSkill(location).status, 'code-changed');
+    assert.equal(updateAelSkill(location).status, 'updated');
+    assert.equal(inspectAelSkill(location).status, 'current');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('exposes a scoped skill CLI with explicit global confirmation', () => {
   const root = mkdtempSync(join(tmpdir(), 'ael-skill-cli-'));
   const workspace = join(root, 'workspace');

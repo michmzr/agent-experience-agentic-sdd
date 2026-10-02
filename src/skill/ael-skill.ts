@@ -159,8 +159,9 @@ function validateInstalled(directory: string): { readonly status: 'valid' | 'inv
     const declared = parseManifest(raw);
     if (declared === undefined) return { status: 'invalid' };
     const files = readArtifactFiles(directory, true);
-    const actual = createManifest(files);
-    return manifestsEqual(declared, actual) ? { status: 'valid', manifest: actual } : { status: 'invalid' };
+    return artifactFiles.every((path) => declared.files[path] === sha256(files[path]))
+      ? { status: 'valid', manifest: declared }
+      : { status: 'invalid' };
   } catch {
     return { status: 'invalid' };
   }
